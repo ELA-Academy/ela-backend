@@ -1,0 +1,46 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# Database / Migrations
+migrations/
+*.sqlite3
+*.db
+
+# Environment variables & secrets
+.env
+.env.*
+*.pem
+*.key
+*.pub
+certs/
+secrets/
+id_*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# AI Agent files / directories
+.gemini/
+.antigravity/
+.cursor/
+.cursorrules
+.clinerules
+.copilot/
+brain/
+.system_generated/
+scratch/
+
+# Ignore all markdown files (user request)
+*.md

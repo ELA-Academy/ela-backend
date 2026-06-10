@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>New Notification</title>
+    <style>
+      /* Basic Resets */
+      body {
+        margin: 0;
+        padding: 0;
+        -webkit-text-size-adjust: 100%;
+        width: 100% !important;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      img {
+        border: 0;
+        height: auto;
+        line-height: 100%;
+        outline: none;
+        text-decoration: none;
+      }
+
+      /* Main Styles */
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        background-color: #f8f9fc;
+      }
+      .container {
+        max-width: 600px;
+        margin: 20px auto;
+        background-color: #ffffff;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+        overflow: hidden;
+        border: 1px solid #e5e7eb;
+      }
+      .header {
+        background-color: #4f46e5;
+        padding: 32px;
+        text-align: center;
+        color: #ffffff;
+      }
+      .header h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 600;
+      }
+      .header svg {
+        margin-bottom: 16px;
+      }
+      .content {
+        padding: 32px;
+        color: #1f2937;
+        line-height: 1.6;
+        font-size: 16px;
+      }
+      .content p {
+        margin: 0 0 16px;
+      }
+      .content .salutation {
+        margin-bottom: 24px;
+      }
+      .button-wrapper {
+        text-align: center;
+        margin: 32px 0;
+      }
+      .button {
+        display: inline-block;
+        padding: 14px 28px;
+        background-color: #4f46e5;
+        color: #ffffff;
+        text-decoration: none;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 16px;
+      }
+      .footer {
+        background-color: #f8f9fc;
+        padding: 24px;
+        text-align: center;
+        font-size: 12px;
+        color: #6b7280;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <!-- Bell SVG Icon for a professional touch -->
+        <svg
+          width="48"
+          height="48"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M18 8C18 6.4087 17.3679 4.88258 16.2426 3.75736C15.1174 2.63214 13.5913 2 12 2C10.4087 2 8.88258 2.63214 7.75736 3.75736C6.63214 4.88258 6 6.4087 6 8C6 15 3 17 3 17H21C21 17 18 15 18 8Z"
+            stroke="#ffffff"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M13.73 21C13.5542 21.3031 13.3019 21.5547 12.9982 21.7295C12.6946 21.9044 12.3504 22.0001 12 22C11.6496 22.0001 11.3054 21.9044 11.0018 21.7295C10.6982 21.5547 10.4458 21.3031 10.27 21"
+            stroke="#ffffff"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <h1>New Notification</h1>
+      </div>
+      <div class="content">
+        <p class="salutation">Hello,</p>
+
+        <!-- The notification message is injected here -->
+        <p>{{ message }}</p>
+
+        <!-- The button will only appear if a link is provided -->
+        {% if action_link %}
+        <div class="button-wrapper">
+          <a href="{{ action_link }}" class="button">View Details</a>
+        </div>
+        {% endif %}
+      </div>
+      <div class="footer">
+        <p>
+          This is an automated notification from the School Management System.
+        </p>
+      </div>
+    </div>
+  </body>
+</html>
