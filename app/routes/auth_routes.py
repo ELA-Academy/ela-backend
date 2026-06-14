@@ -16,21 +16,35 @@ def login():
 
     staff_member = Staff.query.filter_by(email=email).first()
 
-    if not staff_member or not staff_member.is_active or not staff_member.check_password(password):
-        return jsonify({"msg": "Invalid credentials"}), 401
+    if staff_member:
+        if not staff_member.is_active or not staff_member.check_password(password):
+            return jsonify({"msg": "Invalid credentials"}), 401
 
-    # Add the staff member's database ID to the token payload.
-    additional_claims = {
-        "id": staff_member.id, # Add this line
-        "name": staff_member.name,
-        "departmentNames": [d.name for d in staff_member.departments],
-        "dashboardRoutes": [d.dashboard_route for d in staff_member.departments if d.dashboard_route],
-        "role": "staff"
-    }
-    
-    access_token = create_access_token(identity=staff_member.email, additional_claims=additional_claims)
-    
-    return jsonify(access_token=access_token), 200
+        additional_claims = {
+            "id": staff_member.id,
+            "name": staff_member.name,
+            "departmentNames": [d.name for d in staff_member.departments],
+            "dashboardRoutes": [d.dashboard_route for d in staff_member.departments if d.dashboard_route],
+            "role": "staff"
+        }
+        access_token = create_access_token(identity=staff_member.email, additional_claims=additional_claims)
+        return jsonify(access_token=access_token), 200
+
+    admin_member = SuperAdmin.query.filter_by(email=email).first()
+
+    if admin_member:
+        if not admin_member.is_active or not admin_member.check_password(password):
+            return jsonify({"msg": "Invalid credentials"}), 401
+
+        additional_claims = {
+            "id": admin_member.id,
+            "role": "superadmin",
+            "name": admin_member.name
+        }
+        access_token = create_access_token(identity=admin_member.email, additional_claims=additional_claims)
+        return jsonify(access_token=access_token), 200
+
+    return jsonify({"msg": "Invalid credentials"}), 401
 
 @auth_bp.route('/verify-setup-token', methods=['POST'])
 def verify_setup_token():
