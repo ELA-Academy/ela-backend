@@ -6,8 +6,8 @@ class ConversationParticipant(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False)
-    staff_id = db.Column(db.Integer, db.ForeignKey('staff.id'), nullable=True)
-    super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id'), nullable=True)
+    staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
+    super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
     last_read_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     
     # New field to track the last time an email/push notification was sent
