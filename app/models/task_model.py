@@ -3,13 +3,13 @@ from datetime import datetime
 
 # Many-to-Many association tables
 task_department_assignments = db.Table('task_department_assignments',
-    db.Column('task_id', db.Integer, db.ForeignKey('tasks.id'), primary_key=True),
-    db.Column('department_id', db.Integer, db.ForeignKey('departments.id'), primary_key=True)
+    db.Column('task_id', db.Integer, db.ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('department_id', db.Integer, db.ForeignKey('departments.id', ondelete='CASCADE'), primary_key=True)
 )
 
 task_staff_assignments = db.Table('task_staff_assignments',
-    db.Column('task_id', db.Integer, db.ForeignKey('tasks.id'), primary_key=True),
-    db.Column('staff_id', db.Integer, db.ForeignKey('staff.id'), primary_key=True)
+    db.Column('task_id', db.Integer, db.ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('staff_id', db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), primary_key=True)
 )
 
 class Task(db.Model):
@@ -23,7 +23,7 @@ class Task(db.Model):
     due_date = db.Column(db.DateTime, nullable=True)
     
     lead_id = db.Column(db.Integer, db.ForeignKey('leads.id'), nullable=False)
-    created_by_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id'), nullable=False)
+    created_by_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='SET NULL'), nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     

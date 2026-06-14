@@ -20,7 +20,10 @@ def create_staff():
     if not actor:
         return jsonify({"error": "Unauthorized actor"}), 401
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+        
     name = data.get('name')
     email = data.get('email')
     password = data.get('password')
@@ -126,6 +129,10 @@ def delete_staff(id):
     # Log before deleting
     log_activity(actor, f"Deleted staff member: '{staff.name}'", staff)
 
-    db.session.delete(staff)
-    db.session.commit()
-    return jsonify({"message": "Staff member deleted successfully"}), 200
+    try:
+        db.session.delete(staff)
+        db.session.commit()
+        return jsonify({"message": "Staff member deleted successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Could not delete staff member. They may have associated records. Please reassign or remove their tasks first."}), 409

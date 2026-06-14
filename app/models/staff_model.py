@@ -3,8 +3,8 @@ from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 
 staff_department_assignments = db.Table('staff_department_assignments',
-    db.Column('staff_id', db.Integer, db.ForeignKey('staff.id'), primary_key=True),
-    db.Column('department_id', db.Integer, db.ForeignKey('departments.id'), primary_key=True)
+    db.Column('staff_id', db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('department_id', db.Integer, db.ForeignKey('departments.id', ondelete='CASCADE'), primary_key=True)
 )
 
 class Staff(db.Model):
