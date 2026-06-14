@@ -21,3 +21,33 @@ def send_otp_email(mail, recipient_email, otp):
     except Exception as e:
         current_app.logger.error(f"Failed to send email to {recipient_email}: {e}")
         return False
+
+def send_staff_invite_email(mail, recipient_email, recipient_name, invite_link):
+    """Sends an invite email to a new staff member with their setup password link."""
+    try:
+        msg = Message(
+            'Welcome to ELA Academy - Set Up Your Account',
+            sender=current_app.config['MAIL_DEFAULT_SENDER'],
+            recipients=[recipient_email]
+        )
+        msg.body = f"Hello {recipient_name},\n\nYou have been added as a staff member at ELA Academy.\n\nPlease click the following link to set up your password and access your dashboard:\n\n{invite_link}\n\nThis link will expire in 7 days.\n\nBest regards,\nELA Academy Team"
+        mail.send(msg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Failed to send invite email to {recipient_email}: {e}")
+        return False
+
+def send_invite_email(mail, recipient_email, recipient_name, invite_link, role_name="member"):
+    """Sends an invite email to a new user with their setup password link."""
+    try:
+        msg = Message(
+            'Welcome to ELA Academy - Set Up Your Account',
+            sender=current_app.config['MAIL_DEFAULT_SENDER'],
+            recipients=[recipient_email]
+        )
+        msg.body = f"Hello {recipient_name},\n\nYou have been added as a {role_name} at ELA Academy.\n\nPlease click the following link to set up your password and access your dashboard:\n\n{invite_link}\n\nThis link will expire in 7 days.\n\nBest regards,\nELA Academy Team"
+        mail.send(msg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Failed to send invite email to {recipient_email}: {e}")
+        return False

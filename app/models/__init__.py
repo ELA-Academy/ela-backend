@@ -25,6 +25,16 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('boards'):
         add_column_if_missing('boards', 'is_private', 'BOOLEAN NOT NULL DEFAULT FALSE')
 
+    if inspector.has_table('board_tasks'):
+        add_column_if_missing('board_tasks', 'start_date', 'DATE NULL')
+        add_column_if_missing('board_tasks', 'category', 'VARCHAR(100) NULL')
+        add_column_if_missing('board_tasks', 'recurring_settings', 'VARCHAR(255) NULL')
+        add_column_if_missing('board_tasks', 'dependency_task_id', 'INTEGER NULL')
+        add_column_if_missing('board_tasks', 'parent_task_id', 'INTEGER NULL')
+        add_column_if_missing('board_tasks', 'tags', 'TEXT NULL')
+        add_column_if_missing('board_tasks', 'description_html', 'TEXT NULL')
+        add_column_if_missing('board_tasks', 'time_estimate_minutes', 'INTEGER NULL')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
@@ -53,7 +63,7 @@ def init_db(app):
         from app.models.subsidy_transaction_model import SubsidyTransaction, SubsidyPaymentDistribution
         
         # Workspace Collaboration Models
-        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask
+        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc
         from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike
         
         db.create_all()

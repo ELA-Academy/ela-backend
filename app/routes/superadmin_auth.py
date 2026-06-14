@@ -186,8 +186,8 @@ def create_super_admin():
     email = data.get('email')
     password = data.get('password')
 
-    if not all([name, email, password]):
-        return jsonify({"error": "Name, email, and password are required."}), 400
+    if not name or not email:
+        return jsonify({"error": "Name and email are required."}), 400
 
     if SuperAdmin.query.filter_by(email=email).first():
         return jsonify({"error": "Email already in use"}), 409
@@ -197,11 +197,38 @@ def create_super_admin():
         email=email,
         is_active=data.get('is_active', True)
     )
+    
+    is_invite = False
+    if not password:
+        import uuid
+        password = uuid.uuid4().hex
+        is_invite = True
+
     new_admin.set_password(password)
     db.session.add(new_admin)
     db.session.flush()
 
     log_activity(actor, f"Created super admin account for '{new_admin.name}'", new_admin)
+    
+    if is_invite:
+        from flask_jwt_extended import create_access_token
+        from datetime import timedelta
+        from app import mail
+        from app.utils.email_otp import send_invite_email
+        import os
+
+        # Generate setup token
+        setup_token = create_access_token(
+            identity=email,
+            additional_claims={"purpose": "setup-password", "name": name},
+            expires_delta=timedelta(days=7)
+        )
+        
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+        invite_link = f"{frontend_url}/setup-password?token={setup_token}"
+        
+        send_invite_email(mail, email, name, invite_link, role_name="superadmin")
+
     db.session.commit()
 
     return jsonify(new_admin.to_dict()), 201

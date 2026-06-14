@@ -62,4 +62,30 @@ def mark_all_as_read():
         return jsonify({"message": "No notifications to mark"}), 200
 
     db.session.commit()
-    return jsonify({"message": "All notifications marked as read"}), 200
+    return jsonify({"message": "All notifications marked as read"}), 200
+
+@notification_bp.route('/<int:notification_id>/read', methods=['POST'])
+@jwt_required()
+def mark_as_read(notification_id):
+    claims = get_jwt()
+    role = claims.get('role')
+    current_user_email = get_jwt_identity()
+    
+    notification = Notification.query.get(notification_id)
+    if not notification:
+        return jsonify({"error": "Notification not found"}), 404
+        
+    if role == 'superadmin':
+        admin = SuperAdmin.query.filter_by(email=current_user_email).first()
+        if not admin or notification.super_admin_id != admin.id:
+            return jsonify({"error": "Unauthorized"}), 401
+    elif role == 'staff':
+        staff = Staff.query.filter_by(email=current_user_email).first()
+        if not staff or notification.staff_id != staff.id:
+            return jsonify({"error": "Unauthorized"}), 401
+    else:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    notification.is_read = True
+    db.session.commit()
+    return jsonify(notification.to_dict()), 200

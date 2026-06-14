@@ -15,7 +15,10 @@ if os.getenv('FLASK_ENV') == 'production':
 else:
     load_dotenv()
 
+from flask_socketio import SocketIO
+
 mail = Mail()
+socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
@@ -27,18 +30,19 @@ def create_app():
 
     # The resource path must match all nested API routes.
     # The pattern r"/api/*" allows any path that starts with /api/.
-    origins = os.getenv('CORS_ORIGINS', 'http://localhost:5173').split(',')
-    
+    cors_origins_env = os.getenv('CORS_ORIGINS', 'http://localhost:5173')
+    origins = [o.strip().strip("'").strip('"') for o in cors_origins_env.split(',')]
+
     CORS(
         app, 
         resources={r"/api/*": {"origins": origins}}, 
         supports_credentials=True,
         allow_headers=["Authorization", "Content-Type"]
     )
-    # --- END OF FINAL FIX ---
     
     jwt = JWTManager(app)
     mail.init_app(app)
+    socketio.init_app(app, cors_allowed_origins=origins)
     init_db(app)
     Migrate(app, db)
     

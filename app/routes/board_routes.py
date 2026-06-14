@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -285,9 +285,114 @@ def create_task(group_id):
     position = (last_task.position + 1) if last_task else 0
 
     new_task = BoardTask(group_id=group.id, title=title, position=position)
-    db.session.add(new_task)
-    db.session.commit()
+    
+    if 'status' in data:
+        new_task.status = data['status']
+    if 'priority' in data:
+        new_task.priority = data['priority']
+    if 'notes' in data:
+        new_task.notes = data['notes']
+    if 'category' in data:
+        new_task.category = data['category']
+    if 'recurring_settings' in data:
+        new_task.recurring_settings = data['recurring_settings']
+    if 'dependency_task_id' in data:
+        new_task.dependency_task_id = data['dependency_task_id']
+    if 'parent_task_id' in data:
+        new_task.parent_task_id = data['parent_task_id']
+    if 'tags' in data:
+        new_task.tags = data['tags']
+    if 'description_html' in data:
+        new_task.description_html = data['description_html']
+        
+    if data.get('start_date'):
+        try:
+            new_task.start_date = datetime.strptime(data['start_date'].split('T')[0], "%Y-%m-%d").date()
+        except ValueError:
+            pass
 
+    if data.get('due_date'):
+        date_str = data['due_date']
+        try:
+            new_task.due_date = datetime.strptime(date_str.split('T')[0], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+    if 'assignee_id' in data and 'assignee_role' in data:
+        assignee_id = data['assignee_id']
+        assignee_role = data['assignee_role']
+        if assignee_id:
+            if assignee_role == 'superadmin':
+                new_task.responsible_super_admin_id = assignee_id
+            else:
+                new_task.responsible_staff_id = assignee_id
+
+    db.session.add(new_task)
+    db.session.flush()
+
+    # Log task creation in task history
+    from app.models.board_model import BoardTaskHistory
+    db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name=actor.name, action="Created task"))
+
+    # Mentions handling inside Task Notes or HTML description
+    mentions = data.get('mentions', [])
+    if mentions and (new_task.notes or new_task.description_html):
+        content = new_task.notes or new_task.description_html
+        new_update = TaskUpdate(task_id=new_task.id, content=content, sender_name=actor.name)
+        if role == 'superadmin':
+            new_update.sender_super_admin_id = actor.id
+        else:
+            new_update.sender_staff_id = actor.id
+        db.session.add(new_update)
+        db.session.flush()
+
+        notified_user_keys = set()
+        for mention in mentions:
+            mention_type = mention.get('type')
+            mention_id = mention.get('id')
+            message = f"{actor.name} @mentioned you in task '{new_task.title}' on board '{board.name}'"
+
+            if mention_type == 'staff':
+                key = f"staff_{mention_id}"
+                if key not in notified_user_keys:
+                    notified_user_keys.add(key)
+                    db.session.add(Notification(
+                        message=message,
+                        category='mention',
+                        staff_id=mention_id,
+                        target_type='Board',
+                        target_id=board.id,
+                        target_link=f"/admin/boards/{board.id}?task={new_task.id}"
+                    ))
+            elif mention_type == 'superadmin':
+                key = f"superadmin_{mention_id}"
+                if key not in notified_user_keys:
+                    notified_user_keys.add(key)
+                    db.session.add(Notification(
+                        message=message,
+                        category='mention',
+                        super_admin_id=mention_id,
+                        target_type='Board',
+                        target_id=board.id,
+                        target_link=f"/admin/boards/{board.id}?task={new_task.id}"
+                    ))
+            elif mention_type == 'department':
+                department = Department.query.get(mention_id)
+                if department:
+                    for member in department.staff_members:
+                        key = f"staff_{member.id}"
+                        if key not in notified_user_keys and (role != 'staff' or actor.id != member.id):
+                            notified_user_keys.add(key)
+                            db.session.add(Notification(
+                                message=f"{actor.name} @mentioned your department ({department.name}) in task '{new_task.title}' on board '{board.name}'",
+                                category='mention',
+                                staff_id=member.id,
+                                target_type='Board',
+                                target_id=board.id,
+                                target_link=f"/admin/boards/{board.id}?task={new_task.id}"
+                            ))
+
+    db.session.commit()
     return jsonify(new_task.to_dict()), 201
 
 
@@ -303,36 +408,82 @@ def update_task(task_id):
     old_assignee_staff = task.responsible_staff_id
     old_assignee_admin = task.responsible_super_admin_id
 
-    if 'title' in data:
+    from app.models.board_model import BoardTaskHistory
+    changes = []
+
+    if 'title' in data and data['title'] != task.title:
+        changes.append(f"Changed name from '{task.title}' to '{data['title']}'")
         task.title = data['title']
-    if 'status' in data:
+    if 'status' in data and data['status'] != task.status:
+        changes.append(f"Changed status from '{task.status}' to '{data['status']}'")
         task.status = data['status']
-    if 'priority' in data:
+    if 'priority' in data and data['priority'] != task.priority:
+        changes.append(f"Changed priority from '{task.priority}' to '{data['priority']}'")
         task.priority = data['priority']
-    if 'notes' in data:
+    if 'notes' in data and data['notes'] != task.notes:
         task.notes = data['notes']
+    if 'category' in data and data['category'] != task.category:
+        changes.append(f"Changed category to '{data['category']}'")
+        task.category = data['category']
+    if 'recurring_settings' in data and data['recurring_settings'] != task.recurring_settings:
+        task.recurring_settings = data['recurring_settings']
+    if 'dependency_task_id' in data and data['dependency_task_id'] != task.dependency_task_id:
+        task.dependency_task_id = data['dependency_task_id']
+    if 'parent_task_id' in data and data['parent_task_id'] != task.parent_task_id:
+        task.parent_task_id = data['parent_task_id']
+    if 'tags' in data and data['tags'] != task.tags:
+        task.tags = data['tags']
+    if 'description_html' in data and data['description_html'] != task.description_html:
+        task.description_html = data['description_html']
+
+    if 'start_date' in data:
+        date_str = data['start_date']
+        if date_str:
+            try:
+                val = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                val = None
+        else:
+            val = None
+        if val != task.start_date:
+            changes.append(f"Changed start date to '{date_str}'")
+            task.start_date = val
+
     if 'due_date' in data:
         date_str = data['due_date']
         if date_str:
             try:
-                task.due_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                val = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
-                task.due_date = None
+                val = None
         else:
-            task.due_date = None
+            val = None
+        if val != task.due_date:
+            changes.append(f"Changed due date to '{date_str}'")
+            task.due_date = val
 
     if 'assignee_id' in data and 'assignee_role' in data:
         assignee_id = data['assignee_id']
         assignee_role = data['assignee_role']
         if not assignee_id:
+            if task.responsible_staff_id or task.responsible_super_admin_id:
+                changes.append("Removed assignee")
             task.responsible_staff_id = None
             task.responsible_super_admin_id = None
         elif assignee_role == 'superadmin':
+            if task.responsible_super_admin_id != assignee_id:
+                changes.append("Changed assignee")
             task.responsible_super_admin_id = assignee_id
             task.responsible_staff_id = None
         else:
+            if task.responsible_staff_id != assignee_id:
+                changes.append("Changed assignee")
             task.responsible_staff_id = assignee_id
             task.responsible_super_admin_id = None
+
+    # Save changes in history
+    for change in changes:
+        db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=change))
 
     db.session.commit()
 
@@ -518,3 +669,597 @@ def create_reply(update_id):
     db.session.add(reply)
     db.session.commit()
     return jsonify(reply.to_dict()), 201
+
+
+# Checklist items
+@board_bp.route('/tasks/<int:task_id>/checklists', methods=['POST'])
+@jwt_required()
+def add_checklist_item(task_id):
+    actor, role = get_actor()
+    task, board = get_task_and_board_or_403(task_id, actor, role)
+    if not task:
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    title = data.get('title')
+    if not title:
+        return jsonify({"error": "Checklist item title is required"}), 400
+
+    from app.models.board_model import BoardTaskChecklistItem
+    last_item = BoardTaskChecklistItem.query.filter_by(task_id=task.id).order_by(BoardTaskChecklistItem.position.desc()).first()
+    position = (last_item.position + 1) if last_item else 0
+
+    new_item = BoardTaskChecklistItem(task_id=task.id, title=title, position=position)
+    db.session.add(new_item)
+    db.session.commit()
+    return jsonify(new_item.to_dict()), 201
+
+
+@board_bp.route('/tasks/checklists/<int:item_id>', methods=['PUT'])
+@jwt_required()
+def update_checklist_item(item_id):
+    actor, role = get_actor()
+    from app.models.board_model import BoardTaskChecklistItem
+    item = BoardTaskChecklistItem.query.get_or_404(item_id)
+    if not ensure_board_access(item.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    if 'is_checked' in data:
+        item.is_checked = bool(data['is_checked'])
+    if 'title' in data:
+        item.title = data['title']
+    if 'position' in data:
+        item.position = data['position']
+
+    db.session.commit()
+    return jsonify(item.to_dict()), 200
+
+
+@board_bp.route('/tasks/checklists/<int:item_id>', methods=['DELETE'])
+@jwt_required()
+def delete_checklist_item(item_id):
+    actor, role = get_actor()
+    from app.models.board_model import BoardTaskChecklistItem
+    item = BoardTaskChecklistItem.query.get_or_404(item_id)
+    if not ensure_board_access(item.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"message": "Checklist item deleted successfully"}), 200
+
+
+# Watchers / Followers
+@board_bp.route('/tasks/<int:task_id>/watchers', methods=['POST'])
+@jwt_required()
+def add_task_watcher(task_id):
+    actor, role = get_actor()
+    task, board = get_task_and_board_or_403(task_id, actor, role)
+    if not task:
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    watcher_id = data.get('watcher_id')
+    watcher_role = data.get('watcher_role')
+
+    if not watcher_id or not watcher_role:
+        return jsonify({"error": "Watcher ID and role are required"}), 400
+
+    from app.models.board_model import BoardTaskWatcher
+    if watcher_role == 'superadmin':
+        existing = BoardTaskWatcher.query.filter_by(task_id=task.id, super_admin_id=watcher_id).first()
+    else:
+        existing = BoardTaskWatcher.query.filter_by(task_id=task.id, staff_id=watcher_id).first()
+
+    if existing:
+        return jsonify(existing.to_dict()), 200
+
+    new_watcher = BoardTaskWatcher(
+        task_id=task.id,
+        staff_id=watcher_id if watcher_role != 'superadmin' else None,
+        super_admin_id=watcher_id if watcher_role == 'superadmin' else None
+    )
+    db.session.add(new_watcher)
+    db.session.commit()
+    return jsonify(new_watcher.to_dict()), 201
+
+
+@board_bp.route('/tasks/<int:task_id>/watchers', methods=['DELETE'])
+@jwt_required()
+def remove_task_watcher(task_id):
+    actor, role = get_actor()
+    task, board = get_task_and_board_or_403(task_id, actor, role)
+    if not task:
+        return jsonify({"error": "Forbidden"}), 403
+
+    watcher_id = request.args.get('watcher_id', type=int)
+    watcher_role = request.args.get('watcher_role')
+
+    if not watcher_id or not watcher_role:
+        return jsonify({"error": "Watcher ID and role are required"}), 400
+
+    from app.models.board_model import BoardTaskWatcher
+    if watcher_role == 'superadmin':
+        watcher = BoardTaskWatcher.query.filter_by(task_id=task.id, super_admin_id=watcher_id).first()
+    else:
+        watcher = BoardTaskWatcher.query.filter_by(task_id=task.id, staff_id=watcher_id).first()
+
+    if watcher:
+        db.session.delete(watcher)
+        db.session.commit()
+
+    return jsonify({"message": "Watcher removed successfully"}), 200
+
+
+# Attachments
+@board_bp.route('/tasks/<int:task_id>/attachments', methods=['POST'])
+@jwt_required()
+def upload_attachment(task_id):
+    actor, role = get_actor()
+    task, board = get_task_and_board_or_403(task_id, actor, role)
+    if not task:
+        return jsonify({"error": "Forbidden"}), 403
+
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    import os
+    import uuid
+    from werkzeug.utils import secure_filename
+    from flask import current_app
+
+    upload_folder = os.path.join(current_app.root_path, 'static', 'uploads')
+    os.makedirs(upload_folder, exist_ok=True)
+
+    filename = secure_filename(file.filename)
+    unique_filename = f"{uuid.uuid4().hex}_{filename}"
+    file_path = os.path.join(upload_folder, unique_filename)
+    file.save(file_path)
+
+    relative_path = f"/static/uploads/{unique_filename}"
+
+    from app.models.board_model import BoardTaskAttachment
+    new_attachment = BoardTaskAttachment(
+        task_id=task.id,
+        filename=filename,
+        file_path=relative_path,
+        uploaded_by_name=actor.name
+    )
+    db.session.add(new_attachment)
+    db.session.commit()
+
+    # Log attachment in history
+    from app.models.board_model import BoardTaskHistory
+    db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=f"Uploaded attachment: '{filename}'"))
+    db.session.commit()
+
+    return jsonify(new_attachment.to_dict()), 201
+
+
+@board_bp.route('/tasks/attachments/<int:attachment_id>', methods=['DELETE'])
+@jwt_required()
+def delete_attachment(attachment_id):
+    actor, role = get_actor()
+    from app.models.board_model import BoardTaskAttachment
+    attachment = BoardTaskAttachment.query.get_or_404(attachment_id)
+    if not ensure_board_access(attachment.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    import os
+    from flask import current_app
+    file_path = os.path.join(current_app.root_path, attachment.file_path.lstrip('/'))
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    # Log deletion in history
+    from app.models.board_model import BoardTaskHistory
+    db.session.add(BoardTaskHistory(task_id=attachment.task_id, actor_name=actor.name, action=f"Deleted attachment: '{attachment.filename}'"))
+
+    db.session.delete(attachment)
+    db.session.commit()
+    return jsonify({"message": "Attachment deleted successfully"}), 200
+
+
+# History Log
+@board_bp.route('/tasks/<int:task_id>/history', methods=['GET'])
+@jwt_required()
+def get_task_history(task_id):
+    actor, role = get_actor()
+    task, board = get_task_and_board_or_403(task_id, actor, role)
+    if not task:
+        return jsonify({"error": "Forbidden"}), 403
+
+    history = task.history_logs
+    return jsonify([h.to_dict() for h in history]), 200
+
+
+# Task Templates
+@board_bp.route('/task-templates', methods=['GET'])
+@jwt_required()
+def get_task_templates():
+    from app.models.board_model import BoardTaskTemplate
+    templates = BoardTaskTemplate.query.order_by(BoardTaskTemplate.created_at.desc()).all()
+    return jsonify([t.to_dict() for t in templates]), 200
+
+
+@board_bp.route('/task-templates', methods=['POST'])
+@jwt_required()
+def create_task_template():
+    data = request.get_json() or {}
+    title = data.get('title')
+    if not title:
+        return jsonify({"error": "Template title is required"}), 400
+
+    from app.models.board_model import BoardTaskTemplate
+    new_template = BoardTaskTemplate(
+        title=title,
+        notes=data.get('notes'),
+        priority=data.get('priority', 'Normal'),
+        category=data.get('category'),
+        tags=data.get('tags')
+    )
+    db.session.add(new_template)
+    db.session.commit()
+    return jsonify(new_template.to_dict()), 201
+
+
+@board_bp.route('/task-templates/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+def delete_task_template(template_id):
+    from app.models.board_model import BoardTaskTemplate
+    template = BoardTaskTemplate.query.get_or_404(template_id)
+    db.session.delete(template)
+    db.session.commit()
+    return jsonify({"message": "Template deleted successfully"}), 200
+
+
+# ─── Calendar Events ─────────────────────────────────────────
+
+@board_bp.route('/calendar-events', methods=['GET'])
+@jwt_required()
+def get_calendar_events():
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    start = request.args.get('start')
+    end = request.args.get('end')
+    board_id = request.args.get('board_id', type=int)
+
+    query = CalendarEvent.query
+    if board_id:
+        query = query.filter_by(board_id=board_id)
+    if start:
+        query = query.filter(CalendarEvent.start_datetime >= start)
+    if end:
+        query = query.filter(CalendarEvent.start_datetime <= end)
+
+    events = query.order_by(CalendarEvent.start_datetime.asc()).all()
+    return jsonify([e.to_dict() for e in events]), 200
+
+
+@board_bp.route('/calendar-events', methods=['POST'])
+@jwt_required()
+def create_calendar_event():
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json()
+    if not data or not data.get('title') or not data.get('start_datetime'):
+        return jsonify({'error': 'Title and start_datetime are required'}), 400
+
+    event = CalendarEvent(
+        board_id=data.get('board_id'),
+        title=data['title'],
+        description=data.get('description', ''),
+        start_datetime=datetime.fromisoformat(data['start_datetime'].replace('Z', '+00:00')),
+        end_datetime=datetime.fromisoformat(data['end_datetime'].replace('Z', '+00:00')) if data.get('end_datetime') else None,
+        all_day=data.get('all_day', False),
+        color=data.get('color', '#673de6'),
+        recurring_rule=data.get('recurring_rule'),
+        reminder_minutes=data.get('reminder_minutes'),
+        created_by_name=actor.name,
+        linked_task_id=data.get('linked_task_id'),
+    )
+    db.session.add(event)
+    db.session.commit()
+    return jsonify(event.to_dict()), 201
+
+
+@board_bp.route('/calendar-events/<int:event_id>', methods=['PUT'])
+@jwt_required()
+def update_calendar_event(event_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    event = CalendarEvent.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    data = request.get_json()
+    if data.get('title'):
+        event.title = data['title']
+    if data.get('description') is not None:
+        event.description = data['description']
+    if data.get('start_datetime'):
+        event.start_datetime = datetime.fromisoformat(data['start_datetime'].replace('Z', '+00:00'))
+    if data.get('end_datetime'):
+        event.end_datetime = datetime.fromisoformat(data['end_datetime'].replace('Z', '+00:00'))
+    if 'all_day' in data:
+        event.all_day = data['all_day']
+    if data.get('color'):
+        event.color = data['color']
+    if 'recurring_rule' in data:
+        event.recurring_rule = data['recurring_rule']
+    if 'reminder_minutes' in data:
+        event.reminder_minutes = data['reminder_minutes']
+    if 'linked_task_id' in data:
+        event.linked_task_id = data['linked_task_id']
+
+    db.session.commit()
+    return jsonify(event.to_dict()), 200
+
+
+@board_bp.route('/calendar-events/<int:event_id>', methods=['DELETE'])
+@jwt_required()
+def delete_calendar_event(event_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    event = CalendarEvent.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    db.session.delete(event)
+    db.session.commit()
+    return jsonify({'message': 'Event deleted'}), 200
+
+
+@board_bp.route('/calendar-tasks', methods=['GET'])
+@jwt_required()
+def get_calendar_tasks():
+    """Get tasks with dates for calendar rendering."""
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    board_id = request.args.get('board_id', type=int)
+    start = request.args.get('start')
+    end = request.args.get('end')
+
+    query = BoardTask.query.join(BoardGroup)
+    if board_id:
+        query = query.filter(BoardGroup.board_id == board_id)
+
+    # Tasks that have either a due_date or start_date within the range
+    from sqlalchemy import or_
+    if start and end:
+        query = query.filter(
+            or_(
+                BoardTask.due_date.between(start, end),
+                BoardTask.start_date.between(start, end),
+            )
+        )
+
+    tasks = query.all()
+    result = []
+    for t in tasks:
+        task_dict = t.to_dict()
+        task_dict['group_name'] = t.group.name if t.group else ''
+        task_dict['group_color'] = t.group.color if t.group else '#673de6'
+        task_dict['board_name'] = t.group.board.name if t.group and t.group.board else ''
+        result.append(task_dict)
+
+    return jsonify(result), 200
+
+
+# ─── Time Tracking Endpoints ─────────────────────────────────────────
+
+@board_bp.route('/tasks/<int:task_id>/time-entries', methods=['GET'])
+@jwt_required()
+def get_task_time_entries(task_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    task = BoardTask.query.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+
+    entries = TaskTimeEntry.query.filter_by(task_id=task_id).order_by(TaskTimeEntry.start_time.desc()).all()
+    return jsonify([e.to_dict() for e in entries]), 200
+
+
+@board_bp.route('/tasks/<int:task_id>/time-entries', methods=['POST'])
+@jwt_required()
+def create_task_time_entry(task_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    task = BoardTask.query.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+
+    data = request.get_json() or {}
+    start_time_str = data.get('start_time')
+    if not start_time_str:
+        return jsonify({'error': 'start_time is required'}), 400
+
+    try:
+        start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+    except Exception:
+        return jsonify({'error': 'Invalid start_time format'}), 400
+
+    end_time = None
+    end_time_str = data.get('end_time')
+    if end_time_str:
+        try:
+            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+        except Exception:
+            return jsonify({'error': 'Invalid end_time format'}), 400
+
+    duration_seconds = data.get('duration_seconds', 0)
+    if end_time and start_time and not duration_seconds:
+        duration_seconds = int((end_time - start_time).total_seconds())
+
+    entry = TaskTimeEntry(
+        task_id=task_id,
+        user_name=actor.name,
+        user_role=role,
+        user_id=actor.id,
+        start_time=start_time,
+        end_time=end_time,
+        duration_seconds=duration_seconds,
+        description=data.get('description')
+    )
+    db.session.add(entry)
+    db.session.commit()
+    return jsonify(entry.to_dict()), 201
+
+
+@board_bp.route('/time-entries/<int:entry_id>', methods=['DELETE'])
+@jwt_required()
+def delete_task_time_entry(entry_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    entry = TaskTimeEntry.query.get(entry_id)
+    if not entry:
+        return jsonify({'error': 'Time entry not found'}), 404
+
+    db.session.delete(entry)
+    db.session.commit()
+    return jsonify({'message': 'Time entry deleted'}), 200
+
+
+@board_bp.route('/tasks/<int:task_id>/time-estimate', methods=['PUT'])
+@jwt_required()
+def update_task_time_estimate(task_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    task = BoardTask.query.get(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+
+    data = request.get_json() or {}
+    estimate = data.get('time_estimate_minutes')
+    
+    # Allow clearing estimate
+    task.time_estimate_minutes = estimate if estimate is not None else None
+    
+    db.session.commit()
+    return jsonify(task.to_dict()), 200
+
+
+# ─── Workspace Documents (Wiki) ──────────────────────────────────────
+
+@board_bp.route('/boards/<int:board_id>/docs', methods=['GET'])
+@jwt_required()
+def get_workspace_docs(board_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    board = Board.query.get(board_id)
+    if not board:
+        return jsonify({'error': 'Space not found'}), 404
+
+    if not board_is_accessible(board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    docs = WorkspaceDoc.query.filter_by(board_id=board_id).order_by(WorkspaceDoc.position.asc()).all()
+    return jsonify([d.to_dict() for d in docs]), 200
+
+
+@board_bp.route('/boards/<int:board_id>/docs', methods=['POST'])
+@jwt_required()
+def create_workspace_doc(board_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    board = Board.query.get(board_id)
+    if not board:
+        return jsonify({'error': 'Space not found'}), 404
+
+    if not board_is_accessible(board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json() or {}
+    title = data.get('title', '').strip()
+    if not title:
+        return jsonify({'error': 'Title is required'}), 400
+
+    doc = WorkspaceDoc(
+        board_id=board_id,
+        title=title,
+        content_html=data.get('content_html', ''),
+        created_by_name=actor.name,
+    )
+    db.session.add(doc)
+    db.session.commit()
+    return jsonify(doc.to_dict()), 201
+
+
+@board_bp.route('/docs/<int:doc_id>', methods=['PUT'])
+@jwt_required()
+def update_workspace_doc(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+
+    if not board_is_accessible(doc.board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json() or {}
+    if 'title' in data:
+        title = data['title'].strip()
+        if title:
+            doc.title = title
+    if 'content_html' in data:
+        doc.content_html = data['content_html']
+    if 'position' in data:
+        doc.position = data['position']
+
+    db.session.commit()
+    return jsonify(doc.to_dict()), 200
+
+
+@board_bp.route('/docs/<int:doc_id>', methods=['DELETE'])
+@jwt_required()
+def delete_workspace_doc(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+
+    if not board_is_accessible(doc.board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    db.session.delete(doc)
+    db.session.commit()
+    return jsonify({'message': 'Document deleted'}), 200
+
+

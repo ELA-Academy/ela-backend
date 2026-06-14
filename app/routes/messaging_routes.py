@@ -23,11 +23,7 @@ from app.utils.notifications import send_email_in_background, send_push_notifica
 
 messaging_bp = Blueprint('messaging', __name__)
 
-DEFAULT_CHANNELS = [
-    "Welcome",
-    "School Updates",
-    "Cross-Department Ops",
-]
+DEFAULT_CHANNELS = []
 
 
 def get_current_user():
@@ -81,15 +77,27 @@ def format_department_thread_name(department):
 def ensure_workspace_threads():
     created = False
 
-    for channel_name in DEFAULT_CHANNELS:
-        existing = Conversation.query.filter_by(
-            conversation_type='channel',
-            name=channel_name
-        ).first()
-        if existing:
-            continue
-        db.session.add(Conversation(conversation_type='channel', name=channel_name))
-        created = True
+    # Clean up default channels if they exist in the DB (to get a clean slate)
+    from sqlalchemy import text
+    try:
+        db.session.execute(text("""
+            DELETE FROM messages 
+            WHERE conversation_id IN (
+                SELECT id FROM conversations 
+                WHERE conversation_type='channel' AND name IN ('Welcome', 'School Updates', 'Cross-Department Ops')
+            )
+        """))
+        db.session.execute(text("""
+            DELETE FROM conversation_participants 
+            WHERE conversation_id IN (
+                SELECT id FROM conversations 
+                WHERE conversation_type='channel' AND name IN ('Welcome', 'School Updates', 'Cross-Department Ops')
+            )
+        """))
+        db.session.execute(text("DELETE FROM conversations WHERE conversation_type='channel' AND name IN ('Welcome', 'School Updates', 'Cross-Department Ops')"))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
 
     departments = Department.query.filter_by(is_active=True).all()
     for department in departments:
@@ -305,8 +313,8 @@ def start_conversation():
 @jwt_required()
 def create_channel():
     user, role = get_current_user()
-    if role != 'superadmin':
-        return jsonify({"error": "Only super admins can create channels."}), 403
+    if role not in {'superadmin', 'staff'}:
+        return jsonify({"error": "Only staff and super admins can create channels."}), 403
 
     data = request.get_json() or {}
     name = (data.get('name') or '').strip()
@@ -482,4 +490,42 @@ def send_message(conversation_id):
         recipient_entry.last_notified_at = now
 
     db.session.commit()
-    return jsonify(new_message.to_dict()), 201
+    
+    # Broadcast the message in real time to the room using Socket.IO!
+    from app import socketio
+    message_dict = new_message.to_dict()
+    socketio.emit('new_message', message_dict, room=f"conversation_{conversation_id}")
+    
+    # Also notify all participants (including sender) to update their conversation lists/unread counts in real time
+    for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
+        socketio.emit('conversation_updated', {
+            'conversation_id': conversation_id,
+            'recipient_id': recipient.id,
+            'recipient_role': recipient_role
+        })
+    socketio.emit('conversation_updated', {
+        'conversation_id': conversation_id,
+        'recipient_id': user.id,
+        'recipient_role': role
+    })
+
+    return jsonify(message_dict), 201
+
+# Socket.IO Event Handlers
+from flask_socketio import join_room, leave_room
+from app import socketio
+
+@socketio.on('join')
+def on_join(data):
+    conversation_id = data.get('conversation_id')
+    if conversation_id:
+        room = f"conversation_{conversation_id}"
+        join_room(room)
+
+@socketio.on('leave')
+def on_leave(data):
+    conversation_id = data.get('conversation_id')
+    if conversation_id:
+        room = f"conversation_{conversation_id}"
+        leave_room(room)
+

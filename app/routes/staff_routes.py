@@ -26,13 +26,20 @@ def create_staff():
     password = data.get('password')
     department_ids = data.get('department_ids', [])
 
-    if not all([name, email, password]) or not department_ids:
-        return jsonify({"error": "Missing required fields or department assignment"}), 400
+    if not name or not email:
+        return jsonify({"error": "Name and email are required"}), 400
     
     if Staff.query.filter_by(email=email).first():
         return jsonify({"error": "Email already in use"}), 409
 
     new_staff = Staff(name=name, email=email)
+    
+    is_invite = False
+    if not password:
+        import uuid
+        password = uuid.uuid4().hex
+        is_invite = True
+
     new_staff.set_password(password)
     
     for dept_id in department_ids:
@@ -47,6 +54,25 @@ def create_staff():
     # Log the activity
     log_activity(actor, f"Created new staff member: '{new_staff.name}'", new_staff)
     
+    if is_invite:
+        from flask_jwt_extended import create_access_token
+        from datetime import timedelta
+        from app import mail
+        from app.utils.email_otp import send_staff_invite_email
+        import os
+
+        # Generate a password setup token
+        setup_token = create_access_token(
+            identity=email,
+            additional_claims={"purpose": "setup-password", "name": name},
+            expires_delta=timedelta(days=7)
+        )
+        
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+        invite_link = f"{frontend_url}/setup-password?token={setup_token}"
+        
+        send_staff_invite_email(mail, email, name, invite_link)
+        
     db.session.commit()
     return jsonify(new_staff.to_dict()), 201
 
