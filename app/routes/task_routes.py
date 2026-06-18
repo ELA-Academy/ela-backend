@@ -57,19 +57,27 @@ def get_my_tasks():
             all_tasks_serialized.append(d)
 
     # 2. Fetch Board Tasks (Monday.com style)
-    from app.models.board_model import BoardTask
+    from app.models.board_model import BoardTask, BoardTaskAssignee
     if staff_member:
-        board_tasks = BoardTask.query.filter_by(responsible_staff_id=staff_member.id).all()
+        board_tasks = BoardTask.query.filter(
+            or_(
+                BoardTask.responsible_staff_id == staff_member.id,
+                BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
+            )
+        ).all()
     elif super_admin:
-        board_tasks = BoardTask.query.filter_by(responsible_super_admin_id=super_admin.id).all()
+        board_tasks = BoardTask.query.filter(
+            or_(
+                BoardTask.responsible_super_admin_id == super_admin.id,
+                BoardTask.assignees.any(BoardTaskAssignee.super_admin_id == super_admin.id)
+            )
+        ).all()
     else:
         board_tasks = []
 
     for bt in board_tasks:
         bt_dict = bt.to_dict()
-        assignees = []
-        if bt_dict.get('assignee_name'):
-            assignees.append(bt_dict['assignee_name'])
+        assignees = bt_dict.get('assignee_names') or []
 
         d = {
             'id': bt.id,
@@ -81,7 +89,7 @@ def get_my_tasks():
             'lead_status': None,
             'assigned_department_ids': [],
             'assigned_department_names': [],
-            'assigned_staff_ids': [bt.responsible_staff_id] if bt.responsible_staff_id else [],
+            'assigned_staff_ids': [item['id'] for item in bt_dict.get('assignees', []) if item.get('role') == 'staff'],
             'assigned_staff_names': assignees,
             'created_by_staff_name': None,
             'created_at': bt.created_at.isoformat() + 'Z' if bt.created_at else None,
@@ -131,15 +139,21 @@ def get_my_tasks_count():
         ).count()
 
     # 2. Count Board Tasks
-    from app.models.board_model import BoardTask
+    from app.models.board_model import BoardTask, BoardTaskAssignee
     if staff_member:
         count += BoardTask.query.filter(
-            BoardTask.responsible_staff_id == staff_member.id,
+            or_(
+                BoardTask.responsible_staff_id == staff_member.id,
+                BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
+            ),
             BoardTask.status != 'Done'
         ).count()
     elif super_admin:
         count += BoardTask.query.filter(
-            BoardTask.responsible_super_admin_id == super_admin.id,
+            or_(
+                BoardTask.responsible_super_admin_id == super_admin.id,
+                BoardTask.assignees.any(BoardTaskAssignee.super_admin_id == super_admin.id)
+            ),
             BoardTask.status != 'Done'
         ).count()
 

@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -108,6 +108,55 @@ def get_task_and_board_or_403(task_id, actor, role):
     if not ensure_board_access(board, actor, role):
         return None, None
     return task, board
+
+
+def normalize_task_assignees(data):
+    assignees = data.get('assignees')
+    if assignees is None and 'assignee_id' in data:
+        assignee_id = data.get('assignee_id')
+        assignee_role = data.get('assignee_role')
+        assignees = [{'id': assignee_id, 'role': assignee_role}] if assignee_id and assignee_role else []
+
+    normalized = {}
+    for assignee in assignees or []:
+        assignee_id = assignee.get('id')
+        assignee_role = assignee.get('role')
+        if not assignee_id or assignee_role not in {'staff', 'superadmin'}:
+            continue
+        normalized[f'{assignee_role}_{assignee_id}'] = {
+            'id': int(assignee_id),
+            'role': assignee_role
+        }
+    return list(normalized.values())
+
+
+def sync_task_assignees(task, assignees):
+    task.assignees.clear()
+    task.responsible_staff_id = None
+    task.responsible_super_admin_id = None
+
+    for index, assignee in enumerate(assignees):
+        assignee_role = assignee['role']
+        assignee_id = assignee['id']
+        task.assignees.append(
+            BoardTaskAssignee(
+                staff_id=assignee_id if assignee_role == 'staff' else None,
+                super_admin_id=assignee_id if assignee_role == 'superadmin' else None,
+            )
+        )
+        if index == 0:
+            if assignee_role == 'superadmin':
+                task.responsible_super_admin_id = assignee_id
+            else:
+                task.responsible_staff_id = assignee_id
+
+
+def task_assignee_keys(task):
+    return {
+        f"{assignee['role']}_{assignee['id']}"
+        for assignee in task.to_dict().get('assignees', [])
+        if assignee.get('id') and assignee.get('role')
+    }
 
 
 @board_bp.route('', methods=['GET'])
@@ -318,14 +367,8 @@ def create_task(group_id):
         except ValueError:
             pass
 
-    if 'assignee_id' in data and 'assignee_role' in data:
-        assignee_id = data['assignee_id']
-        assignee_role = data['assignee_role']
-        if assignee_id:
-            if assignee_role == 'superadmin':
-                new_task.responsible_super_admin_id = assignee_id
-            else:
-                new_task.responsible_staff_id = assignee_id
+    if 'assignees' in data or ('assignee_id' in data and 'assignee_role' in data):
+        sync_task_assignees(new_task, normalize_task_assignees(data))
 
     db.session.add(new_task)
     db.session.flush()
@@ -333,6 +376,20 @@ def create_task(group_id):
     # Log task creation in task history
     from app.models.board_model import BoardTaskHistory
     db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name=actor.name, action="Created task"))
+
+    for assignee in new_task.assignees:
+        notification = Notification(
+            message=f"{actor.name} assigned you the task: '{new_task.title}' on board '{board.name}'",
+            category='assignment',
+            target_type='Board',
+            target_id=board.id,
+            target_link=f"/admin/boards/{board.id}?task={new_task.id}"
+        )
+        if assignee.super_admin_id:
+            notification.super_admin_id = assignee.super_admin_id
+        elif assignee.staff_id:
+            notification.staff_id = assignee.staff_id
+        db.session.add(notification)
 
     # Mentions handling inside Task Notes or HTML description
     mentions = data.get('mentions', [])
@@ -405,8 +462,7 @@ def update_task(task_id):
         return jsonify({"error": "Forbidden"}), 403
 
     data = request.get_json() or {}
-    old_assignee_staff = task.responsible_staff_id
-    old_assignee_admin = task.responsible_super_admin_id
+    old_assignee_keys = task_assignee_keys(task)
 
     from app.models.board_model import BoardTaskHistory
     changes = []
@@ -415,6 +471,15 @@ def update_task(task_id):
         changes.append(f"Changed name from '{task.title}' to '{data['title']}'")
         task.title = data['title']
     if 'status' in data and data['status'] != task.status:
+        if data['status'] == 'Done':
+            incomplete_subtasks = [
+                subtask.title for subtask in task.subtasks if subtask.status != 'Done'
+            ]
+            if incomplete_subtasks:
+                return jsonify({
+                    "error": "Complete all subtasks before marking this task complete.",
+                    "incomplete_subtasks": incomplete_subtasks
+                }), 400
         changes.append(f"Changed status from '{task.status}' to '{data['status']}'")
         task.status = data['status']
     if 'priority' in data and data['priority'] != task.priority:
@@ -462,24 +527,12 @@ def update_task(task_id):
             changes.append(f"Changed due date to '{date_str}'")
             task.due_date = val
 
-    if 'assignee_id' in data and 'assignee_role' in data:
-        assignee_id = data['assignee_id']
-        assignee_role = data['assignee_role']
-        if not assignee_id:
-            if task.responsible_staff_id or task.responsible_super_admin_id:
-                changes.append("Removed assignee")
-            task.responsible_staff_id = None
-            task.responsible_super_admin_id = None
-        elif assignee_role == 'superadmin':
-            if task.responsible_super_admin_id != assignee_id:
-                changes.append("Changed assignee")
-            task.responsible_super_admin_id = assignee_id
-            task.responsible_staff_id = None
-        else:
-            if task.responsible_staff_id != assignee_id:
-                changes.append("Changed assignee")
-            task.responsible_staff_id = assignee_id
-            task.responsible_super_admin_id = None
+    if 'assignees' in data or ('assignee_id' in data and 'assignee_role' in data):
+        next_assignees = normalize_task_assignees(data)
+        next_keys = {f"{assignee['role']}_{assignee['id']}" for assignee in next_assignees}
+        if next_keys != old_assignee_keys:
+            changes.append("Changed assignees")
+        sync_task_assignees(task, next_assignees)
 
     # Save changes in history
     for change in changes:
@@ -487,25 +540,25 @@ def update_task(task_id):
 
     db.session.commit()
 
-    new_assignee_staff = task.responsible_staff_id
-    new_assignee_admin = task.responsible_super_admin_id
-    changed = (new_assignee_staff != old_assignee_staff) or (new_assignee_admin != old_assignee_admin)
+    new_assignee_keys = task_assignee_keys(task)
+    added_assignee_keys = new_assignee_keys - old_assignee_keys
 
-    if changed and (new_assignee_staff or new_assignee_admin):
+    if added_assignee_keys:
         message = f"{actor.name} assigned you the task: '{task.title}' on board '{board.name}'"
-        notification = Notification(
-            message=message,
-            category='assignment',
-            target_type='Board',
-            target_id=board.id,
-            target_link=f"/admin/boards/{board.id}?task={task.id}"
-        )
-        if new_assignee_admin:
-            notification.super_admin_id = new_assignee_admin
-        else:
-            notification.staff_id = new_assignee_staff
-
-        db.session.add(notification)
+        for assignee_key in added_assignee_keys:
+            assignee_role, raw_id = assignee_key.split('_', 1)
+            notification = Notification(
+                message=message,
+                category='assignment',
+                target_type='Board',
+                target_id=board.id,
+                target_link=f"/admin/boards/{board.id}?task={task.id}"
+            )
+            if assignee_role == 'superadmin':
+                notification.super_admin_id = int(raw_id)
+            else:
+                notification.staff_id = int(raw_id)
+            db.session.add(notification)
         db.session.commit()
 
     return jsonify(task.to_dict()), 200
@@ -1261,5 +1314,3 @@ def delete_workspace_doc(doc_id):
     db.session.delete(doc)
     db.session.commit()
     return jsonify({'message': 'Document deleted'}), 200
-
-

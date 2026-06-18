@@ -143,6 +143,12 @@ def can_access_conversation(user, role, conversation):
 def get_accessible_conversations(user, role):
     ensure_workspace_threads()
     conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
+    if role == 'superadmin':
+        return [
+            conversation for conversation in conversations
+            if conversation.conversation_type != 'direct'
+            or get_participant_entry(conversation.id, user, role)
+        ]
     return [conversation for conversation in conversations if can_access_conversation(user, role, conversation)]
 
 
@@ -196,14 +202,39 @@ def recipients_for_conversation(conversation, sender, sender_role):
             if f"staff_{staff_member.id}" != sender_key:
                 recipients.append((staff_member, 'staff'))
 
-    for admin in SuperAdmin.query.filter_by(is_active=True).all():
-        if f"superadmin_{admin.id}" != sender_key:
+    for participant in conversation.participants:
+        admin = participant.super_admin
+        if admin and f"superadmin_{admin.id}" != sender_key:
             recipients.append((admin, 'superadmin'))
 
     unique_recipients = {}
     for recipient, recipient_role in recipients:
         unique_recipients[f"{recipient_role}_{recipient.id}"] = (recipient, recipient_role)
     return list(unique_recipients.values())
+
+
+def serialize_conversation_summary(conversation, user, role, audit=False):
+    last_message = conversation.messages.order_by(db.desc(Message.created_at)).first()
+    title = get_conversation_title(conversation, user, role)
+    unread_count = 0 if audit else get_conversation_unread_count(conversation, user, role)
+
+    return {
+        'id': conversation.id,
+        'title': title,
+        'participant_names': title,
+        'last_message': last_message.content if last_message else "No messages yet.",
+        'last_message_time': (
+            last_message.created_at.isoformat() + 'Z'
+            if last_message
+            else conversation.created_at.isoformat() + 'Z'
+        ),
+        'unread_count': unread_count,
+        'conversation_type': conversation.conversation_type,
+        'department_id': conversation.department_id,
+        'department_name': conversation.department.name if conversation.department else None,
+        'is_restricted': conversation.conversation_type == 'department',
+        'audit_only': audit
+    }
 
 
 @messaging_bp.route('/conversations/unread-count', methods=['GET'])
@@ -249,27 +280,27 @@ def get_conversations():
 
     response_data = []
     for conversation in get_accessible_conversations(user, role):
-        last_message = conversation.messages.order_by(db.desc(Message.created_at)).first()
-        title = get_conversation_title(conversation, user, role)
-        unread_count = get_conversation_unread_count(conversation, user, role)
+        response_data.append(serialize_conversation_summary(conversation, user, role))
 
-        response_data.append({
-            'id': conversation.id,
-            'title': title,
-            'participant_names': title,
-            'last_message': last_message.content if last_message else "No messages yet.",
-            'last_message_time': (
-                last_message.created_at.isoformat() + 'Z'
-                if last_message
-                else conversation.created_at.isoformat() + 'Z'
-            ),
-            'unread_count': unread_count,
-            'conversation_type': conversation.conversation_type,
-            'department_id': conversation.department_id,
-            'department_name': conversation.department.name if conversation.department else None,
-            'is_restricted': conversation.conversation_type == 'department'
-        })
+    response_data.sort(key=lambda item: item['last_message_time'], reverse=True)
+    return jsonify(response_data), 200
 
+
+@messaging_bp.route('/conversations/audit', methods=['GET'])
+@jwt_required()
+def get_audit_conversations():
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    if role != 'superadmin':
+        return jsonify({"error": "Forbidden"}), 403
+
+    ensure_workspace_threads()
+    conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
+    response_data = [
+        serialize_conversation_summary(conversation, user, role, audit=True)
+        for conversation in conversations
+    ]
     response_data.sort(key=lambda item: item['last_message_time'], reverse=True)
     return jsonify(response_data), 200
 
@@ -528,4 +559,3 @@ def on_leave(data):
     if conversation_id:
         room = f"conversation_{conversation_id}"
         leave_room(room)
-

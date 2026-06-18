@@ -108,6 +108,7 @@ class BoardTask(db.Model):
 
     responsible_staff = db.relationship('Staff')
     responsible_super_admin = db.relationship('SuperAdmin')
+    assignees = db.relationship('BoardTaskAssignee', backref='task', cascade='all, delete-orphan', lazy=True)
     
     subtasks = db.relationship('BoardTask', backref=db.backref('parent', remote_side=[id]), cascade='all, delete-orphan', foreign_keys=[parent_task_id], lazy=True)
     dependency_task = db.relationship('BoardTask', remote_side=[id], foreign_keys=[dependency_task_id])
@@ -120,22 +121,29 @@ class BoardTask(db.Model):
     time_entries = db.relationship('TaskTimeEntry', backref='task', cascade='all, delete-orphan', lazy=True)
 
     def to_dict(self):
-        assignee_name = ""
-        assignee_email = ""
-        assignee_role = ""
-        assignee_id = None
+        assignee_items = [assignee.to_dict() for assignee in self.assignees]
+        if not assignee_items:
+            if self.responsible_super_admin:
+                assignee_items.append({
+                    'id': self.responsible_super_admin.id,
+                    'name': self.responsible_super_admin.name,
+                    'email': self.responsible_super_admin.email,
+                    'role': 'superadmin'
+                })
+            elif self.responsible_staff:
+                assignee_items.append({
+                    'id': self.responsible_staff.id,
+                    'name': self.responsible_staff.name,
+                    'email': self.responsible_staff.email,
+                    'role': 'staff'
+                })
+
+        primary_assignee = assignee_items[0] if assignee_items else {}
+        assignee_name = primary_assignee.get('name', "")
+        assignee_email = primary_assignee.get('email', "")
+        assignee_role = primary_assignee.get('role', "")
+        assignee_id = primary_assignee.get('id')
         
-        if self.responsible_super_admin:
-            assignee_name = self.responsible_super_admin.name
-            assignee_email = self.responsible_super_admin.email
-            assignee_role = "superadmin"
-            assignee_id = self.responsible_super_admin.id
-        elif self.responsible_staff:
-            assignee_name = self.responsible_staff.name
-            assignee_email = self.responsible_staff.email
-            assignee_role = "staff"
-            assignee_id = self.responsible_staff.id
-            
         return {
             'id': self.id,
             'group_id': self.group_id,
@@ -156,6 +164,9 @@ class BoardTask(db.Model):
             'assignee_name': assignee_name,
             'assignee_email': assignee_email,
             'assignee_role': assignee_role,
+            'assignees': assignee_items,
+            'assignee_ids': [item['id'] for item in assignee_items],
+            'assignee_names': [item['name'] for item in assignee_items],
             'updates_count': len(self.updates),
             'time_estimate_minutes': self.time_estimate_minutes,
             'time_spent_seconds': sum(entry.duration_seconds for entry in self.time_entries) if hasattr(self, 'time_entries') else 0,
@@ -168,10 +179,41 @@ class BoardTask(db.Model):
                 'title': sub.title,
                 'status': sub.status,
                 'priority': sub.priority,
-                'due_date': sub.due_date.isoformat() if sub.due_date else None
+                'due_date': sub.due_date.isoformat() if sub.due_date else None,
+                'assignees': [assignee.to_dict() for assignee in sub.assignees]
             } for sub in self.subtasks],
             'created_at': self.created_at.isoformat() + 'Z'
         }
+
+
+class BoardTaskAssignee(db.Model):
+    __tablename__ = 'board_task_assignees'
+
+    id = db.Column(db.Integer, primary_key=True)
+    task_id = db.Column(db.Integer, db.ForeignKey('board_tasks.id', ondelete='CASCADE'), nullable=False)
+    staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
+    super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    staff = db.relationship('Staff')
+    super_admin = db.relationship('SuperAdmin')
+
+    def to_dict(self):
+        if self.super_admin:
+            return {
+                'id': self.super_admin.id,
+                'name': self.super_admin.name,
+                'email': self.super_admin.email,
+                'role': 'superadmin'
+            }
+        if self.staff:
+            return {
+                'id': self.staff.id,
+                'name': self.staff.name,
+                'email': self.staff.email,
+                'role': 'staff'
+            }
+        return {'id': None, 'name': '', 'email': '', 'role': ''}
 
 class BoardTaskChecklistItem(db.Model):
     __tablename__ = 'board_task_checklist_items'
@@ -380,5 +422,4 @@ class WorkspaceDoc(db.Model):
             'updated_at': self.updated_at.isoformat() + 'Z',
             'position': self.position
         }
-
 
