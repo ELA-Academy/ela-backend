@@ -3,7 +3,13 @@ from flask_jwt_extended import create_access_token
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
 
+from app import mail
+from app.utils.email_otp import generate_otp, send_otp_email, send_login_notice_email
+from datetime import datetime, timedelta, timezone
+
 auth_bp = Blueprint('auth', __name__)
+
+pending_logins = {}
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -27,8 +33,23 @@ def login():
             "dashboardRoutes": [d.dashboard_route for d in staff_member.departments if d.dashboard_route],
             "role": "staff"
         }
-        access_token = create_access_token(identity=staff_member.email, additional_claims=additional_claims)
-        return jsonify(access_token=access_token), 200
+        
+        # Generate OTP
+        otp = generate_otp()
+        pending_logins[email] = {
+            "otp": otp,
+            "role": "staff",
+            "claims": additional_claims,
+            "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
+        }
+        
+        # Log to console for testing/development
+        print(f"=== [OTP LOG] Staff '{email}' OTP: {otp} ===")
+        
+        # Send OTP email
+        send_otp_email(mail, email, otp)
+        
+        return jsonify({"otp_required": True, "email": email, "role": "staff"}), 200
 
     admin_member = SuperAdmin.query.filter_by(email=email).first()
 
@@ -41,10 +62,60 @@ def login():
             "role": "superadmin",
             "name": admin_member.name
         }
-        access_token = create_access_token(identity=admin_member.email, additional_claims=additional_claims)
-        return jsonify(access_token=access_token), 200
+        
+        # Generate OTP
+        otp = generate_otp()
+        pending_logins[email] = {
+            "otp": otp,
+            "role": "superadmin",
+            "claims": additional_claims,
+            "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
+        }
+        
+        # Log to console for testing/development
+        print(f"=== [OTP LOG] SuperAdmin '{email}' OTP: {otp} ===")
+        
+        # Send OTP email
+        send_otp_email(mail, email, otp)
+        
+        return jsonify({"otp_required": True, "email": email, "role": "superadmin"}), 200
 
     return jsonify({"msg": "Invalid credentials"}), 401
+
+
+@auth_bp.route('/verify-login-otp', methods=['POST'])
+def verify_login_otp():
+    data = request.get_json() or {}
+    email = data.get('email')
+    otp_received = data.get('otp')
+
+    if not email or not otp_received:
+        return jsonify({"msg": "Email and OTP are required"}), 400
+
+    pending = pending_logins.get(email)
+    if not pending:
+        return jsonify({"msg": "Invalid session or OTP expired. Please log in again."}), 400
+
+    if datetime.now(timezone.utc) > pending['expiry']:
+        pending_logins.pop(email, None)
+        return jsonify({"msg": "OTP has expired. Please log in again."}), 400
+
+    if pending['otp'] != otp_received:
+        return jsonify({"msg": "Invalid verification code"}), 400
+
+    role = pending['role']
+    claims = pending['claims']
+    pending_logins.pop(email, None)
+
+    access_token = create_access_token(identity=email, additional_claims=claims)
+
+    # Send successful login email notice
+    timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ip_address = request.remote_addr or '127.0.0.1'
+    device_str = request.user_agent.string or 'Unknown device'
+    send_login_notice_email(mail, email, timestamp_str, ip_address, device_str)
+
+    return jsonify(access_token=access_token), 200
 
 @auth_bp.route('/verify-setup-token', methods=['POST'])
 def verify_setup_token():

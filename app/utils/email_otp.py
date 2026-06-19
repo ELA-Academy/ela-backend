@@ -51,3 +51,28 @@ def send_invite_email(mail, recipient_email, recipient_name, invite_link, role_n
     except Exception as e:
         current_app.logger.error(f"Failed to send invite email to {recipient_email}: {e}")
         return False
+
+def send_login_notice_email(mail, recipient_email, timestamp_str, ip_address, device_str):
+    """Sends a security alert email notifying the user of a successful login."""
+    try:
+        msg = Message(
+            'New Login Detected - ELA Academy',
+            sender=current_app.config['MAIL_DEFAULT_SENDER'],
+            recipients=[recipient_email]
+        )
+        msg.body = (
+            f"Hello,\n\n"
+            f"We detected a new login to your ELA Academy account.\n\n"
+            f"Time: {timestamp_str}\n"
+            f"IP Address: {ip_address}\n"
+            f"Device/Browser: {device_str}\n\n"
+            f"If this was you, no action is needed. If you do not recognize this login, "
+            f"please change your password and secure your account immediately.\n\n"
+            f"Best regards,\n"
+            f"ELA Academy Team"
+        )
+        mail.send(msg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Failed to send login notice email to {recipient_email}: {e}")
+        return False

@@ -205,18 +205,28 @@ def create_board():
     description = data.get('description')
     is_private = data.get('is_private', False)
     access_members = data.get('access_members', [])
+    parent_id = data.get('parent_id')
+    is_folder = data.get('is_folder', False)
 
     if not name:
         return jsonify({"error": "Board name is required"}), 400
 
-    new_board = Board(name=name, description=description, is_private=bool(is_private))
+    new_board = Board(
+        name=name,
+        description=description,
+        is_private=bool(is_private),
+        parent_id=parent_id,
+        is_folder=bool(is_folder)
+    )
     db.session.add(new_board)
     db.session.flush()
 
     sync_board_access(new_board, actor, role, access_members)
 
-    group = BoardGroup(board_id=new_board.id, name="List", color="#673de6", position=0)
-    db.session.add(group)
+    if not is_folder:
+        group = BoardGroup(board_id=new_board.id, name="List", color="#673de6", position=0)
+        db.session.add(group)
+
     db.session.commit()
     return jsonify(new_board.to_dict()), 201
 
@@ -234,6 +244,7 @@ def get_board(board_id):
 @board_bp.route('/<int:board_id>', methods=['PUT'])
 @jwt_required()
 def update_board(board_id):
+    import json
     actor, role = get_actor()
     board = get_board_or_404_with_access(board_id, actor, role)
     if not board:
@@ -243,6 +254,12 @@ def update_board(board_id):
     board.name = data.get('name', board.name)
     board.description = data.get('description', board.description)
     board.is_private = data.get('is_private', board.is_private)
+    if 'parent_id' in data:
+        board.parent_id = data.get('parent_id')
+    if 'is_folder' in data:
+        board.is_folder = bool(data.get('is_folder'))
+    if 'custom_statuses' in data:
+        board.custom_statuses = json.dumps(data.get('custom_statuses'))
     sync_board_access(board, actor, role, data.get('access_members', board.to_dict().get('access_members', [])))
     db.session.commit()
     return jsonify(board.to_dict()), 200

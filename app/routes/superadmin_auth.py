@@ -139,6 +139,11 @@ def verify_and_create_super_admin():
     return jsonify({"message": "Super Admin account and default departments created successfully!"}), 201
 
 
+from app.utils.email_otp import send_login_notice_email
+
+super_admin_pending_logins = {}
+
+
 @super_admin_bp.route('/login', methods=['POST'])
 def login_super_admin():
     data = request.get_json() or {}
@@ -149,9 +154,58 @@ def login_super_admin():
     if not admin or not admin.is_active or not admin.check_password(password):
         return jsonify({"msg": "Invalid email or password."}), 401
 
-    return jsonify({
-        "access_token": build_access_token(admin)
-    }), 200
+    # Generate OTP
+    otp = generate_otp()
+    super_admin_pending_logins[email] = {
+        "otp": otp,
+        "admin_id": admin.id,
+        "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
+    }
+
+    # Log to console for testing/development
+    print(f"=== [OTP LOG] SuperAdmin Setup Login '{email}' OTP: {otp} ===")
+
+    # Send OTP email
+    send_otp_email(mail, email, otp)
+
+    return jsonify({"otp_required": True, "email": email, "role": "superadmin"}), 200
+
+
+@super_admin_bp.route('/verify-login-otp', methods=['POST'])
+def verify_login_otp():
+    data = request.get_json() or {}
+    email = data.get('email')
+    otp_received = data.get('otp')
+
+    if not email or not otp_received:
+        return jsonify({"msg": "Email and OTP are required"}), 400
+
+    pending = super_admin_pending_logins.get(email)
+    if not pending:
+        return jsonify({"msg": "Invalid session or OTP expired. Please log in again."}), 400
+
+    if datetime.now(timezone.utc) > pending['expiry']:
+        super_admin_pending_logins.pop(email, None)
+        return jsonify({"msg": "OTP has expired. Please log in again."}), 400
+
+    if pending['otp'] != otp_received:
+        return jsonify({"msg": "Invalid verification code"}), 400
+
+    admin = SuperAdmin.query.get(pending['admin_id'])
+    if not admin:
+        super_admin_pending_logins.pop(email, None)
+        return jsonify({"msg": "Admin user not found"}), 400
+
+    super_admin_pending_logins.pop(email, None)
+    access_token = build_access_token(admin)
+
+    # Send successful login email notice
+    timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ip_address = request.remote_addr or '127.0.0.1'
+    device_str = request.user_agent.string or 'Unknown device'
+    send_login_notice_email(mail, email, timestamp_str, ip_address, device_str)
+
+    return jsonify(access_token=access_token), 200
 
 
 @super_admin_bp.route('/profile', methods=['GET'])

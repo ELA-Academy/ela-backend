@@ -24,6 +24,7 @@ def ensure_runtime_schema_updates():
 
     if inspector.has_table('boards'):
         add_column_if_missing('boards', 'is_private', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('boards', 'custom_statuses', 'TEXT NULL')
 
     if inspector.has_table('board_tasks'):
         add_column_if_missing('board_tasks', 'start_date', 'DATE NULL')

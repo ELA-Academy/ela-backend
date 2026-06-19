@@ -1,3 +1,4 @@
+import json
 from app.models import db
 from datetime import datetime
 
@@ -8,17 +9,29 @@ class Board(db.Model):
     name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.String(255), nullable=True)
     is_private = db.Column(db.Boolean, default=False, nullable=False)
+    custom_statuses = db.Column(db.Text, nullable=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey('boards.id', ondelete='CASCADE'), nullable=True)
+    is_folder = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     groups = db.relationship('BoardGroup', backref='board', cascade='all, delete-orphan', lazy=True)
     access_members = db.relationship('BoardAccessMember', backref='board', cascade='all, delete-orphan', lazy=True)
 
     def to_dict(self):
+        custom_statuses_val = None
+        if self.custom_statuses:
+            try:
+                custom_statuses_val = json.loads(self.custom_statuses)
+            except:
+                pass
         return {
             'id': self.id,
             'name': self.name,
             'description': self.description,
             'is_private': self.is_private,
+            'custom_statuses': custom_statuses_val,
+            'parent_id': self.parent_id,
+            'is_folder': self.is_folder,
             'access_members': [member.to_dict() for member in self.access_members],
             'groups': [group.to_dict() for group in self.groups],
             'created_at': self.created_at.isoformat() + 'Z'
