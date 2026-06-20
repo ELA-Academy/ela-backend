@@ -1,15 +1,15 @@
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import create_access_token
+from app.models import db
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
+from app.models.login_otp_model import LoginOTP
 
 from app import mail
 from app.utils.email_otp import generate_otp, send_otp_email, send_login_notice_email
 from datetime import datetime, timedelta, timezone
 
 auth_bp = Blueprint('auth', __name__)
-
-pending_logins = {}
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -36,12 +36,18 @@ def login():
         
         # Generate OTP
         otp = generate_otp()
-        pending_logins[email] = {
-            "otp": otp,
-            "role": "staff",
-            "claims": additional_claims,
-            "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
-        }
+        
+        # Save to database (deleting any existing pending OTPs for this email first)
+        LoginOTP.query.filter_by(email=email).delete()
+        login_otp_record = LoginOTP(
+            email=email,
+            otp=otp,
+            role="staff",
+            claims=additional_claims,
+            expiry=datetime.utcnow() + timedelta(minutes=30)
+        )
+        db.session.add(login_otp_record)
+        db.session.commit()
         
         # Log to console for testing/development
         print(f"=== [OTP LOG] Staff '{email}' OTP: {otp} ===")
@@ -50,13 +56,13 @@ def login():
         send_otp_email(mail, email, otp)
         
         return jsonify({"otp_required": True, "email": email, "role": "staff"}), 200
-
+ 
     admin_member = SuperAdmin.query.filter_by(email=email).first()
-
+ 
     if admin_member:
         if not admin_member.is_active or not admin_member.check_password(password):
             return jsonify({"msg": "Invalid credentials"}), 401
-
+ 
         additional_claims = {
             "id": admin_member.id,
             "role": "superadmin",
@@ -65,12 +71,18 @@ def login():
         
         # Generate OTP
         otp = generate_otp()
-        pending_logins[email] = {
-            "otp": otp,
-            "role": "superadmin",
-            "claims": additional_claims,
-            "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
-        }
+        
+        # Save to database (deleting any existing pending OTPs for this email first)
+        LoginOTP.query.filter_by(email=email).delete()
+        login_otp_record = LoginOTP(
+            email=email,
+            otp=otp,
+            role="superadmin",
+            claims=additional_claims,
+            expiry=datetime.utcnow() + timedelta(minutes=30)
+        )
+        db.session.add(login_otp_record)
+        db.session.commit()
         
         # Log to console for testing/development
         print(f"=== [OTP LOG] SuperAdmin '{email}' OTP: {otp} ===")
@@ -79,33 +91,35 @@ def login():
         send_otp_email(mail, email, otp)
         
         return jsonify({"otp_required": True, "email": email, "role": "superadmin"}), 200
-
+ 
     return jsonify({"msg": "Invalid credentials"}), 401
-
-
+ 
+ 
 @auth_bp.route('/verify-login-otp', methods=['POST'])
 def verify_login_otp():
     data = request.get_json() or {}
     email = data.get('email')
     otp_received = data.get('otp')
-
+ 
     if not email or not otp_received:
         return jsonify({"msg": "Email and OTP are required"}), 400
-
-    pending = pending_logins.get(email)
+ 
+    pending = LoginOTP.query.filter_by(email=email).order_by(LoginOTP.created_at.desc()).first()
     if not pending:
         return jsonify({"msg": "Invalid session or OTP expired. Please log in again."}), 400
-
-    if datetime.now(timezone.utc) > pending['expiry']:
-        pending_logins.pop(email, None)
+ 
+    if datetime.utcnow() > pending.expiry:
+        db.session.delete(pending)
+        db.session.commit()
         return jsonify({"msg": "OTP has expired. Please log in again."}), 400
 
-    if pending['otp'] != otp_received:
+    if pending.otp != otp_received:
         return jsonify({"msg": "Invalid verification code"}), 400
 
-    role = pending['role']
-    claims = pending['claims']
-    pending_logins.pop(email, None)
+    role = pending.role
+    claims = pending.claims
+    db.session.delete(pending)
+    db.session.commit()
 
     access_token = create_access_token(identity=email, additional_claims=claims)
 

@@ -9,6 +9,7 @@ from app.models import db
 from app.models.activity_log_model import log_activity
 from app.models.department_model import Department
 from app.models.super_admin_model import SuperAdmin
+from app.models.login_otp_model import LoginOTP
 from app.utils.email_otp import generate_otp, send_otp_email
 
 
@@ -141,9 +142,6 @@ def verify_and_create_super_admin():
 
 from app.utils.email_otp import send_login_notice_email
 
-super_admin_pending_logins = {}
-
-
 @super_admin_bp.route('/login', methods=['POST'])
 def login_super_admin():
     data = request.get_json() or {}
@@ -156,11 +154,18 @@ def login_super_admin():
 
     # Generate OTP
     otp = generate_otp()
-    super_admin_pending_logins[email] = {
-        "otp": otp,
-        "admin_id": admin.id,
-        "expiry": datetime.now(timezone.utc) + timedelta(minutes=10)
-    }
+    
+    # Save to database (deleting any existing pending OTPs for this email first)
+    LoginOTP.query.filter_by(email=email).delete()
+    login_otp_record = LoginOTP(
+        email=email,
+        otp=otp,
+        role="superadmin",
+        claims={"admin_id": admin.id},
+        expiry=datetime.utcnow() + timedelta(minutes=30)
+    )
+    db.session.add(login_otp_record)
+    db.session.commit()
 
     # Log to console for testing/development
     print(f"=== [OTP LOG] SuperAdmin Setup Login '{email}' OTP: {otp} ===")
@@ -180,23 +185,30 @@ def verify_login_otp():
     if not email or not otp_received:
         return jsonify({"msg": "Email and OTP are required"}), 400
 
-    pending = super_admin_pending_logins.get(email)
+    pending = LoginOTP.query.filter_by(email=email).order_by(LoginOTP.created_at.desc()).first()
     if not pending:
         return jsonify({"msg": "Invalid session or OTP expired. Please log in again."}), 400
 
-    if datetime.now(timezone.utc) > pending['expiry']:
-        super_admin_pending_logins.pop(email, None)
+    if datetime.utcnow() > pending.expiry:
+        db.session.delete(pending)
+        db.session.commit()
         return jsonify({"msg": "OTP has expired. Please log in again."}), 400
 
-    if pending['otp'] != otp_received:
+    if pending.otp != otp_received:
         return jsonify({"msg": "Invalid verification code"}), 400
 
-    admin = SuperAdmin.query.get(pending['admin_id'])
+    admin_id = None
+    if pending.claims:
+        admin_id = pending.claims.get('admin_id') or pending.claims.get('id')
+
+    admin = SuperAdmin.query.get(admin_id) if admin_id else None
     if not admin:
-        super_admin_pending_logins.pop(email, None)
+        db.session.delete(pending)
+        db.session.commit()
         return jsonify({"msg": "Admin user not found"}), 400
 
-    super_admin_pending_logins.pop(email, None)
+    db.session.delete(pending)
+    db.session.commit()
     access_token = build_access_token(admin)
 
     # Send successful login email notice
