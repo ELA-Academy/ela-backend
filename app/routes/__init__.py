@@ -12,6 +12,8 @@ def register_blueprints(app):
     # Board Workspace blueprints
     from .board_routes import board_bp
     app.register_blueprint(board_bp, url_prefix="/api/boards")
+    from .board_extensions_routes import board_extensions_bp
+    app.register_blueprint(board_extensions_bp, url_prefix="/api/board-extensions")
 
     # Core Admin blueprints
     from .dashboard_routes import dashboard_bp

@@ -70,3 +70,49 @@ def change_password():
     log_activity(user, "Changed their password") # Log the activity
     
     return jsonify({"message": "Password updated successfully"}), 200
+
+@profile_bp.route('/update', methods=['PUT'])
+@jwt_required()
+def update_profile():
+    claims = get_jwt()
+    current_user_email = get_jwt_identity()
+    user_role = claims.get('role')
+    data = request.get_json() or {}
+
+    name = data.get('name')
+    email = data.get('email')
+
+    if not name or not email:
+        return jsonify({"error": "Name and email are required"}), 400
+
+    user = None
+    if user_role == 'superadmin':
+        user = SuperAdmin.query.filter_by(email=current_user_email).first()
+    elif user_role == 'staff':
+        user = Staff.query.filter_by(email=current_user_email).first()
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Check email uniqueness if it changed
+    if email != user.email:
+        if user_role == 'staff':
+            existing = Staff.query.filter_by(email=email).first()
+        else:
+            existing = SuperAdmin.query.filter_by(email=email).first()
+        if existing:
+            return jsonify({"error": "Email is already in use by another user"}), 400
+        user.email = email
+
+    user.name = name
+    db.session.commit()
+    log_activity(user, "Updated their profile details")
+
+    return jsonify({
+        "message": "Profile updated successfully",
+        "user": {
+            "name": user.name,
+            "email": user.email,
+            "role": user_role
+        }
+    }), 200

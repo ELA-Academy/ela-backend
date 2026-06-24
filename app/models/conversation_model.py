@@ -12,6 +12,7 @@ class ConversationParticipant(db.Model):
     
     # New field to track the last time an email/push notification was sent
     last_notified_at = db.Column(db.DateTime, nullable=True)
+    is_following = db.Column(db.Boolean, nullable=False, default=True)
 
     staff = db.relationship('Staff', back_populates='conversation_associations')
     super_admin = db.relationship('SuperAdmin', back_populates='conversation_associations')
@@ -57,6 +58,8 @@ class Message(db.Model):
     conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'), nullable=False)
     sender_type = db.Column(db.String(50))
     sender_id = db.Column(db.Integer)
+    file_path = db.Column(db.String(500), nullable=True)
+    filename = db.Column(db.String(255), nullable=True)
 
     __mapper_args__ = {'polymorphic_on': sender_type}
     
@@ -80,7 +83,9 @@ class Message(db.Model):
             'created_at': self.created_at.isoformat() + 'Z',
             'sender_id': self.sender_id,
             'sender_type': self.sender_type,
-            'sender_name': sender_name
+            'sender_name': sender_name,
+            'file_path': self.file_path,
+            'filename': self.filename
         }
 
 class StaffMessage(Message):

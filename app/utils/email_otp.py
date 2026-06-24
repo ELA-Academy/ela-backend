@@ -76,3 +76,18 @@ def send_login_notice_email(mail, recipient_email, timestamp_str, ip_address, de
     except Exception as e:
         current_app.logger.error(f"Failed to send login notice email to {recipient_email}: {e}")
         return False
+
+def send_password_reset_email(mail, recipient_email, recipient_name, reset_link):
+    """Sends a password reset email."""
+    try:
+        msg = Message(
+            'Reset Your Password - ELA Academy',
+            sender=current_app.config['MAIL_DEFAULT_SENDER'],
+            recipients=[recipient_email]
+        )
+        msg.body = f"Hello {recipient_name},\n\nYou requested a password reset for your ELA Academy account.\n\nPlease click the following link to reset your password:\n\n{reset_link}\n\nThis link will expire in 1 hour.\n\nIf you did not request this, you can safely ignore this email.\n\nBest regards,\nELA Academy Team"
+        mail.send(msg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Failed to send password reset email to {recipient_email}: {e}")
+        return False

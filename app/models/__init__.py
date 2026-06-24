@@ -36,6 +36,21 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('board_tasks', 'description_html', 'TEXT NULL')
         add_column_if_missing('board_tasks', 'time_estimate_minutes', 'INTEGER NULL')
 
+    if inspector.has_table('task_time_entries'):
+        add_column_if_missing('task_time_entries', 'is_billable', 'BOOLEAN NOT NULL DEFAULT FALSE')
+
+    if inspector.has_table('messages'):
+        add_column_if_missing('messages', 'file_path', 'VARCHAR(500) NULL')
+        add_column_if_missing('messages', 'filename', 'VARCHAR(255) NULL')
+
+    if inspector.has_table('workspace_docs'):
+        add_column_if_missing('workspace_docs', 'is_public', 'BOOLEAN NOT NULL DEFAULT TRUE')
+        add_column_if_missing('workspace_docs', 'shared_user_ids', 'TEXT NULL')
+        add_column_if_missing('workspace_docs', 'shared_dept_ids', 'TEXT NULL')
+
+    if inspector.has_table('conversation_participants'):
+        add_column_if_missing('conversation_participants', 'is_following', 'BOOLEAN NOT NULL DEFAULT TRUE')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
@@ -65,8 +80,14 @@ def init_db(app):
         from app.models.subsidy_transaction_model import SubsidyTransaction, SubsidyPaymentDistribution
         
         # Workspace Collaboration Models
-        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc
+        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment
         from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike
+        from app.models.announcement_model import Announcement
+        from app.models.board_model_extensions import (
+            BoardCustomField, TaskCustomFieldValue,
+            BoardFormConfig, BoardFormResponse,
+            WorkspaceDocumentFolder, WorkspaceDocumentFile, WorkspaceDocumentFileVersion
+        )
         
         db.create_all()
         ensure_runtime_schema_updates()

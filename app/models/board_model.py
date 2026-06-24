@@ -34,6 +34,7 @@ class Board(db.Model):
             'is_folder': self.is_folder,
             'access_members': [member.to_dict() for member in self.access_members],
             'groups': [group.to_dict() for group in self.groups],
+            'tasks_count': sum(len(g.tasks) for g in self.groups),
             'created_at': self.created_at.isoformat() + 'Z'
         }
 
@@ -393,6 +394,7 @@ class TaskTimeEntry(db.Model):
     end_time = db.Column(db.DateTime, nullable=True) # None if currently running
     duration_seconds = db.Column(db.Integer, default=0) # 0 if currently running
     description = db.Column(db.String(255), nullable=True)
+    is_billable = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
@@ -406,6 +408,7 @@ class TaskTimeEntry(db.Model):
             'end_time': self.end_time.isoformat() + 'Z' if self.end_time else None,
             'duration_seconds': self.duration_seconds,
             'description': self.description,
+            'is_billable': self.is_billable,
             'created_at': self.created_at.isoformat() + 'Z'
         }
 
@@ -421,10 +424,26 @@ class WorkspaceDoc(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     position = db.Column(db.Integer, default=0)
+    
+    # Sharing Settings
+    is_public = db.Column(db.Boolean, default=True, nullable=False)
+    shared_user_ids = db.Column(db.Text, nullable=True) # JSON list
+    shared_dept_ids = db.Column(db.Text, nullable=True) # JSON list
 
     board = db.relationship('Board')
 
     def to_dict(self):
+        import json
+        try:
+            users_list = json.loads(self.shared_user_ids) if self.shared_user_ids else []
+        except:
+            users_list = []
+            
+        try:
+            depts_list = json.loads(self.shared_dept_ids) if self.shared_dept_ids else []
+        except:
+            depts_list = []
+
         return {
             'id': self.id,
             'board_id': self.board_id,
@@ -433,6 +452,34 @@ class WorkspaceDoc(db.Model):
             'created_by_name': self.created_by_name,
             'created_at': self.created_at.isoformat() + 'Z',
             'updated_at': self.updated_at.isoformat() + 'Z',
-            'position': self.position
+            'position': self.position,
+            'is_public': self.is_public,
+            'shared_user_ids': users_list,
+            'shared_dept_ids': depts_list
+        }
+
+
+class WorkspaceDocComment(db.Model):
+    __tablename__ = 'workspace_doc_comments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    doc_id = db.Column(db.Integer, db.ForeignKey('workspace_docs.id', ondelete='CASCADE'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_by_name = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    resolved = db.Column(db.Boolean, default=False, nullable=False)
+    assigned_to_user_id = db.Column(db.Integer, nullable=True)
+
+    doc = db.relationship('WorkspaceDoc')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'doc_id': self.doc_id,
+            'content': self.content,
+            'created_by_name': self.created_by_name,
+            'created_at': self.created_at.isoformat() + 'Z',
+            'resolved': self.resolved,
+            'assigned_to_user_id': self.assigned_to_user_id
         }
 
