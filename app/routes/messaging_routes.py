@@ -1,9 +1,11 @@
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 from sqlalchemy import func, or_
+from werkzeug.utils import secure_filename
 
 from app.models import db
 from app.models.conversation_model import (
@@ -18,6 +20,7 @@ from app.models.message_log_model import MessageLog
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
+from app.models.announcement_model import Announcement
 from app.utils.notifications import send_email_in_background, send_push_notification
 
 
@@ -55,13 +58,17 @@ def get_participant_entry(conversation_id, user, role):
 def get_or_create_participant_entry(conversation, user, role):
     participant_entry = get_participant_entry(conversation.id, user, role)
     if participant_entry:
+        if not participant_entry.is_following:
+            participant_entry.is_following = True
+            db.session.flush()
         return participant_entry
 
     participant_entry = ConversationParticipant(
         conversation_id=conversation.id,
         staff=user if role == 'staff' else None,
         super_admin=user if role == 'superadmin' else None,
-        last_read_at=datetime.now(timezone.utc)
+        last_read_at=datetime.now(timezone.utc),
+        is_following=True
     )
     db.session.add(participant_entry)
     db.session.flush()
@@ -128,6 +135,10 @@ def can_access_conversation(user, role, conversation):
     if not user or not conversation:
         return False
 
+    part = get_participant_entry(conversation.id, user, role)
+    if part and not part.is_following:
+        return False
+
     if role == 'superadmin':
         return True
 
@@ -144,11 +155,14 @@ def get_accessible_conversations(user, role):
     ensure_workspace_threads()
     conversations = Conversation.query.order_by(Conversation.updated_at.desc()).all()
     if role == 'superadmin':
-        return [
-            conversation for conversation in conversations
-            if conversation.conversation_type != 'direct'
-            or get_participant_entry(conversation.id, user, role)
-        ]
+        filtered = []
+        for conversation in conversations:
+            part = get_participant_entry(conversation.id, user, role)
+            if part and not part.is_following:
+                continue
+            if conversation.conversation_type != 'direct' or part:
+                filtered.append(conversation)
+        return filtered
     return [conversation for conversation in conversations if can_access_conversation(user, role, conversation)]
 
 
@@ -257,16 +271,17 @@ def get_users_for_messaging():
     current_user, role = get_current_user()
     users = []
 
-    current_user_staff_id = current_user.id if role == 'staff' else None
-    current_user_admin_id = current_user.id if role == 'superadmin' else None
-
-    all_staff = Staff.query.filter(Staff.id != current_user_staff_id).all()
+    all_staff = Staff.query.all()
     for staff in all_staff:
-        users.append({'id': f'staff_{staff.id}', 'name': staff.name, 'role': 'Staff', 'email': staff.email})
+        is_me = (role == 'staff' and staff.id == current_user.id)
+        name = f"{staff.name} (You)" if is_me else staff.name
+        users.append({'id': f'staff_{staff.id}', 'name': name, 'role': 'Staff', 'email': staff.email})
 
-    all_super_admins = SuperAdmin.query.filter(SuperAdmin.id != current_user_admin_id).all()
+    all_super_admins = SuperAdmin.query.all()
     for admin in all_super_admins:
-        users.append({'id': f'superadmin_{admin.id}', 'name': admin.name, 'role': 'Super Admin', 'email': admin.email})
+        is_me = (role == 'superadmin' and admin.id == current_user.id)
+        name = f"{admin.name} (You)" if is_me else admin.name
+        users.append({'id': f'superadmin_{admin.id}', 'name': name, 'role': 'Super Admin', 'email': admin.email})
 
     return jsonify(users), 200
 
@@ -315,6 +330,8 @@ def start_conversation():
     if not participant_ids:
         return jsonify({'error': 'No participants provided'}), 400
 
+    added_keys = {f"{role}_{user.id}"}
+
     new_conversation = Conversation(conversation_type='direct')
     if role == 'superadmin':
         new_conversation.participants.append(ConversationParticipant(super_admin=user))
@@ -322,6 +339,10 @@ def start_conversation():
         new_conversation.participants.append(ConversationParticipant(staff=user))
 
     for participant_token in participant_ids:
+        if participant_token in added_keys:
+            continue
+        added_keys.add(participant_token)
+        
         participant_role, participant_id_str = participant_token.split('_', 1)
         participant_id = int(participant_id_str)
 
@@ -396,6 +417,69 @@ def create_channel():
         "department_name": department.name if department else None,
         "is_restricted": channel.conversation_type == 'department'
     }), 201
+
+
+@messaging_bp.route('/conversations/<int:conversation_id>/unfollow', methods=['POST'])
+@jwt_required()
+def unfollow_conversation(conversation_id):
+    """Remove the current user from a channel conversation so it no longer appears in their sidebar."""
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    conversation = Conversation.query.get_or_404(conversation_id)
+    if conversation.conversation_type not in ('channel', 'department'):
+        return jsonify({"error": "You can only unfollow channels."}), 400
+
+    participant = get_participant_entry(conversation_id, user, role)
+    if not participant:
+        participant = ConversationParticipant(
+            conversation_id=conversation_id,
+            staff=user if role == 'staff' else None,
+            super_admin=user if role == 'superadmin' else None,
+            last_read_at=datetime.now(timezone.utc)
+        )
+        db.session.add(participant)
+    participant.is_following = False
+    db.session.commit()
+
+    return jsonify({"message": "Unfollowed channel successfully."}), 200
+
+
+@messaging_bp.route('/conversations/<int:conversation_id>/mark-unread', methods=['POST'])
+@jwt_required()
+def mark_conversation_unread(conversation_id):
+    """Reset the user's last_read_at so the conversation appears unread."""
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    conversation = Conversation.query.get_or_404(conversation_id)
+    if not can_access_conversation(user, role, conversation):
+        return jsonify({"error": "Forbidden"}), 403
+
+    participant = get_participant_entry(conversation_id, user, role)
+    if participant:
+        # Set last_read_at to epoch to make everything appear unread
+        participant.last_read_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        db.session.commit()
+
+    return jsonify({"message": "Marked as unread."}), 200
+
+
+@messaging_bp.route('/conversations/<int:conversation_id>/favorite', methods=['POST'])
+@jwt_required()
+def toggle_favorite_conversation(conversation_id):
+    """Placeholder for favorite toggle - returns success for frontend state management."""
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    conversation = Conversation.query.get_or_404(conversation_id)
+    if not can_access_conversation(user, role, conversation):
+        return jsonify({"error": "Forbidden"}), 403
+
+    return jsonify({"message": "Favorite toggled."}), 200
 
 
 @messaging_bp.route('/conversations/<int:conversation_id>/messages', methods=['GET'])
@@ -541,6 +625,132 @@ def send_message(conversation_id):
     })
 
     return jsonify(message_dict), 201
+
+@messaging_bp.route('/conversations/<int:conversation_id>/upload', methods=['POST'])
+@jwt_required()
+def upload_message_file(conversation_id):
+    user, role = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Empty filename'}), 400
+
+    conversation = Conversation.query.get_or_404(conversation_id)
+    if not can_access_conversation(user, role, conversation):
+        return jsonify({"error": "Forbidden"}), 403
+
+    get_or_create_participant_entry(conversation, user, role)
+
+    upload_folder = os.path.join(current_app.root_path, 'static', 'uploads', 'messaging')
+    os.makedirs(upload_folder, exist_ok=True)
+    filename = secure_filename(file.filename)
+    unique_filename = f"{uuid.uuid4().hex}_{filename}"
+    file_path = os.path.join(upload_folder, unique_filename)
+    file.save(file_path)
+    relative_path = f"/static/uploads/messaging/{unique_filename}"
+
+    content = request.form.get('content', '').strip()
+    if not content:
+        content = f"Uploaded attachment: {filename}"
+
+    if role == 'superadmin':
+        new_message = SuperAdminMessage(
+            content=content,
+            sender_id=user.id,
+            file_path=relative_path,
+            filename=filename
+        )
+    else:
+        new_message = StaffMessage(
+            content=content,
+            sender_id=user.id,
+            file_path=relative_path,
+            filename=filename
+        )
+
+    conversation.messages.append(new_message)
+
+    if conversation.conversation_type == 'direct':
+        participant_names = sorted([participant.name for participant in conversation.get_participants()])
+        recipient_names = ", ".join(participant_names)
+    else:
+        recipient_names = conversation.name or conversation.display_name()
+
+    db.session.add(
+        MessageLog(
+            conversation_id=conversation_id,
+            sender_id=user.id,
+            sender_type=role,
+            sender_name=user.name,
+            recipient_names=recipient_names,
+            content=content
+        )
+    )
+
+    db.session.commit()
+
+    from app import socketio
+    message_dict = new_message.to_dict()
+    socketio.emit('new_message', message_dict, room=f"conversation_{conversation_id}")
+
+    for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
+        socketio.emit('conversation_updated', {
+            'conversation_id': conversation_id,
+            'recipient_id': recipient.id,
+            'recipient_role': recipient_role
+        })
+    socketio.emit('conversation_updated', {
+        'conversation_id': conversation_id,
+        'recipient_id': user.id,
+        'recipient_role': role
+    })
+
+    return jsonify(message_dict), 201
+
+# Announcements
+@messaging_bp.route('/announcements', methods=['GET'])
+@jwt_required()
+def get_announcements():
+    try:
+        announcements = Announcement.query.order_by(Announcement.created_at.desc()).all()
+        return jsonify([a.to_dict() for a in announcements]), 200
+    except Exception as e:
+        print(f"Error fetching announcements: {e}")
+        return jsonify({"error": "Failed to fetch announcements"}), 500
+
+@messaging_bp.route('/announcements', methods=['POST'])
+@jwt_required()
+def create_announcement():
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    title = data.get('title')
+    content = data.get('content')
+
+    if not title or not content:
+        return jsonify({"error": "Title and content are required"}), 400
+
+    try:
+        announcement = Announcement(
+            title=title,
+            content=content,
+            created_by_name=user.name
+        )
+        db.session.add(announcement)
+        db.session.commit()
+        return jsonify(announcement.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error creating announcement: {e}")
+        return jsonify({"error": "Failed to create announcement"}), 500
+
 
 # Socket.IO Event Handlers
 from flask_socketio import join_room, leave_room

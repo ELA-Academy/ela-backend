@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -1192,7 +1192,8 @@ def create_task_time_entry(task_id):
         start_time=start_time,
         end_time=end_time,
         duration_seconds=duration_seconds,
-        description=data.get('description')
+        description=data.get('description'),
+        is_billable=data.get('is_billable', False)
     )
     db.session.add(entry)
     db.session.commit()
@@ -1238,7 +1239,7 @@ def update_task_time_estimate(task_id):
 
 # ─── Workspace Documents (Wiki) ──────────────────────────────────────
 
-@board_bp.route('/boards/<int:board_id>/docs', methods=['GET'])
+@board_bp.route('/<int:board_id>/docs', methods=['GET'])
 @jwt_required()
 def get_workspace_docs(board_id):
     actor, role = get_actor()
@@ -1256,7 +1257,7 @@ def get_workspace_docs(board_id):
     return jsonify([d.to_dict() for d in docs]), 200
 
 
-@board_bp.route('/boards/<int:board_id>/docs', methods=['POST'])
+@board_bp.route('/<int:board_id>/docs', methods=['POST'])
 @jwt_required()
 def create_workspace_doc(board_id):
     actor, role = get_actor()
@@ -1331,3 +1332,155 @@ def delete_workspace_doc(doc_id):
     db.session.delete(doc)
     db.session.commit()
     return jsonify({'message': 'Document deleted'}), 200
+
+
+@board_bp.route('/docs', methods=['GET'])
+@jwt_required()
+def get_all_workspace_docs():
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    all_docs = WorkspaceDoc.query.all()
+    accessible_docs = []
+    
+    # Get staff departments
+    dept_ids = []
+    if role == 'staff':
+        dept_ids = [d.id for d in actor.departments] if hasattr(actor, 'departments') else []
+
+    import json
+    for doc in all_docs:
+        if role == 'superadmin':
+            accessible_docs.append(doc)
+            continue
+        if board_is_accessible(doc.board, actor, role):
+            accessible_docs.append(doc)
+            continue
+        if doc.is_public:
+            accessible_docs.append(doc)
+            continue
+        try:
+            shared_users = json.loads(doc.shared_user_ids) if doc.shared_user_ids else []
+        except:
+            shared_users = []
+        if actor.id in shared_users:
+            accessible_docs.append(doc)
+            continue
+        try:
+            shared_depts = json.loads(doc.shared_dept_ids) if doc.shared_dept_ids else []
+        except:
+            shared_depts = []
+        if any(d_id in shared_depts for d_id in dept_ids):
+            accessible_docs.append(doc)
+            continue
+
+    result = []
+    for d in accessible_docs:
+        d_dict = d.to_dict()
+        d_dict['location_name'] = d.board.name if d.board else 'Unknown Space'
+        result.append(d_dict)
+
+    return jsonify(result), 200
+
+
+# ─── Workspace Documents Comments & Sharing ───────────────────────────
+
+@board_bp.route('/docs/<int:doc_id>/comments', methods=['GET'])
+@jwt_required()
+def get_doc_comments(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+        
+    if not board_is_accessible(doc.board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+        
+    comments = WorkspaceDocComment.query.filter_by(doc_id=doc_id).order_by(WorkspaceDocComment.created_at.asc()).all()
+    return jsonify([c.to_dict() for c in comments]), 200
+
+
+@board_bp.route('/docs/<int:doc_id>/comments', methods=['POST'])
+@jwt_required()
+def create_doc_comment(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+        
+    if not board_is_accessible(doc.board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+        
+    data = request.get_json() or {}
+    content = data.get('content', '').strip()
+    if not content:
+        return jsonify({'error': 'Comment content is required'}), 400
+        
+    assigned_to = data.get('assigned_to_user_id')
+    
+    comment = WorkspaceDocComment(
+        doc_id=doc_id,
+        content=content,
+        created_by_name=actor.name,
+        assigned_to_user_id=assigned_to
+    )
+    db.session.add(comment)
+    db.session.commit()
+    return jsonify(comment.to_dict()), 201
+
+
+@board_bp.route('/docs/comments/<int:comment_id>/resolve', methods=['PUT'])
+@jwt_required()
+def resolve_doc_comment(comment_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+        
+    comment = WorkspaceDocComment.query.get(comment_id)
+    if not comment:
+        return jsonify({'error': 'Comment not found'}), 404
+        
+    data = request.get_json() or {}
+    resolved = data.get('resolved', True)
+    comment.resolved = resolved
+    
+    db.session.commit()
+    return jsonify(comment.to_dict()), 200
+
+
+@board_bp.route('/docs/<int:doc_id>/share', methods=['PUT'])
+@jwt_required()
+def share_workspace_doc(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+        
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+        
+    if not board_is_accessible(doc.board, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+        
+    data = request.get_json() or {}
+    
+    # Update sharing settings
+    if 'is_public' in data:
+        doc.is_public = bool(data['is_public'])
+    if 'shared_user_ids' in data:
+        import json
+        doc.shared_user_ids = json.dumps(data['shared_user_ids'])
+    if 'shared_dept_ids' in data:
+        import json
+        doc.shared_dept_ids = json.dumps(data['shared_dept_ids'])
+        
+    db.session.commit()
+    return jsonify(doc.to_dict()), 200
+

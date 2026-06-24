@@ -6,8 +6,10 @@ from app.models.super_admin_model import SuperAdmin
 from app.models.login_otp_model import LoginOTP
 
 from app import mail
-from app.utils.email_otp import generate_otp, send_otp_email, send_login_notice_email
+from app.utils.email_otp import generate_otp, send_otp_email, send_login_notice_email, send_password_reset_email
 from datetime import datetime, timedelta, timezone
+from flask import current_app
+import os
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -142,7 +144,7 @@ def verify_setup_token():
     try:
         decoded = decode_token(token)
         purpose = decoded.get('purpose')
-        if purpose != 'setup-password':
+        if purpose not in {'setup-password', 'reset-password'}:
             return jsonify({"error": "Invalid token purpose", "valid": False}), 400
             
         return jsonify({
@@ -167,7 +169,7 @@ def setup_password():
     try:
         decoded = decode_token(token)
         purpose = decoded.get('purpose')
-        if purpose != 'setup-password':
+        if purpose not in {'setup-password', 'reset-password'}:
             return jsonify({"error": "Invalid token purpose"}), 400
         
         email = decoded.get('sub')
@@ -181,6 +183,41 @@ def setup_password():
             else:
                 return jsonify({"error": "Account not found"}), 404
         db.session.commit()
-        return jsonify({"message": "Password setup successfully! You can now log in."}), 200
+        return jsonify({"message": "Password updated successfully! You can now log in."}), 200
     except Exception as e:
         return jsonify({"error": "Invalid or expired token"}), 400
+
+@auth_bp.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    data = request.get_json() or {}
+    email = data.get('email')
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    user = Staff.query.filter_by(email=email).first()
+    role = 'staff'
+    if not user:
+        user = SuperAdmin.query.filter_by(email=email).first()
+        role = 'superadmin'
+
+    if not user:
+        # Avoid user enumeration for security, return 200
+        return jsonify({"message": "If the email is registered, a password reset link has been sent."}), 200
+
+    expires = timedelta(hours=1)
+    reset_token = create_access_token(
+        identity=email,
+        expires_delta=expires,
+        additional_claims={'purpose': 'reset-password', 'role': role, 'name': user.name}
+    )
+
+    frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+    frontend_url = os.getenv('FRONTEND_URL', frontend_url)
+
+    reset_link = f"{frontend_url}/setup-password?token={reset_token}"
+
+    send_password_reset_email(mail, email, user.name, reset_link)
+    
+    print(f"=== [PASSWORD RESET LOG] User '{email}' reset link: {reset_link} ===")
+
+    return jsonify({"message": "Password reset link has been sent to your email."}), 200
