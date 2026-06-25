@@ -292,6 +292,101 @@ def submit_form_response(form_id):
         "response": response_record.to_dict()
     }), 201
 
+# ==========================================
+# 2b. Public Ingestion Forms APIs (No Auth required)
+# ==========================================
+
+@board_extensions_bp.route('/public/forms/<int:form_id>', methods=['GET'])
+def get_public_form_details(form_id):
+    form = BoardFormConfig.query.get_or_404(form_id)
+    return jsonify({
+        "id": form.id,
+        "board_id": form.board_id,
+        "name": form.name,
+        "description": form.description,
+        "form_structure": json.loads(form.form_structure_json) if form.form_structure_json else []
+    }), 200
+
+@board_extensions_bp.route('/public/forms/submit/<int:form_id>', methods=['POST'])
+def submit_public_form_response(form_id):
+    form = BoardFormConfig.query.get_or_404(form_id)
+    board = Board.query.get_or_404(form.board_id)
+
+    data = request.get_json() or {}
+    response_data = data.get('response')
+    if not response_data:
+        return jsonify({"error": "Response data is required"}), 400
+
+    group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
+    if not group:
+        group = BoardGroup(board_id=board.id, name="Form Submissions", color="#fdab3d", position=0)
+        db.session.add(group)
+        db.session.flush()
+
+    form_struct = json.loads(form.form_structure_json)
+    
+    task_payload = {
+        'title': f"Public Form Submission - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+        'status': 'Not Started',
+        'priority': 'Normal',
+        'notes': 'Form submission auto-generated task'
+    }
+
+    custom_field_answers = {}
+
+    for question in form_struct:
+        qid = question.get('id')
+        mapping = question.get('mapping')
+        answer = response_data.get(str(qid))
+
+        if answer is None:
+            continue
+
+        if mapping in {'title', 'priority', 'status', 'notes'}:
+            task_payload[mapping] = answer
+        elif mapping == 'due_date':
+            try:
+                task_payload['due_date'] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
+            except:
+                pass
+        elif mapping and mapping.startswith('custom_field_'):
+            field_id = int(mapping.split('_')[-1])
+            custom_field_answers[field_id] = answer
+
+    task = BoardTask(
+        group_id=group.id,
+        title=task_payload['title'],
+        status=task_payload['status'],
+        priority=task_payload['priority'],
+        notes=task_payload['notes'],
+        due_date=task_payload.get('due_date')
+    )
+    db.session.add(task)
+    db.session.flush()
+
+    for fid, val in custom_field_answers.items():
+        field_val = TaskCustomFieldValue(
+            task_id=task.id,
+            field_id=fid,
+            value_json=json.dumps(val)
+        )
+        db.session.add(field_val)
+
+    response_record = BoardFormResponse(
+        form_id=form_id,
+        response_json=json.dumps(response_data),
+        created_task_id=task.id
+    )
+    db.session.add(response_record)
+    db.session.commit()
+
+    log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
+    return jsonify({
+        "message": "Form submitted successfully",
+        "task": task.to_dict(),
+        "response": response_record.to_dict()
+    }), 201
+
 @board_extensions_bp.route('/forms/<int:form_id>/responses', methods=['GET'])
 @jwt_required()
 def get_form_responses(form_id):
