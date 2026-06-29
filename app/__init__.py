@@ -46,6 +46,10 @@ def create_app():
     init_db(app)
     Migrate(app, db)
     
+    # Start background reminders scheduler
+    from app.utils.reminders_worker import start_reminders_scheduler
+    start_reminders_scheduler(app)
+    
     # ... (rest of your app setup) ...
     @jwt.expired_token_loader
     def expired_token_callback(jwt_header, jwt_payload): return jsonify({"message": "Token has expired", "error": "token_expired"}), 401

@@ -7,7 +7,7 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from werkzeug.utils import secure_filename
 
 from app.models import db
-from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskAssignee, TaskTimeEntry, WorkspaceDoc
+from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskAssignee, TaskTimeEntry, WorkspaceDoc, BoardTaskAttachment
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
 from app.models.board_model_extensions import (
@@ -235,16 +235,21 @@ def submit_form_response(form_id):
     }
 
     custom_field_answers = {}
+    file_attachments = []
 
     for question in form_struct:
         qid = question.get('id')
         mapping = question.get('mapping') # e.g. 'title', 'priority', 'due_date', 'notes', or 'custom_field_X'
         answer = response_data.get(str(qid))
+        qtype = question.get('type')
 
         if answer is None:
             continue
 
-        if mapping in {'title', 'priority', 'status', 'notes'}:
+        if qtype == 'file' or mapping == 'file':
+            if isinstance(answer, dict) and 'file_url' in answer:
+                file_attachments.append(answer)
+        elif mapping in {'title', 'priority', 'status', 'notes'}:
             task_payload[mapping] = answer
         elif mapping == 'due_date':
             try:
@@ -276,6 +281,16 @@ def submit_form_response(form_id):
         )
         db.session.add(field_val)
 
+    # Save File Attachments
+    for att in file_attachments:
+        attachment = BoardTaskAttachment(
+            task_id=task.id,
+            filename=att.get('filename', 'Form File'),
+            file_path=att['file_url'],
+            uploaded_by_name='Form Submitter'
+        )
+        db.session.add(attachment)
+
     # Save Form Response
     response_record = BoardFormResponse(
         form_id=form_id,
@@ -291,6 +306,24 @@ def submit_form_response(form_id):
         "task": task.to_dict(),
         "response": response_record.to_dict()
     }), 201
+
+@board_extensions_bp.route('/public/forms/upload', methods=['POST'])
+def upload_public_form_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+        
+    filename = secure_filename(file.filename)
+    unique_filename = f"{uuid.uuid4().hex}_{filename}"
+    upload_folder = os.path.join(current_app.root_path, 'static', 'uploads')
+    os.makedirs(upload_folder, exist_ok=True)
+    file_path = os.path.join(upload_folder, unique_filename)
+    file.save(file_path)
+    
+    file_url = f"/static/uploads/{unique_filename}"
+    return jsonify({"file_url": file_url, "filename": filename}), 200
 
 # ==========================================
 # 2b. Public Ingestion Forms APIs (No Auth required)
@@ -333,16 +366,21 @@ def submit_public_form_response(form_id):
     }
 
     custom_field_answers = {}
+    file_attachments = []
 
     for question in form_struct:
         qid = question.get('id')
         mapping = question.get('mapping')
         answer = response_data.get(str(qid))
+        qtype = question.get('type')
 
         if answer is None:
             continue
 
-        if mapping in {'title', 'priority', 'status', 'notes'}:
+        if qtype == 'file' or mapping == 'file':
+            if isinstance(answer, dict) and 'file_url' in answer:
+                file_attachments.append(answer)
+        elif mapping in {'title', 'priority', 'status', 'notes'}:
             task_payload[mapping] = answer
         elif mapping == 'due_date':
             try:
@@ -371,6 +409,16 @@ def submit_public_form_response(form_id):
             value_json=json.dumps(val)
         )
         db.session.add(field_val)
+
+    # Save File Attachments
+    for att in file_attachments:
+        attachment = BoardTaskAttachment(
+            task_id=task.id,
+            filename=att.get('filename', 'Form File'),
+            file_path=att['file_url'],
+            uploaded_by_name='Form Submitter'
+        )
+        db.session.add(attachment)
 
     response_record = BoardFormResponse(
         form_id=form_id,

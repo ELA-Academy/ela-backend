@@ -16,6 +16,10 @@ def ensure_runtime_schema_updates():
     inspector = inspect(db.engine)
     if inspector.has_table('super_admins'):
         add_column_if_missing('super_admins', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE')
+        add_column_if_missing('super_admins', 'notification_preferences', 'TEXT NULL')
+
+    if inspector.has_table('staff'):
+        add_column_if_missing('staff', 'notification_preferences', 'TEXT NULL')
 
     if inspector.has_table('conversations'):
         add_column_if_missing('conversations', 'conversation_type', "VARCHAR(50) NOT NULL DEFAULT 'direct'")
@@ -25,6 +29,17 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('boards'):
         add_column_if_missing('boards', 'is_private', 'BOOLEAN NOT NULL DEFAULT FALSE')
         add_column_if_missing('boards', 'custom_statuses', 'TEXT NULL')
+        add_column_if_missing('boards', 'color', 'VARCHAR(50) NULL')
+        add_column_if_missing('boards', 'icon', 'VARCHAR(50) NULL')
+        add_column_if_missing('boards', 'is_template', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('boards', 'is_archived', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('boards', 'status', "VARCHAR(50) NOT NULL DEFAULT 'Not Started'")
+        add_column_if_missing('boards', 'priority', "VARCHAR(50) NOT NULL DEFAULT 'Normal'")
+        add_column_if_missing('boards', 'category', 'VARCHAR(100) NULL')
+        add_column_if_missing('boards', 'budget_amount', 'FLOAT NULL')
+
+    if inspector.has_table('calendar_events'):
+        add_column_if_missing('calendar_events', 'reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
 
     if inspector.has_table('board_tasks'):
         add_column_if_missing('board_tasks', 'start_date', 'DATE NULL')
@@ -80,7 +95,7 @@ def init_db(app):
         from app.models.subsidy_transaction_model import SubsidyTransaction, SubsidyPaymentDistribution
         
         # Workspace Collaboration Models
-        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment
+        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, BoardMilestone
         from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike
         from app.models.announcement_model import Announcement
         from app.models.board_model_extensions import (
