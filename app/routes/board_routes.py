@@ -4,7 +4,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, BoardMilestone
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -38,6 +38,45 @@ def board_is_accessible(board, actor, role):
         return True
 
     return any(member.staff_id == actor.id for member in board.access_members)
+
+
+def doc_is_accessible(doc, actor, role):
+    if not doc or not actor:
+        return False
+
+    if role == 'superadmin':
+        return True
+
+    # 1. If user has access to the parent board, they have access to the doc
+    if doc.board and board_is_accessible(doc.board, actor, role):
+        return True
+
+    # 2. Check if the document is public
+    if doc.is_public:
+        return True
+
+    # 3. Check if shared with user directly
+    if doc.shared_user_ids:
+        try:
+            import json
+            shared_users = json.loads(doc.shared_user_ids)
+            if actor.id in shared_users:
+                return True
+        except:
+            pass
+
+    # 4. Check if shared with user's department
+    if doc.shared_dept_ids and role == 'staff':
+        try:
+            import json
+            shared_depts = json.loads(doc.shared_dept_ids)
+            dept_ids = [d.id for d in actor.departments] if hasattr(actor, 'departments') else []
+            if any(d_id in shared_depts for d_id in dept_ids):
+                return True
+        except:
+            pass
+
+    return False
 
 
 def ensure_board_access(board, actor, role):
@@ -163,7 +202,16 @@ def task_assignee_keys(task):
 @jwt_required()
 def get_boards():
     actor, role = get_actor()
-    boards = Board.query.order_by(Board.created_at.desc()).all()
+    include_archived = request.args.get('include_archived', 'false') == 'true'
+    only_archived = request.args.get('only_archived', 'false') == 'true'
+    
+    query = Board.query.order_by(Board.created_at.desc())
+    if only_archived:
+        query = query.filter_by(is_archived=True)
+    elif not include_archived:
+        query = query.filter_by(is_archived=False)
+        
+    boards = query.all()
     visible_boards = [board.to_dict() for board in boards if board_is_accessible(board, actor, role)]
     return jsonify(visible_boards), 200
 
@@ -260,6 +308,28 @@ def update_board(board_id):
         board.is_folder = bool(data.get('is_folder'))
     if 'custom_statuses' in data:
         board.custom_statuses = json.dumps(data.get('custom_statuses'))
+        
+    # Branding & Project settings
+    if 'color' in data:
+        board.color = data.get('color')
+    if 'icon' in data:
+        board.icon = data.get('icon')
+    if 'is_template' in data:
+        board.is_template = bool(data.get('is_template'))
+    if 'is_archived' in data:
+        board.is_archived = bool(data.get('is_archived'))
+    if 'status' in data:
+        board.status = data.get('status')
+    if 'priority' in data:
+        board.priority = data.get('priority')
+    if 'category' in data:
+        board.category = data.get('category')
+    if 'budget_amount' in data:
+        try:
+            board.budget_amount = float(data.get('budget_amount')) if data.get('budget_amount') is not None else None
+        except:
+            pass
+
     sync_board_access(board, actor, role, data.get('access_members', board.to_dict().get('access_members', [])))
     db.session.commit()
     return jsonify(board.to_dict()), 200
@@ -1287,6 +1357,25 @@ def create_workspace_doc(board_id):
     return jsonify(doc.to_dict()), 201
 
 
+@board_bp.route('/docs/<int:doc_id>', methods=['GET'])
+@jwt_required()
+def get_single_workspace_doc(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+
+    if not doc_is_accessible(doc, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    d_dict = doc.to_dict()
+    d_dict['location_name'] = doc.board.name if doc.board else 'Unknown Space'
+    return jsonify(d_dict), 200
+
+
 @board_bp.route('/docs/<int:doc_id>', methods=['PUT'])
 @jwt_required()
 def update_workspace_doc(doc_id):
@@ -1298,7 +1387,7 @@ def update_workspace_doc(doc_id):
     if not doc:
         return jsonify({'error': 'Document not found'}), 404
 
-    if not board_is_accessible(doc.board, actor, role):
+    if not doc_is_accessible(doc, actor, role):
         return jsonify({'error': 'Forbidden'}), 403
 
     data = request.get_json() or {}
@@ -1326,7 +1415,9 @@ def delete_workspace_doc(doc_id):
     if not doc:
         return jsonify({'error': 'Document not found'}), 404
 
-    if not board_is_accessible(doc.board, actor, role):
+    is_creator = (doc.created_by_name == actor.name)
+    has_board_access = doc.board and board_is_accessible(doc.board, actor, role)
+    if role != 'superadmin' and not is_creator and not has_board_access:
         return jsonify({'error': 'Forbidden'}), 403
 
     db.session.delete(doc)
@@ -1397,7 +1488,7 @@ def get_doc_comments(doc_id):
     if not doc:
         return jsonify({'error': 'Document not found'}), 404
         
-    if not board_is_accessible(doc.board, actor, role):
+    if not doc_is_accessible(doc, actor, role):
         return jsonify({'error': 'Forbidden'}), 403
         
     comments = WorkspaceDocComment.query.filter_by(doc_id=doc_id).order_by(WorkspaceDocComment.created_at.asc()).all()
@@ -1415,7 +1506,7 @@ def create_doc_comment(doc_id):
     if not doc:
         return jsonify({'error': 'Document not found'}), 404
         
-    if not board_is_accessible(doc.board, actor, role):
+    if not doc_is_accessible(doc, actor, role):
         return jsonify({'error': 'Forbidden'}), 403
         
     data = request.get_json() or {}
@@ -1447,6 +1538,9 @@ def resolve_doc_comment(comment_id):
     if not comment:
         return jsonify({'error': 'Comment not found'}), 404
         
+    if not doc_is_accessible(comment.doc, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
     data = request.get_json() or {}
     resolved = data.get('resolved', True)
     comment.resolved = resolved
@@ -1466,7 +1560,9 @@ def share_workspace_doc(doc_id):
     if not doc:
         return jsonify({'error': 'Document not found'}), 404
         
-    if not board_is_accessible(doc.board, actor, role):
+    is_creator = (doc.created_by_name == actor.name)
+    has_board_access = doc.board and board_is_accessible(doc.board, actor, role)
+    if role != 'superadmin' and not is_creator and not has_board_access:
         return jsonify({'error': 'Forbidden'}), 403
         
     data = request.get_json() or {}
@@ -1483,4 +1579,268 @@ def share_workspace_doc(doc_id):
         
     db.session.commit()
     return jsonify(doc.to_dict()), 200
+
+
+# ─── Workspace Templates Endpoints ────────────────────────────────────
+
+@board_bp.route('/templates', methods=['GET'])
+@jwt_required()
+def get_board_templates():
+    actor, role = get_actor()
+    templates = Board.query.filter_by(is_template=True, is_archived=False).order_by(Board.created_at.desc()).all()
+    visible_templates = [t.to_dict() for t in templates if board_is_accessible(t, actor, role)]
+    return jsonify(visible_templates), 200
+
+@board_bp.route('/<int:board_id>/save-as-template', methods=['POST'])
+@jwt_required()
+def save_board_as_template(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+        
+    data = request.get_json() or {}
+    template_name = data.get('template_name', f"Template: {board.name}")
+    
+    # Create a new Board template copy
+    new_template = Board(
+        name=template_name,
+        description=board.description,
+        is_private=board.is_private,
+        custom_statuses=board.custom_statuses,
+        is_folder=board.is_folder,
+        color=board.color or '#673de6',
+        icon=board.icon or '📋',
+        is_template=True,
+        is_archived=False,
+        status=board.status,
+        priority=board.priority,
+        category=board.category,
+        budget_amount=board.budget_amount
+    )
+    db.session.add(new_template)
+    db.session.flush()
+    
+    # Copy access members
+    for member in board.access_members:
+        db.session.add(BoardAccessMember(
+            board_id=new_template.id,
+            staff_id=member.staff_id,
+            super_admin_id=member.super_admin_id
+        ))
+        
+    # Copy groups and tasks
+    for g in board.groups:
+        new_group = BoardGroup(
+            board_id=new_template.id,
+            name=g.name,
+            color=g.color,
+            position=g.position
+        )
+        db.session.add(new_group)
+        db.session.flush()
+        for t in g.tasks:
+            new_task = BoardTask(
+                group_id=new_group.id,
+                title=t.title,
+                status=t.status,
+                priority=t.priority,
+                notes=t.notes,
+                category=t.category,
+                tags=t.tags,
+                description_html=t.description_html,
+                position=t.position
+            )
+            db.session.add(new_task)
+            
+    # Copy custom fields
+    from app.models.board_model_extensions import BoardCustomField
+    custom_fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+    for cf in custom_fields:
+        new_cf = BoardCustomField(
+            board_id=new_template.id,
+            name=cf.name,
+            type=cf.type,
+            config_json=cf.config_json
+        )
+        db.session.add(new_cf)
+        
+    db.session.commit()
+    return jsonify(new_template.to_dict()), 201
+
+@board_bp.route('/create-from-template/<int:template_id>', methods=['POST'])
+@jwt_required()
+def create_board_from_template(template_id):
+    actor, role = get_actor()
+    template = Board.query.get_or_404(template_id)
+    if not template.is_template:
+        return jsonify({"error": "Selected board is not a template"}), 400
+        
+    data = request.get_json() or {}
+    new_name = data.get('name', f"New {template.name}")
+    
+    new_board = Board(
+        name=new_name,
+        description=template.description,
+        is_private=template.is_private,
+        custom_statuses=template.custom_statuses,
+        is_folder=template.is_folder,
+        color=template.color,
+        icon=template.icon,
+        is_template=False,
+        is_archived=False,
+        status='Not Started',
+        priority=template.priority,
+        category=template.category,
+        budget_amount=template.budget_amount
+    )
+    db.session.add(new_board)
+    db.session.flush()
+    
+    # Copy access members
+    if template.is_private:
+        sync_board_access(new_board, actor, role, [])
+        
+    # Copy groups and tasks
+    for g in template.groups:
+        new_group = BoardGroup(
+            board_id=new_board.id,
+            name=g.name,
+            color=g.color,
+            position=g.position
+        )
+        db.session.add(new_group)
+        db.session.flush()
+        for t in g.tasks:
+            new_task = BoardTask(
+                group_id=new_group.id,
+                title=t.title,
+                status=t.status,
+                priority=t.priority,
+                notes=t.notes,
+                category=t.category,
+                tags=t.tags,
+                description_html=t.description_html,
+                position=t.position
+            )
+            db.session.add(new_task)
+            
+    # Copy custom fields
+    from app.models.board_model_extensions import BoardCustomField
+    custom_fields = BoardCustomField.query.filter_by(board_id=template.id).all()
+    for cf in custom_fields:
+        new_cf = BoardCustomField(
+            board_id=new_board.id,
+            name=cf.name,
+            type=cf.type,
+            config_json=cf.config_json
+        )
+        db.session.add(new_cf)
+        
+    db.session.commit()
+    return jsonify(new_board.to_dict()), 201
+
+
+# ─── Soft-Archiving Endpoints ─────────────────────────────────────────
+
+@board_bp.route('/<int:board_id>/archive', methods=['PUT'])
+@jwt_required()
+def archive_board(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+    board.is_archived = True
+    db.session.commit()
+    return jsonify(board.to_dict()), 200
+
+@board_bp.route('/<int:board_id>/unarchive', methods=['PUT'])
+@jwt_required()
+def unarchive_board(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+    board.is_archived = False
+    db.session.commit()
+    return jsonify(board.to_dict()), 200
+
+
+# ─── Milestones Endpoints ─────────────────────────────────────────────
+
+@board_bp.route('/<int:board_id>/milestones', methods=['GET'])
+@jwt_required()
+def get_board_milestones(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+        
+    milestones = BoardMilestone.query.filter_by(board_id=board_id).order_by(BoardMilestone.due_date.asc()).all()
+    return jsonify([m.to_dict() for m in milestones]), 200
+
+@board_bp.route('/<int:board_id>/milestones', methods=['POST'])
+@jwt_required()
+def create_board_milestone(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+        
+    data = request.get_json() or {}
+    title = data.get('title')
+    due_date_str = data.get('due_date')
+    
+    if not title or not due_date_str:
+        return jsonify({"error": "Title and due date are required"}), 400
+        
+    try:
+        due_date = datetime.strptime(due_date_str.split('T')[0], "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Expected YYYY-MM-DD"}), 400
+        
+    milestone = BoardMilestone(
+        board_id=board_id,
+        title=title,
+        description=data.get('description'),
+        due_date=due_date,
+        status=data.get('status', 'Uncompleted')
+    )
+    db.session.add(milestone)
+    db.session.commit()
+    return jsonify(milestone.to_dict()), 201
+
+@board_bp.route('/milestones/<int:milestone_id>', methods=['PUT'])
+@jwt_required()
+def update_board_milestone(milestone_id):
+    actor, role = get_actor()
+    milestone = BoardMilestone.query.get_or_404(milestone_id)
+    if not ensure_board_access(milestone.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+        
+    data = request.get_json() or {}
+    milestone.title = data.get('title', milestone.title)
+    milestone.description = data.get('description', milestone.description)
+    milestone.status = data.get('status', milestone.status)
+    
+    if data.get('due_date'):
+        try:
+            milestone.due_date = datetime.strptime(data['due_date'].split('T')[0], "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format"}), 400
+            
+    db.session.commit()
+    return jsonify(milestone.to_dict()), 200
+
+@board_bp.route('/milestones/<int:milestone_id>', methods=['DELETE'])
+@jwt_required()
+def delete_board_milestone(milestone_id):
+    actor, role = get_actor()
+    milestone = BoardMilestone.query.get_or_404(milestone_id)
+    if not ensure_board_access(milestone.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+        
+    db.session.delete(milestone)
+    db.session.commit()
+    return jsonify({"message": "Milestone deleted"}), 200
 

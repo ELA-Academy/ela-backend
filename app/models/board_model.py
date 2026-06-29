@@ -12,10 +12,24 @@ class Board(db.Model):
     custom_statuses = db.Column(db.Text, nullable=True)
     parent_id = db.Column(db.Integer, db.ForeignKey('boards.id', ondelete='CASCADE'), nullable=True)
     is_folder = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Branding & Templates & Archiving
+    color = db.Column(db.String(50), nullable=True)
+    icon = db.Column(db.String(50), nullable=True)
+    is_template = db.Column(db.Boolean, default=False, nullable=False)
+    is_archived = db.Column(db.Boolean, default=False, nullable=False)
+    
+    # Project Metadata
+    status = db.Column(db.String(50), default='Not Started', nullable=False)
+    priority = db.Column(db.String(50), default='Normal', nullable=False)
+    category = db.Column(db.String(100), nullable=True)
+    budget_amount = db.Column(db.Float, nullable=True)
+    
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     groups = db.relationship('BoardGroup', backref='board', cascade='all, delete-orphan', lazy=True)
     access_members = db.relationship('BoardAccessMember', backref='board', cascade='all, delete-orphan', lazy=True)
+    milestones = db.relationship('BoardMilestone', backref='board', cascade='all, delete-orphan', lazy=True)
 
     def to_dict(self):
         custom_statuses_val = None
@@ -32,6 +46,14 @@ class Board(db.Model):
             'custom_statuses': custom_statuses_val,
             'parent_id': self.parent_id,
             'is_folder': self.is_folder,
+            'color': self.color,
+            'icon': self.icon,
+            'is_template': self.is_template,
+            'is_archived': self.is_archived,
+            'status': self.status,
+            'priority': self.priority,
+            'category': self.category,
+            'budget_amount': self.budget_amount,
             'access_members': [member.to_dict() for member in self.access_members],
             'groups': [group.to_dict() for group in self.groups],
             'tasks_count': sum(len(g.tasks) for g in self.groups),
@@ -357,6 +379,7 @@ class CalendarEvent(db.Model):
     color = db.Column(db.String(20), default='#673de6')
     recurring_rule = db.Column(db.String(255), nullable=True)
     reminder_minutes = db.Column(db.Integer, nullable=True)
+    reminder_sent = db.Column(db.Boolean, default=False, nullable=False)
     created_by_name = db.Column(db.String(100), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     linked_task_id = db.Column(db.Integer, db.ForeignKey('board_tasks.id', ondelete='SET NULL'), nullable=True)
@@ -376,6 +399,7 @@ class CalendarEvent(db.Model):
             'color': self.color,
             'recurring_rule': self.recurring_rule,
             'reminder_minutes': self.reminder_minutes,
+            'reminder_sent': self.reminder_sent,
             'created_by_name': self.created_by_name,
             'linked_task_id': self.linked_task_id,
             'created_at': self.created_at.isoformat() + 'Z'
@@ -481,5 +505,28 @@ class WorkspaceDocComment(db.Model):
             'created_at': self.created_at.isoformat() + 'Z',
             'resolved': self.resolved,
             'assigned_to_user_id': self.assigned_to_user_id
+        }
+
+
+class BoardMilestone(db.Model):
+    __tablename__ = 'board_milestones'
+
+    id = db.Column(db.Integer, primary_key=True)
+    board_id = db.Column(db.Integer, db.ForeignKey('boards.id', ondelete='CASCADE'), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    due_date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(50), default='Uncompleted', nullable=False) # 'Completed', 'Uncompleted'
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'board_id': self.board_id,
+            'title': self.title,
+            'description': self.description,
+            'due_date': self.due_date.isoformat() if self.due_date else None,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() + 'Z'
         }
 

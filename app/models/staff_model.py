@@ -23,6 +23,8 @@ class Staff(db.Model):
     # Relationship to the association object
     conversation_associations = db.relationship('ConversationParticipant', back_populates='staff')
     
+    notification_preferences = db.Column(db.Text, nullable=True)
+
     @property
     def conversations(self):
         """A property to easily get the conversations a staff member is in."""
@@ -35,6 +37,12 @@ class Staff(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
+        import json
+        try:
+            prefs = json.loads(self.notification_preferences) if self.notification_preferences else None
+        except:
+            prefs = None
+            
         return {
             'id': self.id,
             'name': self.name,
@@ -42,5 +50,6 @@ class Staff(db.Model):
             'is_active': self.is_active,
             'department_ids': [d.id for d in self.departments],
             'department_names': [d.name for d in self.departments],
+            'notification_preferences': prefs,
             'created_at': self.created_at.isoformat() + 'Z'
         }

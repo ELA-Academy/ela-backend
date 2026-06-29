@@ -88,4 +88,55 @@ def mark_as_read(notification_id):
 
     notification.is_read = True
     db.session.commit()
-    return jsonify(notification.to_dict()), 200
+    return jsonify(notification.to_dict()), 200
+
+@notification_bp.route('/preferences', methods=['GET'])
+@jwt_required()
+def get_notification_preferences():
+    import json
+    claims = get_jwt()
+    role = claims.get('role')
+    current_user_email = get_jwt_identity()
+    
+    if role == 'superadmin':
+        admin = SuperAdmin.query.filter_by(email=current_user_email).first()
+        if not admin:
+            return jsonify({"error": "Super Admin not found"}), 404
+        prefs = json.loads(admin.notification_preferences) if admin.notification_preferences else {}
+        return jsonify(prefs), 200
+    elif role == 'staff':
+        staff = Staff.query.filter_by(email=current_user_email).first()
+        if not staff:
+            return jsonify({"error": "Staff member not found"}), 404
+        prefs = json.loads(staff.notification_preferences) if staff.notification_preferences else {}
+        return jsonify(prefs), 200
+    else:
+        return jsonify({"error": "Unauthorized"}), 401
+
+@notification_bp.route('/preferences', methods=['PUT'])
+@jwt_required()
+def update_notification_preferences():
+    import json
+    claims = get_jwt()
+    role = claims.get('role')
+    current_user_email = get_jwt_identity()
+    
+    data = request.get_json() or {}
+    prefs_str = json.dumps(data)
+    
+    if role == 'superadmin':
+        admin = SuperAdmin.query.filter_by(email=current_user_email).first()
+        if not admin:
+            return jsonify({"error": "Super Admin not found"}), 404
+        admin.notification_preferences = prefs_str
+        db.session.commit()
+        return jsonify(admin.to_dict()), 200
+    elif role == 'staff':
+        staff = Staff.query.filter_by(email=current_user_email).first()
+        if not staff:
+            return jsonify({"error": "Staff member not found"}), 404
+        staff.notification_preferences = prefs_str
+        db.session.commit()
+        return jsonify(staff.to_dict()), 200
+    else:
+        return jsonify({"error": "Unauthorized"}), 401
