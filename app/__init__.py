@@ -5,12 +5,15 @@ from flask_jwt_extended import JWTManager
 from flask_mail import Mail
 from flask_migrate import Migrate
 from app.models import db, init_db
-from app.config import DevelopmentConfig, ProductionConfig
+from app.config import DevelopmentConfig, ProductionConfig, StagingConfig
 from dotenv import load_dotenv
 
 # This logic remains the same
 if os.getenv('FLASK_ENV') == 'production':
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', 'production.env')
+    load_dotenv(dotenv_path=dotenv_path)
+elif os.getenv('FLASK_ENV') == 'staging':
+    dotenv_path = os.path.join(os.path.dirname(__file__), '..', 'staging.env')
     load_dotenv(dotenv_path=dotenv_path)
 else:
     load_dotenv()
@@ -25,6 +28,8 @@ def create_app():
 
     if os.getenv('FLASK_ENV') == 'production':
         app.config.from_object(ProductionConfig)
+    elif os.getenv('FLASK_ENV') == 'staging':
+        app.config.from_object(StagingConfig)
     else:
         app.config.from_object(DevelopmentConfig)
 
