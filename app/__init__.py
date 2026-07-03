@@ -1,14 +1,7 @@
 import os
-from flask import Flask, jsonify
-from flask_cors import CORS
-from flask_jwt_extended import JWTManager
-from flask_mail import Mail
-from flask_migrate import Migrate
-from app.models import db, init_db
-from app.config import DevelopmentConfig, ProductionConfig, StagingConfig
 from dotenv import load_dotenv
 
-# This logic remains the same
+# Load env variables before importing config or models
 if os.getenv('FLASK_ENV') == 'production':
     dotenv_path = os.path.join(os.path.dirname(__file__), '..', 'production.env')
     load_dotenv(dotenv_path=dotenv_path)
@@ -17,6 +10,14 @@ elif os.getenv('FLASK_ENV') == 'staging':
     load_dotenv(dotenv_path=dotenv_path)
 else:
     load_dotenv()
+
+from flask import Flask, jsonify
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+from flask_mail import Mail
+from flask_migrate import Migrate
+from app.models import db, init_db
+from app.config import DevelopmentConfig, ProductionConfig, StagingConfig
 
 from flask_socketio import SocketIO
 
