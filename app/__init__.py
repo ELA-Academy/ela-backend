@@ -41,9 +41,9 @@ def create_app():
 
     CORS(
         app, 
-        resources={r"/api/*": {"origins": origins}}, 
+        resources={r"/*": {"origins": origins}}, 
         supports_credentials=True,
-        allow_headers=["Authorization", "Content-Type"]
+        allow_headers="*"
     )
     
     jwt = JWTManager(app)
