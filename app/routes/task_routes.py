@@ -101,6 +101,42 @@ def get_my_tasks():
         }
         all_tasks_serialized.append(d)
 
+    # 3. Fetch Personal Board Tasks
+    from app.models.board_model import Board, BoardGroup, BoardTask
+    if staff_member:
+        personal_board = Board.query.filter_by(is_personal=True, owner_staff_id=staff_member.id).first()
+    elif super_admin:
+        personal_board = Board.query.filter_by(is_personal=True, owner_super_admin_id=super_admin.id).first()
+    else:
+        personal_board = None
+
+    if personal_board:
+        group_ids = [g.id for g in personal_board.groups]
+        if group_ids:
+            personal_tasks = BoardTask.query.filter(BoardTask.group_id.in_(group_ids)).all()
+            for pt in personal_tasks:
+                d = {
+                    'id': pt.id,
+                    'title': pt.title,
+                    'note': pt.notes or '',
+                    'status': pt.status,
+                    'due_date': pt.due_date.isoformat() + 'T00:00:00Z' if pt.due_date else None,
+                    'lead_id': None,
+                    'lead_status': None,
+                    'assigned_department_ids': [],
+                    'assigned_department_names': [],
+                    'assigned_staff_ids': [],
+                    'assigned_staff_names': [],
+                    'created_by_staff_name': None,
+                    'created_at': pt.created_at.isoformat() + 'Z' if pt.created_at else None,
+                    'lead_secure_token': None,
+                    'task_type': 'personal',
+                    'board_id': personal_board.id,
+                    'board_name': personal_board.name,
+                    'group_name': pt.group.name if pt.group else None
+                }
+                all_tasks_serialized.append(d)
+
     # Sort combined tasks by created_at desc
     all_tasks_serialized.sort(key=lambda x: x.get('created_at', '') or '', reverse=True)
 
@@ -156,6 +192,23 @@ def get_my_tasks_count():
             ),
             BoardTask.status != 'Done'
         ).count()
+
+    # 3. Count Personal Tasks
+    from app.models.board_model import Board, BoardGroup, BoardTask
+    if staff_member:
+        personal_board = Board.query.filter_by(is_personal=True, owner_staff_id=staff_member.id).first()
+    elif super_admin:
+        personal_board = Board.query.filter_by(is_personal=True, owner_super_admin_id=super_admin.id).first()
+    else:
+        personal_board = None
+
+    if personal_board:
+        group_ids = [g.id for g in personal_board.groups]
+        if group_ids:
+            count += BoardTask.query.filter(
+                BoardTask.group_id.in_(group_ids),
+                BoardTask.status != 'Done'
+            ).count()
 
     return jsonify({"count": count}), 200
 
@@ -298,3 +351,277 @@ def update_task_status(id):
 
     db.session.commit()
     return jsonify(task.to_dict()), 200
+
+def get_user_from_jwt_helper():
+    current_user_email = get_jwt_identity()
+    claims = get_jwt()
+    role = claims.get('role')
+    staff_member = None
+    super_admin = None
+    if role == 'superadmin':
+        super_admin = SuperAdmin.query.filter_by(email=current_user_email).first()
+    else:
+        staff_member = Staff.query.filter_by(email=current_user_email).first()
+    return staff_member, super_admin
+
+
+@task_bp.route('/personal-board', methods=['GET'])
+@jwt_required()
+def get_personal_board():
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import Board, BoardGroup, BoardTask
+    
+    if staff_member:
+        board = Board.query.filter_by(is_personal=True, owner_staff_id=staff_member.id).first()
+    else:
+        board = Board.query.filter_by(is_personal=True, owner_super_admin_id=super_admin.id).first()
+
+    if not board:
+        board = Board(
+            name="Personal Tasks",
+            is_personal=True,
+            is_private=True,
+            owner_staff_id=staff_member.id if staff_member else None,
+            owner_super_admin_id=super_admin.id if super_admin else None
+        )
+        db.session.add(board)
+        db.session.flush()
+        
+        # Create default lists
+        default_group = BoardGroup(
+            board_id=board.id,
+            name="Personal",
+            color="#673de6",
+            position=0
+        )
+        db.session.add(default_group)
+        db.session.commit()
+
+    # Serialize board with groups and tasks
+    groups_data = []
+    groups = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).all()
+    for group in groups:
+        tasks = BoardTask.query.filter_by(group_id=group.id).order_by(BoardTask.position.asc()).all()
+        group_dict = group.to_dict()
+        group_dict['tasks'] = [task.to_dict() for task in tasks]
+        groups_data.append(group_dict)
+
+    board_dict = board.to_dict()
+    board_dict['groups'] = groups_data
+    return jsonify(board_dict), 200
+
+
+@task_bp.route('/personal-lists', methods=['POST'])
+@jwt_required()
+def create_personal_list():
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import Board, BoardGroup
+    
+    if staff_member:
+        board = Board.query.filter_by(is_personal=True, owner_staff_id=staff_member.id).first()
+    else:
+        board = Board.query.filter_by(is_personal=True, owner_super_admin_id=super_admin.id).first()
+
+    if not board:
+        return jsonify({"error": "Personal board not found"}), 404
+
+    data = request.json or {}
+    name = data.get('name')
+    if not name:
+        return jsonify({"error": "List name is required"}), 400
+
+    color = data.get('color', '#673de6')
+    # Find next position
+    max_pos_group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.desc()).first()
+    next_pos = (max_pos_group.position + 1) if max_pos_group else 0
+
+    new_group = BoardGroup(
+        board_id=board.id,
+        name=name,
+        color=color,
+        position=next_pos
+    )
+    db.session.add(new_group)
+    db.session.commit()
+
+    res = new_group.to_dict()
+    res['tasks'] = []
+    return jsonify(res), 201
+
+
+@task_bp.route('/personal-tasks', methods=['POST'])
+@jwt_required()
+def create_personal_task():
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import Board, BoardGroup, BoardTask
+    
+    data = request.json or {}
+    list_id = data.get('list_id')
+    title = data.get('title')
+
+    if not list_id or not title:
+        return jsonify({"error": "list_id and title are required"}), 400
+
+    # Ensure list belongs to user's personal board
+    group = BoardGroup.query.get(list_id)
+    if not group:
+        return jsonify({"error": "List not found"}), 404
+
+    board = group.board
+    if not board or not board.is_personal:
+        return jsonify({"error": "Unauthorized list"}), 403
+
+    if staff_member and board.owner_staff_id != staff_member.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+    if super_admin and board.owner_super_admin_id != super_admin.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+
+    # Create task
+    max_task = BoardTask.query.filter_by(group_id=group.id).order_by(BoardTask.position.desc()).first()
+    next_pos = (max_task.position + 1) if max_task else 0
+
+    due_date = None
+    if data.get('due_date'):
+        due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00')).date()
+
+    new_task = BoardTask(
+        group_id=group.id,
+        title=title,
+        status=data.get('status', 'Not Started'),
+        priority=data.get('priority', 'Normal'),
+        due_date=due_date,
+        position=next_pos,
+        responsible_staff_id=staff_member.id if staff_member else None,
+        responsible_super_admin_id=super_admin.id if super_admin else None
+    )
+    db.session.add(new_task)
+    db.session.commit()
+
+    return jsonify(new_task.to_dict()), 201
+
+
+@task_bp.route('/personal-lists/<int:list_id>', methods=['PUT'])
+@jwt_required()
+def update_personal_list(list_id):
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import BoardGroup
+    group = BoardGroup.query.get_or_404(list_id)
+    board = group.board
+    if not board or not board.is_personal:
+        return jsonify({"error": "Unauthorized list"}), 403
+
+    if staff_member and board.owner_staff_id != staff_member.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+    if super_admin and board.owner_super_admin_id != super_admin.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+
+    data = request.json or {}
+    if 'name' in data:
+        group.name = data['name']
+    if 'color' in data:
+        group.color = data['color']
+    if 'position' in data:
+        group.position = data['position']
+
+    db.session.commit()
+    return jsonify(group.to_dict()), 200
+
+
+@task_bp.route('/personal-lists/<int:list_id>', methods=['DELETE'])
+@jwt_required()
+def delete_personal_list(list_id):
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import BoardGroup
+    group = BoardGroup.query.get_or_404(list_id)
+    board = group.board
+    if not board or not board.is_personal:
+        return jsonify({"error": "Unauthorized list"}), 403
+
+    if staff_member and board.owner_staff_id != staff_member.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+    if super_admin and board.owner_super_admin_id != super_admin.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+
+    db.session.delete(group)
+    db.session.commit()
+    return jsonify({"success": True}), 200
+
+
+@task_bp.route('/personal-tasks/<int:task_id>', methods=['PUT'])
+@jwt_required()
+def update_personal_task(task_id):
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import BoardTask
+    task = BoardTask.query.get_or_404(task_id)
+    board = task.group.board
+    if not board or not board.is_personal:
+        return jsonify({"error": "Unauthorized task"}), 403
+
+    if staff_member and board.owner_staff_id != staff_member.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+    if super_admin and board.owner_super_admin_id != super_admin.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+
+    data = request.json or {}
+    if 'title' in data:
+        task.title = data['title']
+    if 'status' in data:
+        task.status = data['status']
+    if 'priority' in data:
+        task.priority = data['priority']
+    if 'due_date' in data:
+        if data['due_date']:
+            try:
+                task.due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00')).date()
+            except:
+                task.due_date = None
+        else:
+            task.due_date = None
+    if 'position' in data:
+        task.position = data['position']
+    if 'notes' in data:
+        task.notes = data['notes']
+
+    db.session.commit()
+    return jsonify(task.to_dict()), 200
+
+
+@task_bp.route('/personal-tasks/<int:task_id>', methods=['DELETE'])
+@jwt_required()
+def delete_personal_task(task_id):
+    staff_member, super_admin = get_user_from_jwt_helper()
+    if not staff_member and not super_admin:
+        return jsonify({"error": "User not found"}), 404
+
+    from app.models.board_model import BoardTask
+    task = BoardTask.query.get_or_404(task_id)
+    board = task.group.board
+    if not board or not board.is_personal:
+        return jsonify({"error": "Unauthorized task"}), 403
+
+    if staff_member and board.owner_staff_id != staff_member.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+    if super_admin and board.owner_super_admin_id != super_admin.id:
+        return jsonify({"error": "Unauthorized board owner"}), 403
+
+    db.session.delete(task)
+    db.session.commit()
+    return jsonify({"success": True}), 200

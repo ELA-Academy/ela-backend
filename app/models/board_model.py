@@ -25,6 +25,10 @@ class Board(db.Model):
     category = db.Column(db.String(100), nullable=True)
     budget_amount = db.Column(db.Float, nullable=True)
     
+    is_personal = db.Column(db.Boolean, default=False, nullable=False)
+    owner_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
+    owner_super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     groups = db.relationship('BoardGroup', backref='board', cascade='all, delete-orphan', lazy=True)
@@ -54,6 +58,9 @@ class Board(db.Model):
             'priority': self.priority,
             'category': self.category,
             'budget_amount': self.budget_amount,
+            'is_personal': self.is_personal,
+            'owner_staff_id': self.owner_staff_id,
+            'owner_super_admin_id': self.owner_super_admin_id,
             'access_members': [member.to_dict() for member in self.access_members],
             'groups': [group.to_dict() for group in self.groups],
             'tasks_count': sum(len(g.tasks) for g in self.groups),

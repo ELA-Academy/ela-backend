@@ -142,11 +142,8 @@ def can_access_conversation(user, role, conversation):
     if role == 'superadmin':
         return True
 
-    if conversation.conversation_type == 'channel':
+    if conversation.conversation_type in ('channel', 'department'):
         return True
-
-    if conversation.conversation_type == 'department':
-        return any(dept.id == conversation.department_id for dept in user.departments)
 
     return any(item.id == conversation.id for item in user.conversations)
 
