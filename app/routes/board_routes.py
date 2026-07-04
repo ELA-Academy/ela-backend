@@ -31,6 +31,12 @@ def board_is_accessible(board, actor, role):
     if not board or not actor:
         return False
 
+    if getattr(board, 'is_personal', False):
+        if role == 'superadmin':
+            return board.owner_super_admin_id == actor.id
+        else:
+            return board.owner_staff_id == actor.id
+
     if role == 'superadmin':
         return True
 

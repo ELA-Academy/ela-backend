@@ -43,3 +43,6 @@ scratch/
 
 # Ignore all markdown files (user request)
 *.md
+
+# Local Uploads
+app/static/uploads/

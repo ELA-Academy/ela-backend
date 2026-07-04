@@ -11,7 +11,7 @@ elif os.getenv('FLASK_ENV') == 'staging':
 else:
     load_dotenv()
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_mail import Mail
@@ -41,9 +41,9 @@ def create_app():
 
     CORS(
         app, 
-        resources={r"/api/*": {"origins": origins}}, 
+        resources={r"/*": {"origins": origins}}, 
         supports_credentials=True,
-        allow_headers=["Authorization", "Content-Type"]
+        allow_headers="*"
     )
     
     jwt = JWTManager(app)
@@ -70,5 +70,9 @@ def create_app():
     @app.route('/')
     def home():
         return {"message": "School Management API is running successfully!"}
+
+    @app.route('/api/static/<path:filename>')
+    def serve_static_fallback(filename):
+        return send_from_directory(app.static_folder, filename)
 
     return app
