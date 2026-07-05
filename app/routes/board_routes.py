@@ -463,6 +463,12 @@ def create_task(group_id):
     if 'assignees' in data or ('assignee_id' in data and 'assignee_role' in data):
         sync_task_assignees(new_task, normalize_task_assignees(data))
 
+    if board.is_personal:
+        if role == 'superadmin':
+            new_task.responsible_super_admin_id = actor.id
+        else:
+            new_task.responsible_staff_id = actor.id
+
     db.session.add(new_task)
     db.session.flush()
 
