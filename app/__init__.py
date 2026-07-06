@@ -48,7 +48,14 @@ def create_app():
     
     jwt = JWTManager(app)
     mail.init_app(app)
-    socketio.init_app(app, cors_allowed_origins=origins)
+    
+    redis_url = os.getenv('REDIS_URL')
+    if redis_url:
+        app.logger.info(f"Initializing Socket.IO with Redis message queue: {redis_url}")
+        socketio.init_app(app, cors_allowed_origins=origins, message_queue=redis_url)
+    else:
+        socketio.init_app(app, cors_allowed_origins=origins)
+        
     init_db(app)
     Migrate(app, db)
     
