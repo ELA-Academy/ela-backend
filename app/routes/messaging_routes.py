@@ -512,10 +512,12 @@ def send_message(conversation_id):
 
     get_or_create_participant_entry(conversation, user, role)
 
+    reply_to_message_id = data.get('reply_to_message_id')
+
     if role == 'superadmin':
-        new_message = SuperAdminMessage(content=content, sender_id=user.id)
+        new_message = SuperAdminMessage(content=content, sender_id=user.id, reply_to_message_id=reply_to_message_id)
     else:
-        new_message = StaffMessage(content=content, sender_id=user.id)
+        new_message = StaffMessage(content=content, sender_id=user.id, reply_to_message_id=reply_to_message_id)
 
     conversation.messages.append(new_message)
 
@@ -655,19 +657,29 @@ def upload_message_file(conversation_id):
     if not content:
         content = f"Uploaded attachment: {filename}"
 
+    reply_to_message_id_raw = request.form.get('reply_to_message_id')
+    reply_to_message_id = None
+    if reply_to_message_id_raw and reply_to_message_id_raw != 'null' and reply_to_message_id_raw != 'undefined':
+        try:
+            reply_to_message_id = int(reply_to_message_id_raw)
+        except ValueError:
+            pass
+
     if role == 'superadmin':
         new_message = SuperAdminMessage(
             content=content,
             sender_id=user.id,
             file_path=relative_path,
-            filename=filename
+            filename=filename,
+            reply_to_message_id=reply_to_message_id
         )
     else:
         new_message = StaffMessage(
             content=content,
             sender_id=user.id,
             file_path=relative_path,
-            filename=filename
+            filename=filename,
+            reply_to_message_id=reply_to_message_id
         )
 
     conversation.messages.append(new_message)

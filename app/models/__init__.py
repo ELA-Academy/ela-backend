@@ -60,6 +60,7 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('messages'):
         add_column_if_missing('messages', 'file_path', 'VARCHAR(500) NULL')
         add_column_if_missing('messages', 'filename', 'VARCHAR(255) NULL')
+        add_column_if_missing('messages', 'reply_to_message_id', 'INTEGER NULL')
 
     if inspector.has_table('workspace_docs'):
         add_column_if_missing('workspace_docs', 'is_public', 'BOOLEAN NOT NULL DEFAULT TRUE')

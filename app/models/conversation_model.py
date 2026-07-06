@@ -60,6 +60,9 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer)
     file_path = db.Column(db.String(500), nullable=True)
     filename = db.Column(db.String(255), nullable=True)
+    reply_to_message_id = db.Column(db.Integer, db.ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
+
+    reply_to_message = db.relationship('Message', remote_side=[id], lazy='joined')
 
     __mapper_args__ = {'polymorphic_on': sender_type}
     
@@ -77,6 +80,25 @@ class Message(db.Model):
         if sender_model:
             sender_name = sender_model.name
 
+        reply_to_details = None
+        if self.reply_to_message:
+            parent = self.reply_to_message
+            parent_sender_name = "Unknown"
+            if parent.sender_type == 'staff':
+                sm = Staff.query.get(parent.sender_id)
+                if sm:
+                    parent_sender_name = sm.name
+            elif parent.sender_type == 'superadmin':
+                sa = SuperAdmin.query.get(parent.sender_id)
+                if sa:
+                    parent_sender_name = sa.name
+            
+            reply_to_details = {
+                'id': parent.id,
+                'content': parent.content,
+                'sender_name': parent_sender_name
+            }
+
         return {
             'id': self.id,
             'content': self.content,
@@ -85,7 +107,9 @@ class Message(db.Model):
             'sender_type': self.sender_type,
             'sender_name': sender_name,
             'file_path': self.file_path,
-            'filename': self.filename
+            'filename': self.filename,
+            'reply_to_message_id': self.reply_to_message_id,
+            'reply_to_details': reply_to_details
         }
 
 class StaffMessage(Message):
