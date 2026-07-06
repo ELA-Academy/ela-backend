@@ -19,7 +19,12 @@ def send_async_email(app, msg):
 def send_email_in_background(subject, recipients, template_data):
     app = current_app._get_current_object()
     html_body = render_template('email/notification.html', **template_data)
-    msg = Message(subject, recipients=recipients, html=html_body)
+    
+    sender_name = "Ela Academy"
+    sender_email = os.getenv("MAIL_USERNAME")
+    sender = f"{sender_name} <{sender_email}>" if sender_email else None
+    
+    msg = Message(subject, sender=sender, recipients=recipients, html=html_body)
     thr = Thread(target=send_async_email, args=[app, msg])
     thr.start()
     return thr
