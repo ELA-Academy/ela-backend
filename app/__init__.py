@@ -49,12 +49,9 @@ def create_app():
     jwt = JWTManager(app)
     mail.init_app(app)
     
-    redis_url = os.getenv('REDIS_URL')
-    if redis_url:
-        app.logger.info(f"Initializing Socket.IO with Redis message queue: {redis_url}")
-        socketio.init_app(app, cors_allowed_origins=origins, message_queue=redis_url)
-    else:
-        socketio.init_app(app, cors_allowed_origins=origins)
+    # For single-node hosting, we don't need a Redis message queue for Socket.IO event propagation
+    # (Socket.IO broadcasts directly to all connected users on this node). We keep Redis active for fast preference caching.
+    socketio.init_app(app, cors_allowed_origins=origins)
         
     init_db(app)
     Migrate(app, db)
