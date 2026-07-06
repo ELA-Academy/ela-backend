@@ -206,3 +206,34 @@ def create_notifications_and_send_emails(recipients, message, target_obj=None):
             category='general',
             target_obj=target_obj
         )
+
+def enqueue_user_notification(user_id, user_role, message, category='general', target_type=None, target_id=None, target_link=None, idempotency_key=None):
+    """
+    Helper to enqueue a notification request by recipient ID and role.
+    """
+    from app.models.staff_model import Staff
+    from app.models.super_admin_model import SuperAdmin
+    
+    if user_role == 'staff':
+        recipient = Staff.query.get(user_id)
+    else:
+        recipient = SuperAdmin.query.get(user_id)
+        
+    if not recipient:
+        return None
+        
+    class TargetMock:
+        def __init__(self, name, id):
+            self.__class__.__name__ = name
+            self.id = id
+            
+    target_obj = TargetMock(target_type, target_id) if target_type else None
+    
+    return enqueue_notification(
+        recipient=recipient,
+        message=message,
+        idempotency_key=idempotency_key,
+        category=category,
+        target_obj=target_obj,
+        target_link=target_link
+    )
