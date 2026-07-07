@@ -477,18 +477,18 @@ def create_task(group_id):
     db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name=actor.name, action="Created task"))
 
     for assignee in new_task.assignees:
-        notification = Notification(
+        from app.utils.notifications import enqueue_user_notification
+        user_id = assignee.super_admin_id if assignee.super_admin_id else assignee.staff_id
+        user_role = 'superadmin' if assignee.super_admin_id else 'staff'
+        enqueue_user_notification(
+            user_id=user_id,
+            user_role=user_role,
             message=f"{actor.name} assigned you the task: '{new_task.title}' on board '{board.name}'",
             category='assignment',
             target_type='Board',
             target_id=board.id,
             target_link=f"/admin/boards/{board.id}?task={new_task.id}"
         )
-        if assignee.super_admin_id:
-            notification.super_admin_id = assignee.super_admin_id
-        elif assignee.staff_id:
-            notification.staff_id = assignee.staff_id
-        db.session.add(notification)
 
     # Mentions handling inside Task Notes or HTML description
     mentions = data.get('mentions', [])
@@ -508,30 +508,34 @@ def create_task(group_id):
             mention_id = mention.get('id')
             message = f"{actor.name} @mentioned you in task '{new_task.title}' on board '{board.name}'"
 
+            from app.utils.notifications import enqueue_user_notification
+
             if mention_type == 'staff':
                 key = f"staff_{mention_id}"
                 if key not in notified_user_keys:
                     notified_user_keys.add(key)
-                    db.session.add(Notification(
+                    enqueue_user_notification(
+                        user_id=mention_id,
+                        user_role='staff',
                         message=message,
                         category='mention',
-                        staff_id=mention_id,
                         target_type='Board',
                         target_id=board.id,
                         target_link=f"/admin/boards/{board.id}?task={new_task.id}"
-                    ))
+                    )
             elif mention_type == 'superadmin':
                 key = f"superadmin_{mention_id}"
                 if key not in notified_user_keys:
                     notified_user_keys.add(key)
-                    db.session.add(Notification(
+                    enqueue_user_notification(
+                        user_id=mention_id,
+                        user_role='superadmin',
                         message=message,
                         category='mention',
-                        super_admin_id=mention_id,
                         target_type='Board',
                         target_id=board.id,
                         target_link=f"/admin/boards/{board.id}?task={new_task.id}"
-                    ))
+                    )
             elif mention_type == 'department':
                 department = Department.query.get(mention_id)
                 if department:
@@ -539,14 +543,15 @@ def create_task(group_id):
                         key = f"staff_{member.id}"
                         if key not in notified_user_keys and (role != 'staff' or actor.id != member.id):
                             notified_user_keys.add(key)
-                            db.session.add(Notification(
+                            enqueue_user_notification(
+                                user_id=member.id,
+                                user_role='staff',
                                 message=f"{actor.name} @mentioned your department ({department.name}) in task '{new_task.title}' on board '{board.name}'",
                                 category='mention',
-                                staff_id=member.id,
                                 target_type='Board',
                                 target_id=board.id,
                                 target_link=f"/admin/boards/{board.id}?task={new_task.id}"
-                            ))
+                            )
 
     db.session.commit()
     return jsonify(new_task.to_dict()), 201
@@ -646,18 +651,16 @@ def update_task(task_id):
         message = f"{actor.name} assigned you the task: '{task.title}' on board '{board.name}'"
         for assignee_key in added_assignee_keys:
             assignee_role, raw_id = assignee_key.split('_', 1)
-            notification = Notification(
+            from app.utils.notifications import enqueue_user_notification
+            enqueue_user_notification(
+                user_id=int(raw_id),
+                user_role=assignee_role,
                 message=message,
                 category='assignment',
                 target_type='Board',
                 target_id=board.id,
                 target_link=f"/admin/boards/{board.id}?task={task.id}"
             )
-            if assignee_role == 'superadmin':
-                notification.super_admin_id = int(raw_id)
-            else:
-                notification.staff_id = int(raw_id)
-            db.session.add(notification)
         db.session.commit()
 
     return jsonify(task.to_dict()), 200
@@ -718,33 +721,33 @@ def create_task_update(task_id):
         mention_id = mention.get('id')
         message = f"{actor.name} @mentioned you in task '{task.title}' on board '{board.name}'"
 
+        from app.utils.notifications import enqueue_user_notification
+
         if mention_type == 'staff':
             key = f"staff_{mention_id}"
             if key not in notified_user_keys:
                 notified_user_keys.add(key)
-                db.session.add(
-                    Notification(
-                        message=message,
-                        category='mention',
-                        staff_id=mention_id,
-                        target_type='Board',
-                        target_id=board.id,
-                        target_link=f"/admin/boards/{board.id}?task={task.id}"
-                    )
+                enqueue_user_notification(
+                    user_id=mention_id,
+                    user_role='staff',
+                    message=message,
+                    category='mention',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
                 )
         elif mention_type == 'superadmin':
             key = f"superadmin_{mention_id}"
             if key not in notified_user_keys:
                 notified_user_keys.add(key)
-                db.session.add(
-                    Notification(
-                        message=message,
-                        category='mention',
-                        super_admin_id=mention_id,
-                        target_type='Board',
-                        target_id=board.id,
-                        target_link=f"/admin/boards/{board.id}?task={task.id}"
-                    )
+                enqueue_user_notification(
+                    user_id=mention_id,
+                    user_role='superadmin',
+                    message=message,
+                    category='mention',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
                 )
         elif mention_type == 'department':
             department = Department.query.get(mention_id)
@@ -753,15 +756,14 @@ def create_task_update(task_id):
                     key = f"staff_{member.id}"
                     if key not in notified_user_keys and (role != 'staff' or actor.id != member.id):
                         notified_user_keys.add(key)
-                        db.session.add(
-                            Notification(
-                                message=f"{actor.name} @mentioned your department ({department.name}) in task '{task.title}' on board '{board.name}'",
-                                category='mention',
-                                staff_id=member.id,
-                                target_type='Board',
-                                target_id=board.id,
-                                target_link=f"/admin/boards/{board.id}?task={task.id}"
-                            )
+                        enqueue_user_notification(
+                            user_id=member.id,
+                            user_role='staff',
+                            message=f"{actor.name} @mentioned your department ({department.name}) in task '{task.title}' on board '{board.name}'",
+                            category='mention',
+                            target_type='Board',
+                            target_id=board.id,
+                            target_link=f"/admin/boards/{board.id}?task={task.id}"
                         )
 
     db.session.commit()

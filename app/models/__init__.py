@@ -107,6 +107,7 @@ def init_db(app):
             BoardFormConfig, BoardFormResponse,
             WorkspaceDocumentFolder, WorkspaceDocumentFile, WorkspaceDocumentFileVersion
         )
+        from app.models.notification_request_model import NotificationRequest, UserNotificationPreference
         
         db.create_all()
         ensure_runtime_schema_updates()

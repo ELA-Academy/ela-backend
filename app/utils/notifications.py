@@ -19,7 +19,12 @@ def send_async_email(app, msg):
 def send_email_in_background(subject, recipients, template_data):
     app = current_app._get_current_object()
     html_body = render_template('email/notification.html', **template_data)
-    msg = Message(subject, recipients=recipients, html=html_body)
+    
+    sender_name = "Ela Academy"
+    sender_email = os.getenv("MAIL_USERNAME")
+    sender = f"{sender_name} <{sender_email}>" if sender_email else None
+    
+    msg = Message(subject, sender=sender, recipients=recipients, html=html_body)
     thr = Thread(target=send_async_email, args=[app, msg])
     thr.start()
     return thr
@@ -64,45 +69,176 @@ def send_push_notification(user, payload):
         current_app.logger.error(f"An unexpected error occurred in send_push_notification: {e}")
 
 
+def get_user_allowed_channels(user_id, user_role, category='general'):
+    from app.utils.redis_client import get_redis_client
+    import json
+    
+    redis_client = get_redis_client()
+    cache_key = f"user_prefs:{user_role}:{user_id}"
+    
+    # Try loading from cache
+    cached = None
+    try:
+        cached = redis_client.get(cache_key)
+    except Exception:
+        pass
+
+    if cached:
+        try:
+            prefs = json.loads(cached.decode('utf-8'))
+        except Exception:
+            prefs = None
+    else:
+        prefs = None
+        
+    if prefs is None:
+        # Load from DB
+        from app.models.notification_request_model import UserNotificationPreference
+        try:
+            db_prefs = UserNotificationPreference.query.filter_by(user_id=user_id, user_role=user_role).all()
+            prefs = {}
+            for p in db_prefs:
+                key = f"{p.category}:{p.channel}"
+                prefs[key] = p.enabled
+            # Cache in Redis with 1 hour expiration
+            try:
+                redis_client.set(cache_key, json.dumps(prefs), ex=3600)
+            except Exception:
+                pass
+        except Exception:
+            prefs = {}
+            
+    # Resolve allowed channels
+    allowed = []
+    for channel in ['in_app', 'email', 'push']:
+        specific_key = f"{category}:{channel}"
+        global_key = f"all:{channel}"
+        
+        enabled = True
+        if specific_key in prefs:
+            enabled = prefs[specific_key]
+        elif global_key in prefs:
+            enabled = prefs[global_key]
+            
+        if enabled:
+            allowed.append(channel)
+            
+    return allowed
+
+def enqueue_notification(recipient, message, idempotency_key=None, category='general', target_obj=None, target_link=None):
+    """
+    Ingestion phase of the Notification System.
+    Checks user preferences (cached in Redis), enforces idempotency keys,
+    and inserts notification requests into the database for asynchronous worker processing.
+    """
+    if not recipient:
+        return None
+
+    # Enforce idempotency key check
+    if idempotency_key:
+        from app.models.notification_request_model import NotificationRequest
+        try:
+            existing = NotificationRequest.query.filter_by(idempotency_key=idempotency_key).first()
+            if existing:
+                current_app.logger.info(f"Duplicate notification skipped (idempotency: {idempotency_key})")
+                return existing
+        except Exception as e:
+            current_app.logger.error(f"Error checking idempotency: {e}")
+
+    # Determine recipient details
+    recipient_role = 'staff' if recipient.__class__.__name__ == 'Staff' else 'superadmin'
+    recipient_id = recipient.id
+
+    # Check user opt-out preferences (cached in Redis if available)
+    allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
+    if not allowed_channels:
+        current_app.logger.info(f"User {recipient_role} {recipient_id} has opted out of all notifications for category {category}.")
+        return None
+
+    # Resolve target details
+    resolved_link = target_link or "/"
+    if target_obj:
+        if target_obj.__class__.__name__ == 'Lead':
+            resolved_link = f"/admin/admissions/leads/{target_obj.secure_token}"
+        elif target_obj.__class__.__name__ == 'Task' and hasattr(target_obj, 'lead'):
+            resolved_link = f"/admin/admissions/leads/{target_obj.lead.secure_token}"
+
+    # Insert non-blocking request to the queue
+    from app.models.notification_request_model import NotificationRequest
+    from datetime import datetime
+
+    req = NotificationRequest(
+        idempotency_key=idempotency_key,
+        recipient_id=recipient_id,
+        recipient_role=recipient_role,
+        message=message,
+        category=category,
+        target_type=target_obj.__class__.__name__ if target_obj else None,
+        target_id=target_obj.id if target_obj else None,
+        target_link=resolved_link,
+        status='PENDING',
+        channels=",".join(allowed_channels),
+        created_at=datetime.utcnow()
+    )
+    
+    db.session.add(req)
+    # Commit ingestion transaction to make request visible to workers
+    try:
+        db.session.commit()
+        current_app.logger.info(f"Notification request enqueued (id: {req.id}) for recipient {recipient_id} ({recipient_role})")
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to enqueue notification request: {e}")
+        
+    return req
+
 def create_notifications_and_send_emails(recipients, message, target_obj=None):
     """
-    Central function for creating in-app, email, and push notifications.
+    Legacy wrapper that maps directly to the new asynchronous enqueue_notification system.
     """
     if not recipients:
         return
-
-    target_link = "/"
-    if target_obj:
-        if target_obj.__class__.__name__ == 'Lead':
-            target_link = f"/admin/admissions/leads/{target_obj.secure_token}"
-        elif target_obj.__class__.__name__ == 'Task' and hasattr(target_obj, 'lead'):
-             target_link = f"/admin/admissions/leads/{target_obj.lead.secure_token}"
-
-    frontend_base_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-    full_action_link = f"{frontend_base_url}{target_link}"
-
-    recipient_emails = [user.email for user in recipients]
-    
     for user in recipients:
-        if user.__class__.__name__ == 'Staff':
-            db.session.add(Notification(
-                staff_id=user.id,
-                message=message,
-                target_type=target_obj.__class__.__name__ if target_obj else None,
-                target_id=target_obj.id if target_obj else None,
-                target_link=target_link
-            ))
+        import hashlib
+        import time
+        role = 'staff' if user.__class__.__name__ == 'Staff' else 'superadmin'
+        raw_key = f"{role}:{user.id}:{message}:{int(time.time() / 10)}" # 10s window
+        idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+        enqueue_notification(
+            recipient=user,
+            message=message,
+            idempotency_key=idempotency_key,
+            category='general',
+            target_obj=target_obj
+        )
 
-        push_payload = {
-            "title": "ELA Academy Notification",
-            "body": message,
-            "url": target_link
-        }
-        send_push_notification(user, push_payload)
+def enqueue_user_notification(user_id, user_role, message, category='general', target_type=None, target_id=None, target_link=None, idempotency_key=None):
+    """
+    Helper to enqueue a notification request by recipient ID and role.
+    """
+    from app.models.staff_model import Staff
+    from app.models.super_admin_model import SuperAdmin
     
-    email_data = { 'message': message, 'action_link': full_action_link }
-    send_email_in_background(
-        subject="You have a new notification",
-        recipients=recipient_emails,
-        template_data=email_data
+    if user_role == 'staff':
+        recipient = Staff.query.get(user_id)
+    else:
+        recipient = SuperAdmin.query.get(user_id)
+        
+    if not recipient:
+        return None
+        
+    class TargetMock:
+        def __init__(self, name, id):
+            self.__class__.__name__ = name
+            self.id = id
+            
+    target_obj = TargetMock(target_type, target_id) if target_type else None
+    
+    return enqueue_notification(
+        recipient=recipient,
+        message=message,
+        idempotency_key=idempotency_key,
+        category=category,
+        target_obj=target_obj,
+        target_link=target_link
     )

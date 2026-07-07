@@ -542,26 +542,23 @@ def send_message(conversation_id):
     notification_cooldown = timedelta(minutes=15)
 
     for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
-        if recipient_role == 'staff':
-            db.session.add(
-                Notification(
-                    staff_id=recipient.id,
-                    message=f"You have a new message in {conversation.name or 'a conversation'}.",
-                    target_type="Conversation",
-                    target_id=conversation_id,
-                    target_link=f"/admin/messaging?conversation={conversation_id}"
-                )
-            )
-        else:
-            db.session.add(
-                Notification(
-                    super_admin_id=recipient.id,
-                    message=f"You have a new message in {conversation.name or 'a conversation'}.",
-                    target_type="Conversation",
-                    target_id=conversation_id,
-                    target_link=f"/admin/messaging?conversation={conversation_id}"
-                )
-            )
+        import time
+        import hashlib
+        # 15s window to deduplicate consecutive messages
+        raw_key = f"msg:{conversation.id}:{recipient_role}:{recipient.id}:{int(time.time() / 15)}"
+        idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+        
+        from app.utils.notifications import enqueue_user_notification
+        enqueue_user_notification(
+            user_id=recipient.id,
+            user_role=recipient_role,
+            message=f"You have a new message in {conversation.name or 'a conversation'}.",
+            category='general',
+            target_type="Conversation",
+            target_id=conversation.id,
+            target_link=f"/admin/messaging?conversation={conversation.id}",
+            idempotency_key=idempotency_key
+        )
 
         recipient_entry = get_participant_entry(conversation_id, recipient, recipient_role)
         if not recipient_entry:
@@ -767,14 +764,14 @@ from app import socketio
 
 @socketio.on('join')
 def on_join(data):
-    conversation_id = data.get('conversation_id')
-    if conversation_id:
-        room = f"conversation_{conversation_id}"
+    room_id = data.get('conversation_id')
+    if room_id:
+        room = str(room_id) if str(room_id).startswith('user_') else f"conversation_{room_id}"
         join_room(room)
 
 @socketio.on('leave')
 def on_leave(data):
-    conversation_id = data.get('conversation_id')
-    if conversation_id:
-        room = f"conversation_{conversation_id}"
+    room_id = data.get('conversation_id')
+    if room_id:
+        room = str(room_id) if str(room_id).startswith('user_') else f"conversation_{room_id}"
         leave_room(room)

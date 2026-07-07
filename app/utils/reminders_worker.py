@@ -84,18 +84,22 @@ def start_reminders_scheduler(app):
                                     print(f"[Reminder Daemon Preferences Error] {pref_err}")
 
                                 if should_notify:
-                                    n = Notification(
+                                    from app.utils.notifications import enqueue_user_notification
+                                    import hashlib
+                                    # Idempotency key for event reminder (recipient + event + day)
+                                    raw_key = f"reminder:{user_type}:{user_id}:{event.id}"
+                                    idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+                                    
+                                    enqueue_user_notification(
+                                        user_id=user_id,
+                                        user_role=user_type,
                                         message=msg,
                                         category='reminder',
                                         target_type='CalendarEvent',
                                         target_id=event.id,
-                                        target_link=f"/admin/boards/{event.board_id}?tab=calendar" if event.board_id else "/admin/boards"
+                                        target_link=f"/admin/boards/{event.board_id}?tab=calendar" if event.board_id else "/admin/boards",
+                                        idempotency_key=idempotency_key
                                     )
-                                    if user_type == 'staff':
-                                        n.staff_id = user_id
-                                    else:
-                                        n.super_admin_id = user_id
-                                    db.session.add(n)
                             
                             # Mark as sent
                             event.reminder_sent = True
