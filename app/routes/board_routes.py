@@ -9,7 +9,7 @@ from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
-from app.models.task_update_model import TaskUpdate, TaskUpdateLike, TaskUpdateReply
+from app.models.task_update_model import TaskUpdate, TaskUpdateLike, TaskUpdateReply, CommentReaction
 
 
 board_bp = Blueprint('boards', __name__)
@@ -799,6 +799,53 @@ def toggle_like(update_id):
 
     db.session.commit()
     return jsonify({"liked": liked, "likes_count": len(update.likes)}), 200
+
+
+@board_bp.route('/updates/<int:update_id>/react', methods=['POST'])
+@jwt_required()
+def toggle_comment_reaction(update_id):
+    actor, role = get_actor()
+    update = TaskUpdate.query.get_or_404(update_id)
+    if not ensure_board_access(update.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    emoji = data.get('emoji')
+    if not emoji:
+        return jsonify({"error": "Emoji is required"}), 400
+
+    # Toggle reaction
+    if role == 'superadmin':
+        reaction = CommentReaction.query.filter_by(
+            update_id=update_id,
+            emoji=emoji,
+            super_admin_id=actor.id
+        ).first()
+    else:
+        reaction = CommentReaction.query.filter_by(
+            update_id=update_id,
+            emoji=emoji,
+            staff_id=actor.id
+        ).first()
+
+    if reaction:
+        db.session.delete(reaction)
+        action = "removed"
+    else:
+        reaction = CommentReaction(
+            update_id=update_id,
+            emoji=emoji,
+            staff_id=actor.id if role == 'staff' else None,
+            super_admin_id=actor.id if role == 'superadmin' else None
+        )
+        db.session.add(reaction)
+        action = "added"
+
+    db.session.commit()
+    return jsonify({
+        "message": f"Reaction {action}",
+        "reactions": [r.to_dict() for r in update.reactions]
+    }), 200
 
 
 @board_bp.route('/updates/<int:update_id>/reply', methods=['POST'])
