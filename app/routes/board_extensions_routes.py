@@ -174,6 +174,7 @@ def create_board_form(board_id):
     name = data.get('name')
     description = data.get('description')
     form_structure = data.get('form_structure') # list of questions
+    header_image_url = data.get('header_image_url')
 
     if not name or not form_structure:
         return jsonify({"error": "Name and form structure are required"}), 400
@@ -183,12 +184,46 @@ def create_board_form(board_id):
         name=name,
         description=description,
         form_structure_json=json.dumps(form_structure),
+        header_image_url=header_image_url,
+        creator_staff_id=actor.id if role == 'staff' else None,
+        creator_super_admin_id=actor.id if role == 'superadmin' else None,
         is_active=True
     )
     db.session.add(form)
     db.session.commit()
     log_activity(actor, f"Created workspace form: '{name}' in board '{board.name}'")
     return jsonify(form.to_dict()), 201
+
+@board_extensions_bp.route('/forms/<int:form_id>', methods=['PUT'])
+@jwt_required()
+def update_board_form(form_id):
+    actor, role = get_actor()
+    form = BoardFormConfig.query.get_or_404(form_id)
+    board = Board.query.get_or_404(form.board_id)
+    if not ensure_board_access(board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    name = data.get('name')
+    description = data.get('description')
+    form_structure = data.get('form_structure')
+    header_image_url = data.get('header_image_url')
+    is_active = data.get('is_active')
+
+    if name is not None:
+        form.name = name
+    if description is not None:
+        form.description = description
+    if form_structure is not None:
+        form.form_structure_json = json.dumps(form_structure)
+    if header_image_url is not None:
+        form.header_image_url = header_image_url
+    if is_active is not None:
+        form.is_active = is_active
+
+    db.session.commit()
+    log_activity(actor, f"Updated workspace form: '{form.name}' in board '{board.name}'")
+    return jsonify(form.to_dict()), 200
 
 @board_extensions_bp.route('/forms/<int:form_id>', methods=['DELETE'])
 @jwt_required()
@@ -337,6 +372,7 @@ def get_public_form_details(form_id):
         "board_id": form.board_id,
         "name": form.name,
         "description": form.description,
+        "header_image_url": form.header_image_url,
         "form_structure": json.loads(form.form_structure_json) if form.form_structure_json else []
     }), 200
 
@@ -420,6 +456,15 @@ def submit_public_form_response(form_id):
         )
         db.session.add(attachment)
 
+    # Auto Assign Task to Form Creator
+    if form.creator_staff_id or form.creator_super_admin_id:
+        assignee = BoardTaskAssignee(
+            task_id=task.id,
+            staff_id=form.creator_staff_id,
+            super_admin_id=form.creator_super_admin_id
+        )
+        db.session.add(assignee)
+
     response_record = BoardFormResponse(
         form_id=form_id,
         response_json=json.dumps(response_data),
@@ -427,6 +472,24 @@ def submit_public_form_response(form_id):
     )
     db.session.add(response_record)
     db.session.commit()
+
+    # Trigger live notification to creator
+    if form.creator_staff_id or form.creator_super_admin_id:
+        try:
+            from app.utils.notifications import enqueue_user_notification
+            recipient_id = form.creator_staff_id if form.creator_staff_id else form.creator_super_admin_id
+            recipient_role = 'staff' if form.creator_staff_id else 'superadmin'
+            enqueue_user_notification(
+                user_id=recipient_id,
+                user_role=recipient_role,
+                message=f"New submission received for form '{form.name}' & assigned to you: '{task.title}'",
+                category='assignment',
+                target_type='Board',
+                target_id=board.id,
+                target_link=f"/admin/boards/{board.id}?task={task.id}"
+            )
+        except Exception as notif_err:
+            print(f"Failed to queue assignment notification: {notif_err}")
 
     log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
     return jsonify({

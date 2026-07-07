@@ -70,6 +70,11 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('conversation_participants'):
         add_column_if_missing('conversation_participants', 'is_following', 'BOOLEAN NOT NULL DEFAULT TRUE')
 
+    if inspector.has_table('board_form_configs'):
+        add_column_if_missing('board_form_configs', 'header_image_url', 'VARCHAR(500) NULL')
+        add_column_if_missing('board_form_configs', 'creator_staff_id', 'INTEGER NULL')
+        add_column_if_missing('board_form_configs', 'creator_super_admin_id', 'INTEGER NULL')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
