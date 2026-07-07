@@ -90,7 +90,7 @@ def init_db(app):
         from app.models.student_model import Student, Parent
         from app.models.activity_log_model import ActivityLog
         from app.models.notification_model import Notification
-        from app.models.conversation_model import Conversation, Message, ConversationParticipant
+        from app.models.conversation_model import Conversation, Message, ConversationParticipant, MessageReaction
         from app.models.push_subscription_model import PushSubscription
         from app.models.enrollment_form_model import EnrollmentForm
         from app.models.enrollment_submission_model import EnrollmentSubmission
@@ -105,7 +105,7 @@ def init_db(app):
         
         # Workspace Collaboration Models
         from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, BoardMilestone
-        from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike
+        from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike, CommentReaction
         from app.models.announcement_model import Announcement
         from app.models.board_model_extensions import (
             BoardCustomField, TaskCustomFieldValue,

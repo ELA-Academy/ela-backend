@@ -14,6 +14,7 @@ from app.models.conversation_model import (
     Message,
     StaffMessage,
     SuperAdminMessage,
+    MessageReaction
 )
 from app.models.department_model import Department
 from app.models.message_log_model import MessageLog
@@ -756,6 +757,62 @@ def create_announcement():
         db.session.rollback()
         print(f"Error creating announcement: {e}")
         return jsonify({"error": "Failed to create announcement"}), 500
+
+
+@messaging_bp.route('/messages/<int:message_id>/react', methods=['POST'])
+@jwt_required()
+def toggle_message_reaction(message_id):
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    message = Message.query.get_or_404(message_id)
+    data = request.get_json() or {}
+    emoji = data.get('emoji')
+
+    if not emoji:
+        return jsonify({"error": "Emoji is required"}), 400
+
+    # Toggle reaction
+    if role == 'superadmin':
+        reaction = MessageReaction.query.filter_by(
+            message_id=message_id,
+            emoji=emoji,
+            super_admin_id=user.id
+        ).first()
+    else:
+        reaction = MessageReaction.query.filter_by(
+            message_id=message_id,
+            emoji=emoji,
+            staff_id=user.id
+        ).first()
+
+    if reaction:
+        db.session.delete(reaction)
+        action = "removed"
+    else:
+        reaction = MessageReaction(
+            message_id=message_id,
+            emoji=emoji,
+            staff_id=user.id if role == 'staff' else None,
+            super_admin_id=user.id if role == 'superadmin' else None
+        )
+        db.session.add(reaction)
+        action = "added"
+
+    db.session.commit()
+
+    # Emit socket event to notify other clients in the conversation
+    from app import socketio
+    socketio.emit('message_reaction_toggled', {
+        'message_id': message_id,
+        'reactions': [r.to_dict() for r in message.reactions]
+    }, room=f"conversation_{message.conversation_id}")
+
+    return jsonify({
+        "message": f"Reaction {action}",
+        "reactions": [r.to_dict() for r in message.reactions]
+    }), 200
 
 
 # Socket.IO Event Handlers

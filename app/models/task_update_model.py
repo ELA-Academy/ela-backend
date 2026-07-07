@@ -19,6 +19,7 @@ class TaskUpdate(db.Model):
     
     replies = db.relationship('TaskUpdateReply', backref='update', cascade='all, delete-orphan', order_by='TaskUpdateReply.created_at', lazy=True)
     likes = db.relationship('TaskUpdateLike', backref='update', cascade='all, delete-orphan', lazy=True)
+    reactions = db.relationship('CommentReaction', backref='update', cascade='all, delete-orphan', lazy=True)
 
     def to_dict(self):
         role = "superadmin" if self.sender_super_admin_id else "staff"
@@ -33,7 +34,35 @@ class TaskUpdate(db.Model):
             'created_at': self.created_at.isoformat() + 'Z',
             'replies': [r.to_dict() for r in self.replies],
             'likes_count': len(self.likes),
-            'liked_by_ids': [l.get_user_key() for l in self.likes]
+            'liked_by_ids': [l.get_user_key() for l in self.likes],
+            'reactions': [r.to_dict() for r in self.reactions]
+        }
+
+class CommentReaction(db.Model):
+    __tablename__ = 'comment_reactions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    update_id = db.Column(db.Integer, db.ForeignKey('task_updates.id', ondelete='CASCADE'), nullable=False)
+    emoji = db.Column(db.String(50), nullable=False)
+    staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
+    super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    staff = db.relationship('Staff')
+    super_admin = db.relationship('SuperAdmin')
+
+    def to_dict(self):
+        user_name = "Unknown"
+        if self.super_admin:
+            user_name = self.super_admin.name
+        elif self.staff:
+            user_name = self.staff.name
+        return {
+            'id': self.id,
+            'emoji': self.emoji,
+            'user_id': self.super_admin_id if self.super_admin_id else self.staff_id,
+            'user_role': 'superadmin' if self.super_admin_id else 'staff',
+            'user_name': user_name
         }
 
 class TaskUpdateReply(db.Model):
