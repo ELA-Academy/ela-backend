@@ -89,7 +89,7 @@ def init_db(app):
         from app.models.task_model import Task
         from app.models.student_model import Student, Parent
         from app.models.activity_log_model import ActivityLog
-        from app.models.notification_model import Notification
+        from app.models.notification_model import Notification, PendingEmailNotification
         from app.models.conversation_model import Conversation, Message, ConversationParticipant, MessageReaction
         from app.models.push_subscription_model import PushSubscription
         from app.models.enrollment_form_model import EnrollmentForm

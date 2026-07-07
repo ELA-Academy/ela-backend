@@ -766,6 +766,54 @@ def create_task_update(task_id):
                             target_link=f"/admin/boards/{board.id}?task={task.id}"
                         )
 
+    # Notify assignees and participants (other commenters) on the task
+    notified_users = set(notified_user_keys)
+    
+    # 1. Notify Assignees
+    assignees_to_notify = []
+    if task.responsible_staff_id:
+        assignees_to_notify.append(('staff', task.responsible_staff_id))
+    if task.responsible_super_admin_id:
+        assignees_to_notify.append(('superadmin', task.responsible_super_admin_id))
+    
+    for ass in task.assignees:
+        if ass.staff_id:
+            assignees_to_notify.append(('staff', ass.staff_id))
+        elif ass.super_admin_id:
+            assignees_to_notify.append(('superadmin', ass.super_admin_id))
+            
+    for u_role, u_id in assignees_to_notify:
+        key = f"{u_role}_{u_id}"
+        if key != f"{role}_{actor.id}" and key not in notified_users:
+            notified_users.add(key)
+            enqueue_user_notification(
+                user_id=u_id,
+                user_role=u_role,
+                message=f"{actor.name} commented on task '{task.title}' assigned to you on board '{board.name}'",
+                category='comment',
+                target_type='Board',
+                target_id=board.id,
+                target_link=f"/admin/boards/{board.id}?task={task.id}"
+            )
+            
+    # 2. Notify other comment thread participants
+    for old_update in task.updates:
+        u_role = 'superadmin' if old_update.sender_super_admin_id else ('staff' if old_update.sender_staff_id else None)
+        u_id = old_update.sender_super_admin_id or old_update.sender_staff_id
+        if u_role and u_id:
+            key = f"{u_role}_{u_id}"
+            if key != f"{role}_{actor.id}" and key not in notified_users:
+                notified_users.add(key)
+                enqueue_user_notification(
+                    user_id=u_id,
+                    user_role=u_role,
+                    message=f"{actor.name} commented on task '{task.title}' that you commented on",
+                    category='comment',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
+                )
+
     db.session.commit()
     return jsonify(new_update.to_dict()), 201
 
@@ -1904,4 +1952,37 @@ def delete_board_milestone(milestone_id):
     db.session.delete(milestone)
     db.session.commit()
     return jsonify({"message": "Milestone deleted"}), 200
+
+
+@board_bp.route('/tasks/bulk-move', methods=['POST'])
+@jwt_required()
+def bulk_move_tasks():
+    actor, role = get_actor()
+    data = request.get_json() or {}
+    task_ids = data.get('task_ids', [])
+    target_group_id = data.get('target_group_id')
+
+    if not task_ids or not target_group_id:
+        return jsonify({"error": "task_ids and target_group_id are required"}), 400
+
+    from app.models.board_model import BoardGroup, BoardTask, BoardTaskHistory
+    target_group = BoardGroup.query.get_or_404(target_group_id)
+    if not ensure_board_access(target_group.board, actor, role):
+        return jsonify({"error": "Forbidden - No access to target board"}), 403
+
+    tasks = BoardTask.query.filter(BoardTask.id.in_(task_ids)).all()
+    for task in tasks:
+        # Verify access to old board
+        if not ensure_board_access(task.group.board, actor, role):
+            continue
+        
+        # Log change
+        change = f"Moved task to group '{target_group.name}' on board '{target_group.board.name}'"
+        db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=change))
+        
+        # Update group
+        task.group_id = target_group.id
+
+    db.session.commit()
+    return jsonify({"message": f"Successfully moved {len(tasks)} task(s)"}), 200
 
