@@ -35,3 +35,23 @@ class Notification(db.Model):
             'target_type': self.target_type,
             'target_id': self.target_id
         }
+
+class PendingEmailNotification(db.Model):
+    __tablename__ = 'pending_email_notifications'
+
+    id = db.Column(db.Integer, primary_key=True)
+    recipient_id = db.Column(db.Integer, nullable=False)
+    recipient_role = db.Column(db.String(50), nullable=False)  # 'staff' or 'superadmin'
+    message = db.Column(db.Text, nullable=False)
+    target_link = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'recipient_id': self.recipient_id,
+            'recipient_role': self.recipient_role,
+            'message': self.message,
+            'target_link': self.target_link,
+            'created_at': self.created_at.isoformat() + 'Z'
+        }

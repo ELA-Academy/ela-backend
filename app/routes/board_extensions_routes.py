@@ -890,3 +890,44 @@ def global_search():
         "users": users[:15]
     }), 200
 
+
+@board_extensions_bp.route('/tasks/bulk-custom-fields', methods=['POST'])
+@jwt_required()
+def bulk_update_custom_fields():
+    actor, role = get_actor()
+    data = request.get_json() or {}
+    task_ids = data.get('task_ids', [])
+    field_id = data.get('field_id')
+    value = data.get('value')
+
+    if not task_ids or not field_id:
+        return jsonify({"error": "task_ids and field_id are required"}), 400
+
+    import json
+    from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+    from app.models.board_model import BoardTask
+    field = BoardCustomField.query.get_or_404(field_id)
+    # Check access to the board
+    if not ensure_board_access(field.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    value_str = json.dumps(value) if value is not None else None
+
+    for task_id in task_ids:
+        task = BoardTask.query.get(task_id)
+        if not task or task.group.board_id != field.board_id:
+            continue
+        val_record = TaskCustomFieldValue.query.filter_by(task_id=task_id, field_id=field_id).first()
+        if val_record:
+            val_record.value_json = value_str
+        else:
+            val_record = TaskCustomFieldValue(
+                task_id=task_id,
+                field_id=field_id,
+                value_json=value_str
+            )
+            db.session.add(val_record)
+
+    db.session.commit()
+    return jsonify({"message": f"Successfully updated custom field for {len(task_ids)} tasks"}), 200
+

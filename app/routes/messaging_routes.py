@@ -542,24 +542,54 @@ def send_message(conversation_id):
     now = datetime.now(timezone.utc)
     notification_cooldown = timedelta(minutes=15)
 
+    # Parse mentions from payload
+    mentions = data.get('mentions', [])
+    notified_mentions = set()
+    from app.utils.notifications import enqueue_user_notification
+    import time
+    import hashlib
+
+    for mention in mentions:
+        m_id = mention.get('id')
+        m_role = mention.get('role')
+        if m_id and m_role:
+            key = f"{m_role}_{m_id}"
+            if key not in notified_mentions:
+                notified_mentions.add(key)
+                # 15s window to deduplicate consecutive mentions
+                raw_key = f"mention:{conversation.id}:{m_role}:{m_id}:{int(time.time() / 15)}"
+                idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+                enqueue_user_notification(
+                    user_id=m_id,
+                    user_role=m_role,
+                    message=f"{user.name} @mentioned you in conversation '{conversation.name or 'a conversation'}'.",
+                    category='mention',
+                    target_type="Conversation",
+                    target_id=conversation.id,
+                    target_link=f"/admin/messaging?conversation={conversation.id}",
+                    idempotency_key=idempotency_key
+                )
+
     for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
-        import time
-        import hashlib
-        # 15s window to deduplicate consecutive messages
-        raw_key = f"msg:{conversation.id}:{recipient_role}:{recipient.id}:{int(time.time() / 15)}"
-        idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
-        
-        from app.utils.notifications import enqueue_user_notification
-        enqueue_user_notification(
-            user_id=recipient.id,
-            user_role=recipient_role,
-            message=f"You have a new message in {conversation.name or 'a conversation'}.",
-            category='general',
-            target_type="Conversation",
-            target_id=conversation.id,
-            target_link=f"/admin/messaging?conversation={conversation.id}",
-            idempotency_key=idempotency_key
-        )
+        recipient_key = f"{recipient_role}_{recipient.id}"
+        # Skip generic notification if already notified as a mention
+        if recipient_key in notified_mentions:
+            pass
+        else:
+            # 15s window to deduplicate consecutive messages
+            raw_key = f"msg:{conversation.id}:{recipient_role}:{recipient.id}:{int(time.time() / 15)}"
+            idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+            
+            enqueue_user_notification(
+                user_id=recipient.id,
+                user_role=recipient_role,
+                message=f"You have a new message in {conversation.name or 'a conversation'}.",
+                category='general',
+                target_type="Conversation",
+                target_id=conversation.id,
+                target_link=f"/admin/messaging?conversation={conversation.id}",
+                idempotency_key=idempotency_key
+            )
 
         recipient_entry = get_participant_entry(conversation_id, recipient, recipient_role)
         if not recipient_entry:

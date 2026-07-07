@@ -188,16 +188,16 @@ def process_notifications_command():
                             except Exception as ex:
                                 print(f"  - Failed to broadcast socket event: {ex}")
 
-                        # B. Deliver Email
+                        # B. Deliver Email (Queue for digest batching)
                         if 'email' in channels:
-                            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-                            full_action_link = f"{frontend_url}{req.target_link or '/'}"
-                            email_data = { 'message': req.message, 'action_link': full_action_link }
-                            send_email_in_background(
-                                subject="You have a new notification",
-                                recipients=[recipient.email],
-                                template_data=email_data
+                            from .models.notification_model import PendingEmailNotification
+                            pending_email = PendingEmailNotification(
+                                recipient_id=req.recipient_id,
+                                recipient_role=req.recipient_role,
+                                message=req.message,
+                                target_link=req.target_link
                             )
+                            db.session.add(pending_email)
 
                         # C. Deliver Push
                         if 'push' in channels:
@@ -223,12 +223,95 @@ def process_notifications_command():
                             
                     db.session.commit()
             
+            # Send batched digests
+            send_batch_digests()
+            
             # Sleep 3 seconds between queue polls
             time.sleep(3)
             
         except Exception as err:
             print(f"Queue Worker Loop Exception: {err}")
             time.sleep(3)
+
+def send_batch_digests():
+    from .models.notification_model import PendingEmailNotification
+    from .models.staff_model import Staff
+    from .models.super_admin_model import SuperAdmin
+    from .utils.notifications import send_email_in_background
+    from datetime import datetime
+    import os
+
+    # Query all pending email notifications
+    all_pending = PendingEmailNotification.query.all()
+    if not all_pending:
+        return
+
+    # Group by recipient
+    grouped = {}
+    for item in all_pending:
+        key = (item.recipient_role, item.recipient_id)
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(item)
+
+    now = datetime.utcnow()
+    coalesce_window_seconds = 60  # Wait 60 seconds after the first notification to allow batching
+
+    for (role, user_id), items in grouped.items():
+        # Sort items by created_at asc
+        items.sort(key=lambda x: x.created_at)
+        oldest_item = items[0]
+
+        # Only process if oldest item has waited at least coalesce_window_seconds
+        if (now - oldest_item.created_at).total_seconds() < coalesce_window_seconds:
+            continue
+
+        # Resolve recipient
+        recipient = Staff.query.get(user_id) if role == 'staff' else SuperAdmin.query.get(user_id)
+        if not recipient or not recipient.email:
+            # Delete if no email or recipient not found
+            for item in items:
+                db.session.delete(item)
+            db.session.commit()
+            continue
+
+        # Prepare digest subject and content
+        count = len(items)
+        if count == 1:
+            subject = "New notification on ELA Academy"
+            email_body_text = items[0].message
+            target_link = items[0].target_link or '/'
+        else:
+            subject = f"You have {count} new updates on ELA Academy"
+            # Build list of updates
+            bullets = []
+            for item in items:
+                link = item.target_link or '/'
+                bullets.append(f"<li>{item.message} (<a href='{os.getenv('FRONTEND_URL', 'http://localhost:5173')}{link}'>View</a>)</li>")
+            email_body_text = f"<p>Here is a summary of your recent updates:</p><ul>{''.join(bullets)}</ul>"
+            target_link = '/'
+
+        # Send email
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+        full_action_link = f"{frontend_url}{target_link}"
+        email_data = {
+            'message': email_body_text,
+            'action_link': full_action_link
+        }
+        try:
+            send_email_in_background(
+                subject=subject,
+                recipients=[recipient.email],
+                template_data=email_data
+            )
+            # Delete processed items
+            for item in items:
+                db.session.delete(item)
+            db.session.commit()
+            print(f"[Digest Worker] Sent digest email with {count} updates to {recipient.email}")
+        except Exception as e:
+            db.session.rollback()
+            print(f"[Digest Worker] Failed to send digest email: {e}")
 
 def register_commands(app):
     app.cli.add_command(generate_invoices_command)
