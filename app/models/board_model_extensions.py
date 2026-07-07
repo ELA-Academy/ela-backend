@@ -72,6 +72,9 @@ class BoardFormConfig(db.Model):
     description = db.Column(db.Text, nullable=True)
     form_structure_json = db.Column(db.Text, nullable=False) # Questions list with mappings to task fields or custom fields
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    header_image_url = db.Column(db.String(500), nullable=True)
+    creator_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='SET NULL'), nullable=True)
+    creator_super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='SET NULL'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
@@ -88,6 +91,9 @@ class BoardFormConfig(db.Model):
             'description': self.description,
             'form_structure': struct,
             'is_active': self.is_active,
+            'header_image_url': self.header_image_url,
+            'creator_staff_id': self.creator_staff_id,
+            'creator_super_admin_id': self.creator_super_admin_id,
             'created_at': self.created_at.isoformat() + 'Z'
         }
 
