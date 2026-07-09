@@ -490,11 +490,15 @@ def get_messages(conversation_id):
         return jsonify({"error": "Forbidden"}), 403
 
     participant_entry = get_or_create_participant_entry(conversation, user, role)
+    old_last_read_at = participant_entry.last_read_at
     participant_entry.last_read_at = datetime.now(timezone.utc)
     db.session.commit()
 
     messages = conversation.messages.all()
-    return jsonify([message.to_dict() for message in messages]), 200
+    return jsonify({
+        'messages': [message.to_dict() for message in messages],
+        'last_read_at': old_last_read_at.isoformat() + 'Z' if old_last_read_at else None
+    }), 200
 
 
 @messaging_bp.route('/conversations/<int:conversation_id>/messages', methods=['POST'])

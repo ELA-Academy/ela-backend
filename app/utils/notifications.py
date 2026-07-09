@@ -150,7 +150,10 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
     recipient_id = recipient.id
 
     # Check user opt-out preferences (cached in Redis if available)
-    allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
+    if category == 'mention':
+        allowed_channels = ['in_app', 'email', 'push']
+    else:
+        allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
     if not allowed_channels:
         current_app.logger.info(f"User {recipient_role} {recipient_id} has opted out of all notifications for category {category}.")
         return None
