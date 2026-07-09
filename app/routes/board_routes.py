@@ -1970,18 +1970,43 @@ def bulk_move_tasks():
     if not ensure_board_access(target_group.board, actor, role):
         return jsonify({"error": "Forbidden - No access to target board"}), 403
 
+    DEFAULT_STATUSES = {"not started", "in progress", "done", "to do", "completed", "complete", "list"}
+
     tasks = BoardTask.query.filter(BoardTask.id.in_(task_ids)).all()
     for task in tasks:
         # Verify access to old board
         if not ensure_board_access(task.group.board, actor, role):
             continue
         
+        current_group_name = task.group.name
+        is_custom = current_group_name.lower() not in DEFAULT_STATUSES
+
+        if is_custom:
+            dest_board = target_group.board
+            existing_group = BoardGroup.query.filter_by(board_id=dest_board.id, name=current_group_name).first()
+            if not existing_group:
+                last_group = BoardGroup.query.filter_by(board_id=dest_board.id).order_by(BoardGroup.position.desc()).first()
+                next_pos = (last_group.position + 1) if last_group else 0
+                new_group = BoardGroup(
+                    board_id=dest_board.id,
+                    name=current_group_name,
+                    color=task.group.color or "#673de6",
+                    position=next_pos
+                )
+                db.session.add(new_group)
+                db.session.flush()
+                resolved_group_id = new_group.id
+            else:
+                resolved_group_id = existing_group.id
+        else:
+            resolved_group_id = target_group.id
+
         # Log change
-        change = f"Moved task to group '{target_group.name}' on board '{target_group.board.name}'"
+        change = f"Moved task to group '{current_group_name}' on board '{target_group.board.name}'"
         db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=change))
         
         # Update group
-        task.group_id = target_group.id
+        task.group_id = resolved_group_id
 
     db.session.commit()
     return jsonify({"message": f"Successfully moved {len(tasks)} task(s)"}), 200
