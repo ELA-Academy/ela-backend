@@ -53,6 +53,7 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('board_tasks', 'tags', 'TEXT NULL')
         add_column_if_missing('board_tasks', 'description_html', 'TEXT NULL')
         add_column_if_missing('board_tasks', 'time_estimate_minutes', 'INTEGER NULL')
+        add_column_if_missing('board_tasks', 'due_date_reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
 
     if inspector.has_table('task_time_entries'):
         add_column_if_missing('task_time_entries', 'is_billable', 'BOOLEAN NOT NULL DEFAULT FALSE')

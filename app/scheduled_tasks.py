@@ -87,6 +87,68 @@ def generate_invoices_command():
         db.session.rollback()
         print(f"An error occurred. Rolling back changes. Error: {e}")
 
+def check_due_date_reminders():
+    from datetime import date, datetime
+    from app.models.board_model import BoardTask
+    from app.utils.notifications import enqueue_user_notification
+    import hashlib
+
+    # Find tasks that are due today or overdue, not marked completed ('Done'), and reminder not sent
+    today = date.today()
+    tasks_to_remind = BoardTask.query.filter(
+        BoardTask.due_date <= today,
+        BoardTask.status != 'Done',
+        BoardTask.due_date_reminder_sent == False
+    ).all()
+
+    for task in tasks_to_remind:
+        # Determine all assignees and watchers to notify
+        recipients = []
+        if task.responsible_staff_id:
+            recipients.append(('staff', task.responsible_staff_id))
+        if task.responsible_super_admin_id:
+            recipients.append(('superadmin', task.responsible_super_admin_id))
+        
+        for ass in task.assignees:
+            if ass.staff_id:
+                recipients.append(('staff', ass.staff_id))
+            elif ass.super_admin_id:
+                recipients.append(('superadmin', ass.super_admin_id))
+                
+        for watcher in task.watchers:
+            if watcher.staff_id:
+                recipients.append(('staff', watcher.staff_id))
+            elif watcher.super_admin_id:
+                recipients.append(('superadmin', watcher.super_admin_id))
+
+        # Deduplicate recipients
+        unique_recipients = set(recipients)
+        
+        is_overdue = task.due_date < today
+        if is_overdue:
+            msg = f"Task '{task.title}' is overdue! It was due on {task.due_date}."
+        else:
+            msg = f"Task '{task.title}' is due today ({task.due_date})!"
+
+        for role, user_id in unique_recipients:
+            key_raw = f"reminder:{task.id}:{role}:{user_id}"
+            idempotency_key = hashlib.md5(key_raw.encode('utf-8')).hexdigest()
+            
+            enqueue_user_notification(
+                user_id=user_id,
+                user_role=role,
+                message=msg,
+                category='general',
+                target_type='Board',
+                target_id=task.group.board_id,
+                target_link=f"/admin/boards/{task.group.board_id}?task={task.id}",
+                idempotency_key=idempotency_key
+            )
+            
+        task.due_date_reminder_sent = True
+        
+    db.session.commit()
+
 @click.command('process-notifications', help='Processes pending notification requests in a polling queue.')
 @with_appcontext
 def process_notifications_command():
@@ -106,8 +168,21 @@ def process_notifications_command():
     print("=== Notification Queue Worker Daemon Started ===")
     
     MAX_NOTIFICATIONS_PER_MINUTE = 5
+    last_checked_reminders = None
     
     while True:
+        try:
+            # Check due date reminders every 10 minutes
+            now_time = datetime.utcnow()
+            if last_checked_reminders is None or (now_time - last_checked_reminders).total_seconds() > 600:
+                last_checked_reminders = now_time
+                try:
+                    check_due_date_reminders()
+                except Exception as ex_rem:
+                    print(f"Error checking due date reminders: {ex_rem}")
+        except Exception as e_rem_outer:
+            print(f"Outer error checking reminders: {e_rem_outer}")
+
         try:
             one_minute_ago = datetime.utcnow() - timedelta(seconds=60)
             

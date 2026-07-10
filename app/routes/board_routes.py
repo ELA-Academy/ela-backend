@@ -979,6 +979,27 @@ def delete_checklist_item(item_id):
     return jsonify({"message": "Checklist item deleted successfully"}), 200
 
 
+@board_bp.route('/tasks/<int:task_id>/checklists/reorder', methods=['POST'])
+@jwt_required()
+def reorder_checklist_items(task_id):
+    actor, role = get_actor()
+    from app.models.board_model import BoardTask, BoardTaskChecklistItem
+    task = BoardTask.query.get_or_404(task_id)
+    if not ensure_board_access(task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    ordered_ids = data.get('ordered_ids', [])
+
+    for idx, item_id in enumerate(ordered_ids):
+        item = BoardTaskChecklistItem.query.filter_by(id=item_id, task_id=task.id).first()
+        if item:
+            item.position = idx
+
+    db.session.commit()
+    return jsonify({"message": "Checklist items reordered successfully"}), 200
+
+
 # Watchers / Followers
 @board_bp.route('/tasks/<int:task_id>/watchers', methods=['POST'])
 @jwt_required()
