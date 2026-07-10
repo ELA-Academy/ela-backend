@@ -694,6 +694,7 @@ def get_task_updates(task_id):
 @board_bp.route('/tasks/<int:task_id>/updates', methods=['POST'])
 @jwt_required()
 def create_task_update(task_id):
+    from app.utils.notifications import enqueue_user_notification
     try:
         actor, role = get_actor()
         task, board = get_task_and_board_or_403(task_id, actor, role)
@@ -721,8 +722,6 @@ def create_task_update(task_id):
             mention_type = mention.get('type')
             mention_id = mention.get('id')
             message = f"{actor.name} @mentioned you in task '{task.title}' on board '{board.name}'"
-
-            from app.utils.notifications import enqueue_user_notification
 
             if mention_type == 'staff':
                 key = f"staff_{mention_id}"
@@ -818,6 +817,7 @@ def create_task_update(task_id):
         db.session.commit()
         return jsonify(new_update.to_dict()), 201
     except Exception as e:
+        db.session.rollback()
         import traceback
         return jsonify({
             "error": str(e),
