@@ -148,6 +148,7 @@ class BoardTask(db.Model):
     notes = db.Column(db.String(500), nullable=True)
     position = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    due_date_reminder_sent = db.Column(db.Boolean, default=False, nullable=False)
 
     responsible_staff = db.relationship('Staff')
     responsible_super_admin = db.relationship('SuperAdmin')
