@@ -90,7 +90,7 @@
         <div class="content">
           <div class="salutation">Hello,</div>
           <div class="message-box">
-            {{ message }}
+            {{ message | safe }}
           </div>
           {% if action_link %}
           <div class="button-wrapper">

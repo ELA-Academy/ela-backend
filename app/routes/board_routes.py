@@ -694,128 +694,135 @@ def get_task_updates(task_id):
 @board_bp.route('/tasks/<int:task_id>/updates', methods=['POST'])
 @jwt_required()
 def create_task_update(task_id):
-    actor, role = get_actor()
-    task, board = get_task_and_board_or_403(task_id, actor, role)
-    if not task or not actor:
-        return jsonify({"error": "Forbidden"}), 403
+    try:
+        actor, role = get_actor()
+        task, board = get_task_and_board_or_403(task_id, actor, role)
+        if not task or not actor:
+            return jsonify({"error": "Forbidden"}), 403
 
-    data = request.get_json() or {}
-    content = data.get('content')
-    mentions = data.get('mentions', [])
+        data = request.get_json() or {}
+        content = data.get('content')
+        mentions = data.get('mentions', [])
 
-    if not content:
-        return jsonify({"error": "Content is required"}), 400
+        if not content:
+            return jsonify({"error": "Content is required"}), 400
 
-    new_update = TaskUpdate(task_id=task.id, content=content, sender_name=actor.name)
-    if role == 'superadmin':
-        new_update.sender_super_admin_id = actor.id
-    else:
-        new_update.sender_staff_id = actor.id
+        new_update = TaskUpdate(task_id=task.id, content=content, sender_name=actor.name)
+        if role == 'superadmin':
+            new_update.sender_super_admin_id = actor.id
+        else:
+            new_update.sender_staff_id = actor.id
 
-    db.session.add(new_update)
-    db.session.flush()
+        db.session.add(new_update)
+        db.session.flush()
 
-    notified_user_keys = set()
-    for mention in mentions:
-        mention_type = mention.get('type')
-        mention_id = mention.get('id')
-        message = f"{actor.name} @mentioned you in task '{task.title}' on board '{board.name}'"
+        notified_user_keys = set()
+        for mention in mentions:
+            mention_type = mention.get('type')
+            mention_id = mention.get('id')
+            message = f"{actor.name} @mentioned you in task '{task.title}' on board '{board.name}'"
 
-        from app.utils.notifications import enqueue_user_notification
+            from app.utils.notifications import enqueue_user_notification
 
-        if mention_type == 'staff':
-            key = f"staff_{mention_id}"
-            if key not in notified_user_keys:
-                notified_user_keys.add(key)
-                enqueue_user_notification(
-                    user_id=mention_id,
-                    user_role='staff',
-                    message=message,
-                    category='mention',
-                    target_type='Board',
-                    target_id=board.id,
-                    target_link=f"/admin/boards/{board.id}?task={task.id}"
-                )
-        elif mention_type == 'superadmin':
-            key = f"superadmin_{mention_id}"
-            if key not in notified_user_keys:
-                notified_user_keys.add(key)
-                enqueue_user_notification(
-                    user_id=mention_id,
-                    user_role='superadmin',
-                    message=message,
-                    category='mention',
-                    target_type='Board',
-                    target_id=board.id,
-                    target_link=f"/admin/boards/{board.id}?task={task.id}"
-                )
-        elif mention_type == 'department':
-            department = Department.query.get(mention_id)
-            if department:
-                for member in department.staff_members:
-                    key = f"staff_{member.id}"
-                    if key not in notified_user_keys and (role != 'staff' or actor.id != member.id):
-                        notified_user_keys.add(key)
-                        enqueue_user_notification(
-                            user_id=member.id,
-                            user_role='staff',
-                            message=f"{actor.name} @mentioned your department ({department.name}) in task '{task.title}' on board '{board.name}'",
-                            category='mention',
-                            target_type='Board',
-                            target_id=board.id,
-                            target_link=f"/admin/boards/{board.id}?task={task.id}"
-                        )
+            if mention_type == 'staff':
+                key = f"staff_{mention_id}"
+                if key not in notified_user_keys:
+                    notified_user_keys.add(key)
+                    enqueue_user_notification(
+                        user_id=mention_id,
+                        user_role='staff',
+                        message=message,
+                        category='mention',
+                        target_type='Board',
+                        target_id=board.id,
+                        target_link=f"/admin/boards/{board.id}?task={task.id}"
+                    )
+            elif mention_type == 'superadmin':
+                key = f"superadmin_{mention_id}"
+                if key not in notified_user_keys:
+                    notified_user_keys.add(key)
+                    enqueue_user_notification(
+                        user_id=mention_id,
+                        user_role='superadmin',
+                        message=message,
+                        category='mention',
+                        target_type='Board',
+                        target_id=board.id,
+                        target_link=f"/admin/boards/{board.id}?task={task.id}"
+                    )
+            elif mention_type == 'department':
+                department = Department.query.get(mention_id)
+                if department:
+                    for member in department.staff_members:
+                        key = f"staff_{member.id}"
+                        if key not in notified_user_keys and (role != 'staff' or actor.id != member.id):
+                            notified_user_keys.add(key)
+                            enqueue_user_notification(
+                                user_id=member.id,
+                                user_role='staff',
+                                message=f"{actor.name} @mentioned your department ({department.name}) in task '{task.title}' on board '{board.name}'",
+                                category='mention',
+                                target_type='Board',
+                                target_id=board.id,
+                                target_link=f"/admin/boards/{board.id}?task={task.id}"
+                            )
 
-    # Notify assignees and participants (other commenters) on the task
-    notified_users = set(notified_user_keys)
-    
-    # 1. Notify Assignees
-    assignees_to_notify = []
-    if task.responsible_staff_id:
-        assignees_to_notify.append(('staff', task.responsible_staff_id))
-    if task.responsible_super_admin_id:
-        assignees_to_notify.append(('superadmin', task.responsible_super_admin_id))
-    
-    for ass in task.assignees:
-        if ass.staff_id:
-            assignees_to_notify.append(('staff', ass.staff_id))
-        elif ass.super_admin_id:
-            assignees_to_notify.append(('superadmin', ass.super_admin_id))
-            
-    for u_role, u_id in assignees_to_notify:
-        key = f"{u_role}_{u_id}"
-        if key != f"{role}_{actor.id}" and key not in notified_users:
-            notified_users.add(key)
-            enqueue_user_notification(
-                user_id=u_id,
-                user_role=u_role,
-                message=f"{actor.name} commented on task '{task.title}' assigned to you on board '{board.name}'",
-                category='comment',
-                target_type='Board',
-                target_id=board.id,
-                target_link=f"/admin/boards/{board.id}?task={task.id}"
-            )
-            
-    # 2. Notify other comment thread participants
-    for old_update in task.updates:
-        u_role = 'superadmin' if old_update.sender_super_admin_id else ('staff' if old_update.sender_staff_id else None)
-        u_id = old_update.sender_super_admin_id or old_update.sender_staff_id
-        if u_role and u_id:
+        # Notify assignees and participants (other commenters) on the task
+        notified_users = set(notified_user_keys)
+        
+        # 1. Notify Assignees
+        assignees_to_notify = []
+        if task.responsible_staff_id:
+            assignees_to_notify.append(('staff', task.responsible_staff_id))
+        if task.responsible_super_admin_id:
+            assignees_to_notify.append(('superadmin', task.responsible_super_admin_id))
+        
+        for ass in task.assignees:
+            if ass.staff_id:
+                assignees_to_notify.append(('staff', ass.staff_id))
+            elif ass.super_admin_id:
+                assignees_to_notify.append(('superadmin', ass.super_admin_id))
+                
+        for u_role, u_id in assignees_to_notify:
             key = f"{u_role}_{u_id}"
             if key != f"{role}_{actor.id}" and key not in notified_users:
                 notified_users.add(key)
                 enqueue_user_notification(
                     user_id=u_id,
                     user_role=u_role,
-                    message=f"{actor.name} commented on task '{task.title}' that you commented on",
+                    message=f"{actor.name} commented on task '{task.title}' assigned to you on board '{board.name}'",
                     category='comment',
                     target_type='Board',
                     target_id=board.id,
                     target_link=f"/admin/boards/{board.id}?task={task.id}"
                 )
+                
+        # 2. Notify other comment thread participants
+        for old_update in task.updates:
+            u_role = 'superadmin' if old_update.sender_super_admin_id else ('staff' if old_update.sender_staff_id else None)
+            u_id = old_update.sender_super_admin_id or old_update.sender_staff_id
+            if u_role and u_id:
+                key = f"{u_role}_{u_id}"
+                if key != f"{role}_{actor.id}" and key not in notified_users:
+                    notified_users.add(key)
+                    enqueue_user_notification(
+                        user_id=u_id,
+                        user_role=u_role,
+                        message=f"{actor.name} commented on task '{task.title}' that you commented on",
+                        category='comment',
+                        target_type='Board',
+                        target_id=board.id,
+                        target_link=f"/admin/boards/{board.id}?task={task.id}"
+                    )
 
-    db.session.commit()
-    return jsonify(new_update.to_dict()), 201
+        db.session.commit()
+        return jsonify(new_update.to_dict()), 201
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
 
 
 @board_bp.route('/updates/<int:update_id>/like', methods=['POST'])
