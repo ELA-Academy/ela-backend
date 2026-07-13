@@ -44,6 +44,28 @@ def ensure_board_access(board, actor, role):
 # 1. Custom Fields APIs
 # ==========================================
 
+@board_extensions_bp.route('/custom-fields/workspace', methods=['GET'])
+@jwt_required()
+def get_workspace_custom_fields():
+    actor, role = get_actor()
+    boards = Board.query.filter_by(is_archived=False).all()
+    accessible_board_ids = [b.id for b in boards if ensure_board_access(b, actor, role)]
+    
+    if not accessible_board_ids:
+        return jsonify([]), 200
+        
+    fields = BoardCustomField.query.filter(BoardCustomField.board_id.in_(accessible_board_ids)).all()
+    
+    seen = set()
+    unique_fields = []
+    for f in fields:
+        key = (f.name.lower().strip(), f.type)
+        if key not in seen:
+            seen.add(key)
+            unique_fields.append(f.to_dict())
+            
+    return jsonify(unique_fields), 200
+
 @board_extensions_bp.route('/boards/<int:board_id>/custom-fields', methods=['GET'])
 @jwt_required()
 def get_board_custom_fields(board_id):
