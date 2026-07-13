@@ -42,6 +42,15 @@ class Board(db.Model):
                 custom_statuses_val = json.loads(self.custom_statuses)
             except:
                 pass
+
+        custom_fields_val = []
+        try:
+            from app.models.board_model_extensions import BoardCustomField
+            fields = BoardCustomField.query.filter_by(board_id=self.id).all()
+            custom_fields_val = [f.to_dict() for f in fields]
+        except Exception:
+            pass
+
         return {
             'id': self.id,
             'name': self.name,
@@ -64,6 +73,7 @@ class Board(db.Model):
             'access_members': [member.to_dict() for member in self.access_members],
             'groups': [group.to_dict() for group in self.groups],
             'tasks_count': sum(len(g.tasks) for g in self.groups),
+            'custom_fields': custom_fields_val,
             'created_at': self.created_at.isoformat() + 'Z'
         }
 
@@ -187,7 +197,15 @@ class BoardTask(db.Model):
         assignee_email = primary_assignee.get('email', "")
         assignee_role = primary_assignee.get('role', "")
         assignee_id = primary_assignee.get('id')
-        
+
+        custom_field_values_val = {}
+        try:
+            from app.models.board_model_extensions import TaskCustomFieldValue
+            values = TaskCustomFieldValue.query.filter_by(task_id=self.id).all()
+            custom_field_values_val = {v.field_id: v.to_dict()['value'] for v in values}
+        except Exception:
+            pass
+
         return {
             'id': self.id,
             'group_id': self.group_id,
@@ -226,6 +244,7 @@ class BoardTask(db.Model):
                 'due_date': sub.due_date.isoformat() if sub.due_date else None,
                 'assignees': [assignee.to_dict() for assignee in sub.assignees]
             } for sub in self.subtasks],
+            'custom_field_values': custom_field_values_val,
             'created_at': self.created_at.isoformat() + 'Z'
         }
 
