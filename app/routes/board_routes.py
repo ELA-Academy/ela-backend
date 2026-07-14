@@ -906,13 +906,17 @@ def toggle_comment_reaction(update_id):
 @board_bp.route('/updates/<int:update_id>/reply', methods=['POST'])
 @jwt_required()
 def create_reply(update_id):
+    from app.utils.notifications import enqueue_user_notification
     actor, role = get_actor()
     update = TaskUpdate.query.get_or_404(update_id)
-    if not ensure_board_access(update.task.group.board, actor, role):
+    task = update.task
+    board = task.group.board
+    if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
     data = request.get_json() or {}
     content = data.get('content')
+    mentions = data.get('mentions', [])
     if not content:
         return jsonify({"error": "Reply content is required"}), 400
 
@@ -924,8 +928,89 @@ def create_reply(update_id):
 
     db.session.add(reply)
     db.session.commit()
+
+    # Process mentions in reply
+    notified_user_keys = set()
+    for mention in mentions:
+        mention_type = mention.get('type')
+        mention_id = mention.get('id')
+        message = f"{actor.name} @mentioned you in a reply on task '{task.title}' on board '{board.name}'"
+
+        if mention_type == 'staff':
+            key = f"staff_{mention_id}"
+            if key not in notified_user_keys:
+                notified_user_keys.add(key)
+                enqueue_user_notification(
+                    user_id=mention_id,
+                    user_role='staff',
+                    message=message,
+                    category='mention',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
+                )
+        elif mention_type == 'superadmin':
+            key = f"superadmin_{mention_id}"
+            if key not in notified_user_keys:
+                notified_user_keys.add(key)
+                enqueue_user_notification(
+                    user_id=mention_id,
+                    user_role='superadmin',
+                    message=message,
+                    category='mention',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
+                )
+
     return jsonify(reply.to_dict()), 201
 
+@board_bp.route('/updates/<int:update_id>', methods=['PUT'])
+@jwt_required()
+def update_task_update(update_id):
+    actor, role = get_actor()
+    update = TaskUpdate.query.get_or_404(update_id)
+    if not ensure_board_access(update.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    is_owner = False
+    if role == 'superadmin' and update.sender_super_admin_id == actor.id:
+        is_owner = True
+    elif role == 'staff' and update.sender_staff_id == actor.id:
+        is_owner = True
+
+    if role != 'superadmin' and not is_owner:
+        return jsonify({"error": "You can only edit your own comments"}), 403
+
+    data = request.get_json() or {}
+    content = data.get('content')
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    update.content = content
+    db.session.commit()
+    return jsonify(update.to_dict()), 200
+
+@board_bp.route('/updates/<int:update_id>', methods=['DELETE'])
+@jwt_required()
+def delete_task_update(update_id):
+    actor, role = get_actor()
+    update = TaskUpdate.query.get_or_404(update_id)
+    if not ensure_board_access(update.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    is_owner = False
+    if role == 'superadmin' and update.sender_super_admin_id == actor.id:
+        is_owner = True
+    elif role == 'staff' and update.sender_staff_id == actor.id:
+        is_owner = True
+
+    if role != 'superadmin' and not is_owner:
+        return jsonify({"error": "You can only delete your own comments"}), 403
+
+    db.session.delete(update)
+    db.session.commit()
+    return jsonify({"message": "Comment deleted"}), 200
 
 # Checklist items
 @board_bp.route('/tasks/<int:task_id>/checklists', methods=['POST'])

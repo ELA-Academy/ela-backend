@@ -230,6 +230,13 @@ def serialize_conversation_summary(conversation, user, role, audit=False):
     title = get_conversation_title(conversation, user, role)
     unread_count = 0 if audit else get_conversation_unread_count(conversation, user, role)
 
+    participant_keys = []
+    for p in conversation.participants:
+        if p.super_admin_id:
+            participant_keys.append(f"superadmin_{p.super_admin_id}")
+        elif p.staff_id:
+            participant_keys.append(f"staff_{p.staff_id}")
+
     return {
         'id': conversation.id,
         'title': title,
@@ -245,7 +252,8 @@ def serialize_conversation_summary(conversation, user, role, audit=False):
         'department_id': conversation.department_id,
         'department_name': conversation.department.name if conversation.department else None,
         'is_restricted': conversation.conversation_type == 'department',
-        'audit_only': audit
+        'audit_only': audit,
+        'participant_keys': participant_keys
     }
 
 
@@ -635,6 +643,7 @@ def send_message(conversation_id):
         send_push_notification(recipient, push_payload)
         recipient_entry.last_notified_at = now
 
+    conversation.updated_at = datetime.utcnow()
     db.session.commit()
     
     # Broadcast the message in real time to the room using Socket.IO!
@@ -733,6 +742,7 @@ def upload_message_file(conversation_id):
         )
     )
 
+    conversation.updated_at = datetime.utcnow()
     db.session.commit()
 
     from app import socketio
@@ -866,3 +876,21 @@ def on_leave(data):
     if room_id:
         room = str(room_id) if str(room_id).startswith('user_') else f"conversation_{room_id}"
         leave_room(room)
+
+# In-memory online user tracking
+online_sids = {}
+
+@socketio.on('user_online')
+def on_user_online(data):
+    user_id = data.get('id')
+    user_role = data.get('role')
+    if user_id and user_role:
+        user_key = f"{user_role}_{user_id}"
+        online_sids[request.sid] = user_key
+        socketio.emit('online_users_list', list(set(online_sids.values())))
+
+@socketio.on('disconnect')
+def on_disconnect_presence():
+    if request.sid in online_sids:
+        del online_sids[request.sid]
+        socketio.emit('online_users_list', list(set(online_sids.values())))
