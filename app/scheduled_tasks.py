@@ -363,7 +363,8 @@ def send_batch_digests():
             for item in items:
                 link = item.target_link or '/'
                 bullets.append(f"<li>{item.message} (<a href='{os.getenv('FRONTEND_URL', 'http://localhost:5173')}{link}'>View</a>)</li>")
-            email_body_text = f"<p>Here is a summary of your recent updates:</p><ul>{''.join(bullets)}</ul>"
+            from markupsafe import Markup
+            email_body_text = Markup(f"<p>Here is a summary of your recent updates:</p><ul>{''.join(bullets)}</ul>")
             target_link = '/'
 
         # Send email

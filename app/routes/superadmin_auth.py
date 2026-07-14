@@ -162,7 +162,7 @@ def login_super_admin():
         otp=otp,
         role="superadmin",
         claims={"admin_id": admin.id},
-        expiry=datetime.utcnow() + timedelta(minutes=30)
+        expiry=datetime.utcnow() + timedelta(minutes=10)
     )
     db.session.add(login_otp_record)
     db.session.commit()

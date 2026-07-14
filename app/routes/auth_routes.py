@@ -46,7 +46,7 @@ def login():
             otp=otp,
             role="staff",
             claims=additional_claims,
-            expiry=datetime.utcnow() + timedelta(minutes=30)
+            expiry=datetime.utcnow() + timedelta(minutes=10)
         )
         db.session.add(login_otp_record)
         db.session.commit()
@@ -81,7 +81,7 @@ def login():
             otp=otp,
             role="superadmin",
             claims=additional_claims,
-            expiry=datetime.utcnow() + timedelta(minutes=30)
+            expiry=datetime.utcnow() + timedelta(minutes=10)
         )
         db.session.add(login_otp_record)
         db.session.commit()
@@ -141,8 +141,13 @@ def verify_setup_token():
         return jsonify({"error": "Token is required"}), 400
     
     from flask_jwt_extended import decode_token
+    from app.models.used_token_model import UsedToken
     try:
         decoded = decode_token(token)
+        jti = decoded.get('jti')
+        if jti and UsedToken.query.filter_by(token_jti=jti).first():
+            return jsonify({"error": "Token has already been used", "valid": False}), 400
+            
         purpose = decoded.get('purpose')
         if purpose not in {'setup-password', 'reset-password'}:
             return jsonify({"error": "Invalid token purpose", "valid": False}), 400
@@ -166,8 +171,13 @@ def setup_password():
 
     from flask_jwt_extended import decode_token
     from app.models import db
+    from app.models.used_token_model import UsedToken
     try:
         decoded = decode_token(token)
+        jti = decoded.get('jti')
+        if jti and UsedToken.query.filter_by(token_jti=jti).first():
+            return jsonify({"error": "Token has already been used"}), 400
+            
         purpose = decoded.get('purpose')
         if purpose not in {'setup-password', 'reset-password'}:
             return jsonify({"error": "Invalid token purpose"}), 400
@@ -182,6 +192,9 @@ def setup_password():
                 admin_member.set_password(password)
             else:
                 return jsonify({"error": "Account not found"}), 404
+        
+        if jti:
+            db.session.add(UsedToken(token_jti=jti))
         db.session.commit()
         return jsonify({"message": "Password updated successfully! You can now log in."}), 200
     except Exception as e:
