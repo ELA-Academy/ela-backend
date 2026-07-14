@@ -149,6 +149,92 @@ def check_due_date_reminders():
         
     db.session.commit()
 
+def check_calendar_event_reminders():
+    from datetime import datetime, timedelta
+    from app.models.board_model import CalendarEvent, BoardAccessMember
+    from app.models.staff_model import Staff
+    from app.models.super_admin_model import SuperAdmin
+    from app.utils.notifications import enqueue_user_notification
+    import hashlib
+    import json
+
+    print("[Reminder Worker] Checking calendar event reminders...")
+    now = datetime.utcnow()
+    events = CalendarEvent.query.filter(
+        CalendarEvent.reminder_sent == False,
+        CalendarEvent.reminder_minutes != None,
+        CalendarEvent.start_datetime != None
+    ).all()
+    
+    for event in events:
+        reminder_time = event.start_datetime - timedelta(minutes=event.reminder_minutes)
+        if now >= reminder_time:
+            print(f"[Reminder Worker] Event '{event.title}' is due for notification.")
+            time_left_str = f"starts in {event.reminder_minutes} minutes" if event.reminder_minutes > 0 else "starts now"
+            msg = f"Reminder: '{event.title}' {time_left_str}!"
+            
+            notified_users = set()
+            creator_staff = Staff.query.filter_by(name=event.created_by_name).first()
+            creator_admin = SuperAdmin.query.filter_by(name=event.created_by_name).first()
+            
+            if creator_staff:
+                notified_users.add(('staff', creator_staff.id))
+            if creator_admin:
+                notified_users.add(('superadmin', creator_admin.id))
+                
+            if event.board_id:
+                members = BoardAccessMember.query.filter_by(board_id=event.board_id).all()
+                for member in members:
+                    if member.staff_id:
+                        notified_users.add(('staff', member.staff_id))
+                    if member.super_admin_id:
+                        notified_users.add(('superadmin', member.super_admin_id))
+                        
+            if event.linked_task:
+                for assignee in event.linked_task.assignees:
+                    if assignee.staff_id:
+                        notified_users.add(('staff', assignee.staff_id))
+                    if assignee.super_admin_id:
+                        notified_users.add(('superadmin', assignee.super_admin_id))
+            
+            for user_type, user_id in notified_users:
+                should_notify = True
+                try:
+                    if user_type == 'staff':
+                        u = Staff.query.get(user_id)
+                        if u and u.notification_preferences:
+                            prefs = json.loads(u.notification_preferences)
+                            if prefs.get('reminders') is False:
+                                should_notify = False
+                    else:
+                        u = SuperAdmin.query.get(user_id)
+                        if u and u.notification_preferences:
+                            prefs = json.loads(u.notification_preferences)
+                            if prefs.get('reminders') is False:
+                                should_notify = False
+                except Exception as pref_err:
+                    print(f"[Reminder Worker Preferences Error] {pref_err}")
+
+                if should_notify:
+                    raw_key = f"reminder:{user_type}:{user_id}:{event.id}"
+                    idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+                    
+                    enqueue_user_notification(
+                        user_id=user_id,
+                        user_role=user_type,
+                        message=msg,
+                        category='reminder',
+                        target_type='CalendarEvent',
+                        target_id=event.id,
+                        target_link=f"/admin/boards/{event.board_id}?tab=calendar" if event.board_id else "/admin/boards",
+                        idempotency_key=idempotency_key
+                    )
+            
+            event.reminder_sent = True
+            db.session.flush()
+            
+    db.session.commit()
+
 @click.command('process-notifications', help='Processes pending notification requests in a polling queue.')
 @with_appcontext
 def process_notifications_command():
@@ -169,6 +255,7 @@ def process_notifications_command():
     
     MAX_NOTIFICATIONS_PER_MINUTE = 5
     last_checked_reminders = None
+    last_checked_cal_reminders = None
     
     while True:
         try:
@@ -182,6 +269,18 @@ def process_notifications_command():
                     print(f"Error checking due date reminders: {ex_rem}")
         except Exception as e_rem_outer:
             print(f"Outer error checking reminders: {e_rem_outer}")
+
+        try:
+            # Check calendar event reminders every 60 seconds
+            now_time = datetime.utcnow()
+            if last_checked_cal_reminders is None or (now_time - last_checked_cal_reminders).total_seconds() > 60:
+                last_checked_cal_reminders = now_time
+                try:
+                    check_calendar_event_reminders()
+                except Exception as ex_cal_rem:
+                    print(f"Error checking calendar event reminders: {ex_cal_rem}")
+        except Exception as e_cal_rem_outer:
+            print(f"Outer error checking calendar reminders: {e_cal_rem_outer}")
 
         try:
             one_minute_ago = datetime.utcnow() - timedelta(seconds=60)
