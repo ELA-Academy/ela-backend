@@ -120,6 +120,28 @@ def delete_board_custom_field(field_id):
     log_activity(actor, f"Deleted custom field: '{field.name}' from board '{board.name}'")
     return jsonify({"message": "Custom field deleted"}), 200
 
+@board_extensions_bp.route('/custom-fields/<int:field_id>', methods=['PUT'])
+@jwt_required()
+def update_board_custom_field(field_id):
+    actor, role = get_actor()
+    field = BoardCustomField.query.get_or_404(field_id)
+    board = Board.query.get_or_404(field.board_id)
+    if not ensure_board_access(board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    name = data.get('name')
+    config = data.get('config')
+
+    if name:
+        field.name = name.strip()
+    if config is not None:
+        field.config_json = json.dumps(config)
+
+    db.session.commit()
+    log_activity(actor, f"Updated custom field: '{field.name}' in board '{board.name}'")
+    return jsonify(field.to_dict()), 200
+
 @board_extensions_bp.route('/tasks/<int:task_id>/custom-fields', methods=['GET'])
 @jwt_required()
 def get_task_custom_field_values(task_id):
