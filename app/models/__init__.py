@@ -84,6 +84,7 @@ def init_db(app):
     with app.app_context():
         from app.models.super_admin_model import SuperAdmin
         from app.models.login_otp_model import LoginOTP
+        from app.models.used_token_model import UsedToken
         from app.models.department_model import Department
         from app.models.staff_model import Staff
         from app.models.lead_model import Lead, LeadStudent, LeadParent
