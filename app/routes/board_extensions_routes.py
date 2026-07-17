@@ -56,6 +56,10 @@ def get_workspace_custom_fields():
         
     fields = BoardCustomField.query.filter(BoardCustomField.board_id.in_(accessible_board_ids)).all()
     
+    include_all = request.args.get('all', 'false').lower() == 'true'
+    if include_all:
+        return jsonify([f.to_dict() for f in fields]), 200
+
     seen = set()
     unique_fields = []
     for f in fields:

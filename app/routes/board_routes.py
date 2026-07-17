@@ -965,6 +965,53 @@ def create_reply(update_id):
 
     return jsonify(reply.to_dict()), 201
 
+@board_bp.route('/replies/<int:reply_id>', methods=['PUT'])
+@jwt_required()
+def update_reply(reply_id):
+    actor, role = get_actor()
+    reply = TaskUpdateReply.query.get_or_404(reply_id)
+    if not ensure_board_access(reply.update.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    is_owner = False
+    if role == 'superadmin' and reply.sender_super_admin_id == actor.id:
+        is_owner = True
+    elif role == 'staff' and reply.sender_staff_id == actor.id:
+        is_owner = True
+
+    if role != 'superadmin' and not is_owner:
+        return jsonify({"error": "You can only edit your own replies"}), 403
+
+    data = request.get_json() or {}
+    content = data.get('content')
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    reply.content = content
+    db.session.commit()
+    return jsonify(reply.to_dict()), 200
+
+@board_bp.route('/replies/<int:reply_id>', methods=['DELETE'])
+@jwt_required()
+def delete_reply(reply_id):
+    actor, role = get_actor()
+    reply = TaskUpdateReply.query.get_or_404(reply_id)
+    if not ensure_board_access(reply.update.task.group.board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    is_owner = False
+    if role == 'superadmin' and reply.sender_super_admin_id == actor.id:
+        is_owner = True
+    elif role == 'staff' and reply.sender_staff_id == actor.id:
+        is_owner = True
+
+    if role != 'superadmin' and not is_owner:
+        return jsonify({"error": "You can only delete your own replies"}), 403
+
+    db.session.delete(reply)
+    db.session.commit()
+    return jsonify({"message": "Reply deleted"}), 200
+
 @board_bp.route('/updates/<int:update_id>', methods=['PUT'])
 @jwt_required()
 def update_task_update(update_id):

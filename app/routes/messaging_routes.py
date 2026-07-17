@@ -243,9 +243,9 @@ def serialize_conversation_summary(conversation, user, role, audit=False):
         'participant_names': title,
         'last_message': last_message.content if last_message else "No messages yet.",
         'last_message_time': (
-            last_message.created_at.isoformat() + 'Z'
+            last_message.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')
             if last_message
-            else conversation.created_at.isoformat() + 'Z'
+            else conversation.created_at.strftime('%Y-%m-%dT%H:%M:%SZ')
         ),
         'unread_count': unread_count,
         'conversation_type': conversation.conversation_type,
