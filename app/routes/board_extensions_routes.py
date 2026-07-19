@@ -135,16 +135,125 @@ def update_board_custom_field(field_id):
 
     data = request.get_json() or {}
     name = data.get('name')
+    field_type = data.get('type')
     config = data.get('config')
 
     if name:
         field.name = name.strip()
+    if field_type:
+        field.type = field_type
     if config is not None:
         field.config_json = json.dumps(config)
 
     db.session.commit()
-    log_activity(actor, f"Updated custom field: '{field.name}' in board '{board.name}'")
+    log_activity(actor, f"Updated custom field: '{field.name}' (type: {field.type}) in board '{board.name}'")
     return jsonify(field.to_dict()), 200
+
+@board_extensions_bp.route('/boards/<int:board_id>/import-tasks', methods=['POST'])
+@jwt_required()
+def import_board_tasks(board_id):
+    actor, role = get_actor()
+    board = Board.query.get_or_404(board_id)
+    if not ensure_board_access(board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    tasks_data = data.get('tasks', [])
+    new_custom_fields = data.get('new_custom_fields', [])
+    group_id = data.get('group_id')
+
+    if not tasks_data:
+        return jsonify({"error": "No tasks provided for import"}), 400
+
+    # Ensure group exists
+    target_group = None
+    if group_id:
+        target_group = BoardGroup.query.filter_by(id=group_id, board_id=board_id).first()
+    if not target_group:
+        target_group = BoardGroup.query.filter_by(board_id=board_id).order_by(BoardGroup.position.asc()).first()
+    if not target_group:
+        target_group = BoardGroup(board_id=board_id, name="Imported Tasks", color="#673de6", position=0)
+        db.session.add(target_group)
+        db.session.flush()
+
+    # Create any new custom fields specified
+    created_fields_map = {} # field_name -> field_id
+    for cf in new_custom_fields:
+        cf_name = cf.get('name', '').strip()
+        cf_type = cf.get('type', 'text')
+        cf_config = cf.get('config')
+        if cf_name:
+            existing = BoardCustomField.query.filter_by(board_id=board_id, name=cf_name).first()
+            if not existing:
+                new_field = BoardCustomField(
+                    board_id=board_id,
+                    name=cf_name,
+                    type=cf_type,
+                    config_json=json.dumps(cf_config) if cf_config else None
+                )
+                db.session.add(new_field)
+                db.session.flush()
+                created_fields_map[cf_name.lower()] = new_field.id
+            else:
+                created_fields_map[cf_name.lower()] = existing.id
+
+    # Create tasks
+    created_tasks = []
+    for idx, tdata in enumerate(tasks_data):
+        title = tdata.get('title') or tdata.get('Name') or f"Task {idx + 1}"
+        status = tdata.get('status') or "Not Started"
+        priority = tdata.get('priority') or "Normal"
+        notes = tdata.get('notes') or ""
+        due_date_str = tdata.get('due_date')
+
+        parsed_due_date = None
+        if due_date_str:
+            try:
+                parsed_due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00')).date()
+            except:
+                try:
+                    parsed_due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
+                except:
+                    pass
+
+        task = BoardTask(
+            group_id=target_group.id,
+            title=title,
+            status=status,
+            priority=priority,
+            notes=notes,
+            due_date=parsed_due_date,
+            position=idx
+        )
+        db.session.add(task)
+        db.session.flush()
+
+        # Handle custom field values for task
+        custom_vals = tdata.get('custom_fields', {})
+        for f_identifier, val in custom_vals.items():
+            field_id = None
+            if isinstance(f_identifier, int) or (isinstance(f_identifier, str) and f_identifier.isdigit()):
+                field_id = int(f_identifier)
+            else:
+                field_id = created_fields_map.get(str(f_identifier).lower())
+
+            if field_id and val is not None:
+                val_rec = TaskCustomFieldValue(
+                    task_id=task.id,
+                    field_id=field_id,
+                    value_json=json.dumps(val)
+                )
+                db.session.add(val_rec)
+
+        created_tasks.append(task.to_dict())
+
+    db.session.commit()
+    log_activity(actor, f"Imported {len(created_tasks)} task(s) into board '{board.name}'")
+    return jsonify({
+        "message": f"Successfully imported {len(created_tasks)} task(s)",
+        "tasks": created_tasks
+    }), 201
+
 
 @board_extensions_bp.route('/tasks/<int:task_id>/custom-fields', methods=['GET'])
 @jwt_required()
@@ -334,9 +443,9 @@ def submit_form_response(form_id):
                 file_attachments.append(answer)
         elif mapping in {'title', 'priority', 'status', 'notes'}:
             task_payload[mapping] = answer
-        elif mapping == 'due_date':
+        elif mapping in {'due_date', 'start_date'}:
             try:
-                task_payload['due_date'] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
+                task_payload[mapping] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
             except:
                 pass
         elif mapping and mapping.startswith('custom_field_'):
@@ -350,7 +459,8 @@ def submit_form_response(form_id):
         status=task_payload['status'],
         priority=task_payload['priority'],
         notes=task_payload['notes'],
-        due_date=task_payload.get('due_date')
+        due_date=task_payload.get('due_date'),
+        start_date=task_payload.get('start_date')
     )
     db.session.add(task)
     db.session.flush()
@@ -466,9 +576,9 @@ def submit_public_form_response(form_id):
                 file_attachments.append(answer)
         elif mapping in {'title', 'priority', 'status', 'notes'}:
             task_payload[mapping] = answer
-        elif mapping == 'due_date':
+        elif mapping in {'due_date', 'start_date'}:
             try:
-                task_payload['due_date'] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
+                task_payload[mapping] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
             except:
                 pass
         elif mapping and mapping.startswith('custom_field_'):
@@ -481,7 +591,8 @@ def submit_public_form_response(form_id):
         status=task_payload['status'],
         priority=task_payload['priority'],
         notes=task_payload['notes'],
-        due_date=task_payload.get('due_date')
+        due_date=task_payload.get('due_date'),
+        start_date=task_payload.get('start_date')
     )
     db.session.add(task)
     db.session.flush()
