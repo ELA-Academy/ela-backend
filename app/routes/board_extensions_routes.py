@@ -399,156 +399,193 @@ def delete_board_form(form_id):
 @board_extensions_bp.route('/forms/submit/<int:form_id>', methods=['POST'])
 @jwt_required()
 def submit_form_response(form_id):
-    actor, role = get_actor()
-    form = BoardFormConfig.query.get_or_404(form_id)
-    board = Board.query.get_or_404(form.board_id)
+    try:
+        actor, role = get_actor()
+        form = BoardFormConfig.query.get_or_404(form_id)
+        board = Board.query.get_or_404(form.board_id)
 
-    data = request.get_json() or {}
-    response_data = data.get('response') # dictionary of {question_id: answer}
-    if not response_data:
-        return jsonify({"error": "Response data is required"}), 400
+        data = request.get_json() or {}
+        response_data = data.get('response') # dictionary of {question_id: answer}
+        if not response_data:
+            return jsonify({"error": "Response data is required"}), 400
 
-    # Auto Create Task logic
-    # Find or create a default group in the board
-    group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
-    if not group:
-        group = BoardGroup(board_id=board.id, name="Form Submissions", color="#fdab3d", position=0)
-        db.session.add(group)
+        # Auto Create Task logic
+        # Find or create a default group in the board
+        group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
+        if not group:
+            group = BoardGroup(board_id=board.id, name="Form Submissions", color="#fdab3d", position=0)
+            db.session.add(group)
+            db.session.flush()
+
+        # Parse form structure to map answers to task properties or custom fields
+        try:
+            form_struct = json.loads(form.form_structure_json) if form.form_structure_json else []
+        except Exception:
+            form_struct = []
+        
+        task_payload = {
+            'title': f"Form Submission - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+            'status': 'Not Started',
+            'priority': 'Normal',
+            'notes': 'Form submission auto-generated task'
+        }
+
+        custom_field_answers = {}
+        file_attachments = []
+
+        # Smart Title & End Date extraction logic
+        extracted_title = None
+        extracted_due_date = None
+
+        for question in form_struct:
+            qid = str(question.get('id'))
+            label = (question.get('label') or '').strip().lower()
+            mapping = question.get('mapping')
+            answer = response_data.get(qid)
+            qtype = question.get('type')
+
+            if answer is None or str(answer).strip() == '':
+                continue
+
+            if qtype == 'file' or mapping == 'file':
+                if isinstance(answer, dict) and 'file_url' in answer:
+                    file_attachments.append(answer)
+
+            # 1. Smart Title detection: explicit mapping 'title' or label matching name/title
+            if not extracted_title:
+                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject')):
+                    if isinstance(answer, str) and answer.strip():
+                        extracted_title = answer.strip()
+
+            # 2. Smart End Date / Due Date detection
+            if not extracted_due_date:
+                if mapping in {'due_date', 'end_date', 'start_date'} or any(k in label for k in ('end date', 'due date', 'deadline')):
+                    try:
+                        extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                    except Exception:
+                        pass
+
+            if mapping and mapping.startswith('custom_field_'):
+                try:
+                    field_id = int(mapping.split('_')[-1])
+                    custom_field_answers[field_id] = answer
+                except Exception:
+                    pass
+
+        if extracted_title:
+            task_payload['title'] = extracted_title
+        elif form.name:
+            task_payload['title'] = f"{form.name} Submission - {datetime.utcnow().strftime('%b %d, %H:%M')}"
+
+        if extracted_due_date:
+            task_payload['due_date'] = extracted_due_date
+
+        # Helper to format response answer values nicely as text/links
+        def format_ans_html(ans, label="", qtype=""):
+            if ans is None or ans == "":
+                return "<em>(No response)</em>"
+            
+            if isinstance(ans, dict) and ('file_url' in ans or 'filename' in ans):
+                url = ans.get('file_url', '')
+                filename = ans.get('filename') or 'View File'
+                if url:
+                    is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+                    link_html = f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{filename} 🔗</a>'
+                    if is_img:
+                        link_html += f'<br/><a href="{url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{url}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
+                    return link_html
+                return filename
+
+            if isinstance(ans, list):
+                return ", ".join(map(str, ans))
+
+            s_ans = str(ans).strip()
+            if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
+                fname = s_ans.split('/')[-1]
+                is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+                link_html = f'<a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{fname} 🔗</a>'
+                if is_img:
+                    link_html += f'<br/><a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{s_ans}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
+                return link_html
+
+            return s_ans
+
+        # Format submission answers into task description
+        submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
+        for question in form_struct:
+            qtype = question.get('type', '')
+            if qtype in ('welcome', 'thankyou'):
+                continue
+            qid = str(question.get('id'))
+            label = question.get('label') or f"Field {qid}"
+            ans = response_data.get(qid)
+            ans_str = format_ans_html(ans, label=label, qtype=qtype)
+            submission_notes.append(f"<li><strong>{label}:</strong> {ans_str}</li>")
+        submission_notes.append("</ul>")
+        formatted_details = "\n".join(submission_notes)
+
+        final_notes = task_payload.get('notes', '')
+        if final_notes and final_notes != 'Form submission auto-generated task':
+            task_payload['notes'] = f"{final_notes}\n<hr/>\n{formatted_details}"
+        else:
+            task_payload['notes'] = formatted_details
+
+        # Create the task
+        task = BoardTask(
+            group_id=group.id,
+            title=task_payload['title'],
+            status=task_payload['status'],
+            priority=task_payload['priority'],
+            notes=task_payload['notes'],
+            due_date=task_payload.get('due_date'),
+            start_date=task_payload.get('start_date')
+        )
+        db.session.add(task)
         db.session.flush()
 
-    # Parse form structure to map answers to task properties or custom fields
-    form_struct = json.loads(form.form_structure_json)
-    
-    task_payload = {
-        'title': f"Form Submission - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-        'status': 'Not Started',
-        'priority': 'Normal',
-        'notes': 'Form submission auto-generated task'
-    }
+        # Save Custom Field Answers
+        for fid, val in custom_field_answers.items():
+            field_exists = BoardCustomField.query.filter_by(id=fid, board_id=board.id).first()
+            if not field_exists:
+                continue
+            field_val = TaskCustomFieldValue(
+                task_id=task.id,
+                field_id=fid,
+                value_json=json.dumps(val)
+            )
+            db.session.add(field_val)
 
-    custom_field_answers = {}
-    file_attachments = []
+        # Save File Attachments
+        for att in file_attachments:
+            if isinstance(att, dict) and 'file_url' in att:
+                attachment = BoardTaskAttachment(
+                    task_id=task.id,
+                    filename=att.get('filename', 'Form File'),
+                    file_path=att['file_url'],
+                    uploaded_by_name='Form Submitter'
+                )
+                db.session.add(attachment)
 
-    for question in form_struct:
-        qid = question.get('id')
-        mapping = question.get('mapping') # e.g. 'title', 'priority', 'due_date', 'notes', or 'custom_field_X'
-        answer = response_data.get(str(qid))
-        qtype = question.get('type')
-
-        if answer is None:
-            continue
-
-        if qtype == 'file' or mapping == 'file':
-            if isinstance(answer, dict) and 'file_url' in answer:
-                file_attachments.append(answer)
-        elif mapping in {'title', 'priority', 'status', 'notes'}:
-            task_payload[mapping] = answer
-        elif mapping in {'due_date', 'start_date'}:
-            try:
-                task_payload[mapping] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
-            except:
-                pass
-        elif mapping and mapping.startswith('custom_field_'):
-            field_id = int(mapping.split('_')[-1])
-            custom_field_answers[field_id] = answer
-
-    # Helper to format response answer values nicely as text/links
-    def format_ans_html(ans, label="", qtype=""):
-        if ans is None or ans == "":
-            return "<em>(No response)</em>"
-        
-        if isinstance(ans, dict) and ('file_url' in ans or 'filename' in ans):
-            url = ans.get('file_url', '')
-            filename = ans.get('filename') or 'View File'
-            if url:
-                is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
-                link_html = f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{filename} 🔗</a>'
-                if is_img:
-                    link_html += f'<br/><a href="{url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{url}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
-                return link_html
-            return filename
-
-        if isinstance(ans, list):
-            return ", ".join(map(str, ans))
-
-        s_ans = str(ans).strip()
-        if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
-            fname = s_ans.split('/')[-1]
-            is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
-            link_html = f'<a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{fname} 🔗</a>'
-            if is_img:
-                link_html += f'<br/><a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{s_ans}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
-            return link_html
-
-        return s_ans
-
-    # Format submission answers into task description
-    submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
-    for question in form_struct:
-        qtype = question.get('type', '')
-        if qtype in ('welcome', 'thankyou'):
-            continue
-        qid = str(question.get('id'))
-        label = question.get('label') or f"Field {qid}"
-        ans = response_data.get(qid)
-        ans_str = format_ans_html(ans, label=label, qtype=qtype)
-        submission_notes.append(f"<li><strong>{label}:</strong> {ans_str}</li>")
-    submission_notes.append("</ul>")
-    formatted_details = "\n".join(submission_notes)
-
-    final_notes = task_payload.get('notes', '')
-    if final_notes and final_notes != 'Form submission auto-generated task':
-        task_payload['notes'] = f"{final_notes}\n<hr/>\n{formatted_details}"
-    else:
-        task_payload['notes'] = formatted_details
-
-    # Create the task
-    task = BoardTask(
-        group_id=group.id,
-        title=task_payload['title'],
-        status=task_payload['status'],
-        priority=task_payload['priority'],
-        notes=task_payload['notes'],
-        due_date=task_payload.get('due_date'),
-        start_date=task_payload.get('start_date')
-    )
-    db.session.add(task)
-    db.session.flush()
-
-    # Save Custom Field Answers
-    for fid, val in custom_field_answers.items():
-        field_val = TaskCustomFieldValue(
-            task_id=task.id,
-            field_id=fid,
-            value_json=json.dumps(val)
+        # Save Form Response
+        response_record = BoardFormResponse(
+            form_id=form_id,
+            response_json=json.dumps(response_data),
+            created_task_id=task.id
         )
-        db.session.add(field_val)
+        db.session.add(response_record)
+        db.session.commit()
 
-    # Save File Attachments
-    for att in file_attachments:
-        attachment = BoardTaskAttachment(
-            task_id=task.id,
-            filename=att.get('filename', 'Form File'),
-            file_path=att['file_url'],
-            uploaded_by_name='Form Submitter'
-        )
-        db.session.add(attachment)
-
-    # Save Form Response
-    response_record = BoardFormResponse(
-        form_id=form_id,
-        response_json=json.dumps(response_data),
-        created_task_id=task.id
-    )
-    db.session.add(response_record)
-    db.session.commit()
-
-    log_activity(actor, f"Submitted form response to '{form.name}' resulting in Task '{task.title}'")
-    return jsonify({
-        "message": "Form submitted successfully",
-        "task": task.to_dict(),
-        "response": response_record.to_dict()
-    }), 201
+        log_activity(actor, f"Submitted form response to '{form.name}' resulting in Task '{task.title}'")
+        return jsonify({
+            "message": "Form submitted successfully",
+            "task": task.to_dict(),
+            "response": response_record.to_dict()
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to process form submission: {str(e)}"}), 500
 
 @board_extensions_bp.route('/public/forms/upload', methods=['POST'])
 def upload_public_form_file():
@@ -586,146 +623,186 @@ def get_public_form_details(form_id):
 
 @board_extensions_bp.route('/public/forms/submit/<int:form_id>', methods=['POST'])
 def submit_public_form_response(form_id):
-    form = BoardFormConfig.query.get_or_404(form_id)
-    board = Board.query.get_or_404(form.board_id)
+    try:
+        form = BoardFormConfig.query.get_or_404(form_id)
+        board = Board.query.get_or_404(form.board_id)
 
-    data = request.get_json() or {}
-    response_data = data.get('response')
-    if not response_data:
-        return jsonify({"error": "Response data is required"}), 400
+        data = request.get_json() or {}
+        response_data = data.get('response')
+        if not response_data:
+            return jsonify({"error": "Response data is required"}), 400
 
-    group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
-    if not group:
-        group = BoardGroup(board_id=board.id, name="Form Submissions", color="#fdab3d", position=0)
-        db.session.add(group)
+        group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
+        if not group:
+            group = BoardGroup(board_id=board.id, name="Form Submissions", color="#fdab3d", position=0)
+            db.session.add(group)
+            db.session.flush()
+
+        try:
+            form_struct = json.loads(form.form_structure_json) if form.form_structure_json else []
+        except Exception:
+            form_struct = []
+        
+        task_payload = {
+            'title': f"Public Form Submission - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+            'status': 'Not Started',
+            'priority': 'Normal',
+            'notes': 'Form submission auto-generated task'
+        }
+
+        custom_field_answers = {}
+        file_attachments = []
+
+        # Smart Title & End Date extraction logic
+        extracted_title = None
+        extracted_due_date = None
+
+        for question in form_struct:
+            qid = str(question.get('id'))
+            label = (question.get('label') or '').strip().lower()
+            mapping = question.get('mapping')
+            answer = response_data.get(qid)
+            qtype = question.get('type')
+
+            if answer is None or str(answer).strip() == '':
+                continue
+
+            if qtype == 'file' or mapping == 'file':
+                if isinstance(answer, dict) and 'file_url' in answer:
+                    file_attachments.append(answer)
+
+            # 1. Smart Title detection: explicit mapping 'title' or label matching name/title
+            if not extracted_title:
+                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject')):
+                    if isinstance(answer, str) and answer.strip():
+                        extracted_title = answer.strip()
+
+            # 2. Smart End Date / Due Date detection
+            if not extracted_due_date:
+                if mapping in {'due_date', 'end_date', 'start_date'} or any(k in label for k in ('end date', 'due date', 'deadline')):
+                    try:
+                        extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                    except Exception:
+                        pass
+
+            if mapping and mapping.startswith('custom_field_'):
+                try:
+                    field_id = int(mapping.split('_')[-1])
+                    custom_field_answers[field_id] = answer
+                except Exception:
+                    pass
+
+        if extracted_title:
+            task_payload['title'] = extracted_title
+        elif form.name:
+            task_payload['title'] = f"{form.name} Submission - {datetime.utcnow().strftime('%b %d, %H:%M')}"
+
+        if extracted_due_date:
+            task_payload['due_date'] = extracted_due_date
+
+        # Format submission answers into task description
+        submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
+        for question in form_struct:
+            qtype = question.get('type', '')
+            if qtype in ('welcome', 'thankyou'):
+                continue
+            qid = str(question.get('id'))
+            label = question.get('label') or f"Field {qid}"
+            ans = response_data.get(qid)
+            ans_str = format_ans_html(ans, label=label, qtype=qtype)
+            submission_notes.append(f"<li><strong>{label}:</strong> {ans_str}</li>")
+        submission_notes.append("</ul>")
+        formatted_details = "\n".join(submission_notes)
+
+        final_notes = task_payload.get('notes', '')
+        if final_notes and final_notes != 'Form submission auto-generated task':
+            task_payload['notes'] = f"{final_notes}\n<hr/>\n{formatted_details}"
+        else:
+            task_payload['notes'] = formatted_details
+
+        task = BoardTask(
+            group_id=group.id,
+            title=task_payload['title'],
+            status=task_payload['status'],
+            priority=task_payload['priority'],
+            notes=task_payload['notes'],
+            due_date=task_payload.get('due_date'),
+            start_date=task_payload.get('start_date')
+        )
+        db.session.add(task)
         db.session.flush()
 
-    form_struct = json.loads(form.form_structure_json)
-    
-    task_payload = {
-        'title': f"Public Form Submission - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-        'status': 'Not Started',
-        'priority': 'Normal',
-        'notes': 'Form submission auto-generated task'
-    }
-
-    custom_field_answers = {}
-    file_attachments = []
-
-    for question in form_struct:
-        qid = question.get('id')
-        mapping = question.get('mapping')
-        answer = response_data.get(str(qid))
-        qtype = question.get('type')
-
-        if answer is None:
-            continue
-
-        if qtype == 'file' or mapping == 'file':
-            if isinstance(answer, dict) and 'file_url' in answer:
-                file_attachments.append(answer)
-        elif mapping in {'title', 'priority', 'status', 'notes'}:
-            task_payload[mapping] = answer
-        elif mapping in {'due_date', 'start_date'}:
-            try:
-                task_payload[mapping] = datetime.fromisoformat(answer.replace('Z', '+00:00')).date()
-            except:
-                pass
-        elif mapping and mapping.startswith('custom_field_'):
-            field_id = int(mapping.split('_')[-1])
-            custom_field_answers[field_id] = answer
-
-    # Format submission answers into task description
-    submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
-    for question in form_struct:
-        qtype = question.get('type', '')
-        if qtype in ('welcome', 'thankyou'):
-            continue
-        qid = str(question.get('id'))
-        label = question.get('label') or f"Field {qid}"
-        ans = response_data.get(qid)
-        ans_str = format_ans_html(ans, label=label, qtype=qtype)
-        submission_notes.append(f"<li><strong>{label}:</strong> {ans_str}</li>")
-    submission_notes.append("</ul>")
-    formatted_details = "\n".join(submission_notes)
-
-    final_notes = task_payload.get('notes', '')
-    if final_notes and final_notes != 'Form submission auto-generated task':
-        task_payload['notes'] = f"{final_notes}\n<hr/>\n{formatted_details}"
-    else:
-        task_payload['notes'] = formatted_details
-
-    task = BoardTask(
-        group_id=group.id,
-        title=task_payload['title'],
-        status=task_payload['status'],
-        priority=task_payload['priority'],
-        notes=task_payload['notes'],
-        due_date=task_payload.get('due_date'),
-        start_date=task_payload.get('start_date')
-    )
-    db.session.add(task)
-    db.session.flush()
-
-    for fid, val in custom_field_answers.items():
-        field_val = TaskCustomFieldValue(
-            task_id=task.id,
-            field_id=fid,
-            value_json=json.dumps(val)
-        )
-        db.session.add(field_val)
-
-    # Save File Attachments
-    for att in file_attachments:
-        attachment = BoardTaskAttachment(
-            task_id=task.id,
-            filename=att.get('filename', 'Form File'),
-            file_path=att['file_url'],
-            uploaded_by_name='Form Submitter'
-        )
-        db.session.add(attachment)
-
-    # Auto Assign Task to Form Creator
-    if form.creator_staff_id or form.creator_super_admin_id:
-        assignee = BoardTaskAssignee(
-            task_id=task.id,
-            staff_id=form.creator_staff_id,
-            super_admin_id=form.creator_super_admin_id
-        )
-        db.session.add(assignee)
-
-    response_record = BoardFormResponse(
-        form_id=form_id,
-        response_json=json.dumps(response_data),
-        created_task_id=task.id
-    )
-    db.session.add(response_record)
-    db.session.commit()
-
-    # Trigger live notification to creator
-    if form.creator_staff_id or form.creator_super_admin_id:
-        try:
-            from app.utils.notifications import enqueue_user_notification
-            recipient_id = form.creator_staff_id if form.creator_staff_id else form.creator_super_admin_id
-            recipient_role = 'staff' if form.creator_staff_id else 'superadmin'
-            enqueue_user_notification(
-                user_id=recipient_id,
-                user_role=recipient_role,
-                message=f"New submission received for form '{form.name}' & assigned to you: '{task.title}'",
-                category='assignment',
-                target_type='Board',
-                target_id=board.id,
-                target_link=f"/admin/boards/{board.id}?task={task.id}"
+        for fid, val in custom_field_answers.items():
+            field_exists = BoardCustomField.query.filter_by(id=fid, board_id=board.id).first()
+            if not field_exists:
+                continue
+            field_val = TaskCustomFieldValue(
+                task_id=task.id,
+                field_id=fid,
+                value_json=json.dumps(val)
             )
-        except Exception as notif_err:
-            print(f"Failed to queue assignment notification: {notif_err}")
+            db.session.add(field_val)
 
-    log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
-    return jsonify({
-        "message": "Form submitted successfully",
-        "task": task.to_dict(),
-        "response": response_record.to_dict()
-    }), 201
+        # Save File Attachments
+        for att in file_attachments:
+            if isinstance(att, dict) and 'file_url' in att:
+                attachment = BoardTaskAttachment(
+                    task_id=task.id,
+                    filename=att.get('filename', 'Form File'),
+                    file_path=att['file_url'],
+                    uploaded_by_name='Form Submitter'
+                )
+                db.session.add(attachment)
+
+        # Auto Assign Task to Form Creator
+        if form.creator_staff_id or form.creator_super_admin_id:
+            creator_staff = Staff.query.get(form.creator_staff_id) if form.creator_staff_id else None
+            creator_admin = SuperAdmin.query.get(form.creator_super_admin_id) if form.creator_super_admin_id else None
+            if creator_staff or creator_admin:
+                assignee = BoardTaskAssignee(
+                    task_id=task.id,
+                    staff_id=creator_staff.id if creator_staff else None,
+                    super_admin_id=creator_admin.id if creator_admin else None
+                )
+                db.session.add(assignee)
+
+        response_record = BoardFormResponse(
+            form_id=form_id,
+            response_json=json.dumps(response_data),
+            created_task_id=task.id
+        )
+        db.session.add(response_record)
+        db.session.commit()
+
+        # Trigger live notification to creator
+        if form.creator_staff_id or form.creator_super_admin_id:
+            try:
+                from app.utils.notifications import enqueue_user_notification
+                recipient_id = form.creator_staff_id if form.creator_staff_id else form.creator_super_admin_id
+                recipient_role = 'staff' if form.creator_staff_id else 'superadmin'
+                enqueue_user_notification(
+                    user_id=recipient_id,
+                    user_role=recipient_role,
+                    message=f"New submission received for form '{form.name}' & assigned to you: '{task.title}'",
+                    category='assignment',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
+                )
+            except Exception as notif_err:
+                print(f"Failed to queue assignment notification: {notif_err}")
+
+        log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
+        return jsonify({
+            "message": "Form submitted successfully",
+            "task": task.to_dict(),
+            "response": response_record.to_dict()
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to process form submission: {str(e)}"}), 500
 
 @board_extensions_bp.route('/forms/<int:form_id>/responses', methods=['GET'])
 @jwt_required()
