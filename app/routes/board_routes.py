@@ -46,6 +46,76 @@ def board_is_accessible(board, actor, role):
     return any(member.staff_id == actor.id for member in board.access_members)
 
 
+def merge_task_into_target_board(task, target_group_id):
+    from app.models.board_model import BoardGroup
+    from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+
+    target_group = BoardGroup.query.get(target_group_id)
+    if not target_group:
+        return
+
+    old_group = task.group
+    old_board_id = old_group.board_id if old_group else None
+    new_board_id = target_group.board_id
+
+    # Update group ID
+    task.group_id = target_group.id
+
+    # Merge custom fields if moving across boards/spaces
+    if old_board_id and old_board_id != new_board_id:
+        existing_values = TaskCustomFieldValue.query.filter_by(task_id=task.id).all()
+        if not existing_values:
+            return
+
+        target_fields = BoardCustomField.query.filter_by(board_id=new_board_id).all()
+        target_field_map = {f.name.strip().lower(): f for f in target_fields}
+
+        for val in existing_values:
+            src_field = BoardCustomField.query.get(val.field_id)
+            if not src_field:
+                continue
+
+            field_name_key = src_field.name.strip().lower()
+            if field_name_key in target_field_map:
+                target_field = target_field_map[field_name_key]
+                val.field_id = target_field.id
+
+                # Merge dropdown options if applicable
+                if src_field.type in ('dropdown', 'multi_select') and src_field.config_json:
+                    try:
+                        src_cfg = json.loads(src_field.config_json) if isinstance(src_field.config_json, str) else (src_field.config_json or {})
+                        tgt_cfg = json.loads(target_field.config_json) if isinstance(target_field.config_json, str) else (target_field.config_json or {})
+
+                        src_opts = src_cfg.get('options', []) if isinstance(src_cfg, dict) else []
+                        tgt_opts = tgt_cfg.get('options', []) if isinstance(tgt_cfg, dict) else []
+
+                        opt_names = {o.get('label', o.get('name', str(o))).strip().lower() if isinstance(o, dict) else str(o).strip().lower() for o in tgt_opts}
+                        added = False
+                        for opt in src_opts:
+                            opt_label = opt.get('label', opt.get('name', str(opt))).strip().lower() if isinstance(opt, dict) else str(opt).strip().lower()
+                            if opt_label not in opt_names:
+                                tgt_opts.append(opt)
+                                opt_names.add(opt_label)
+                                added = True
+                        if added and isinstance(tgt_cfg, dict):
+                            tgt_cfg['options'] = tgt_opts
+                            target_field.config_json = json.dumps(tgt_cfg)
+                    except Exception as e:
+                        print("Error merging custom field config options:", e)
+            else:
+                new_field = BoardCustomField(
+                    board_id=new_board_id,
+                    name=src_field.name,
+                    type=src_field.type,
+                    config_json=src_field.config_json
+                )
+                db.session.add(new_field)
+                db.session.flush()
+
+                target_field_map[field_name_key] = new_field
+                val.field_id = new_field.id
+
+
 def doc_is_accessible(doc, actor, role):
     if not doc or not actor:
         return False
@@ -637,6 +707,10 @@ def update_task(task_id):
         if next_keys != old_assignee_keys:
             changes.append("Changed assignees")
         sync_task_assignees(task, next_assignees)
+
+    if 'group_id' in data and data['group_id'] != task.group_id:
+        merge_task_into_target_board(task, data['group_id'])
+        changes.append("Moved task to new group/board")
 
     # Save changes in history
     for change in changes:
@@ -2165,8 +2239,8 @@ def bulk_move_tasks():
         change = f"Moved task to group '{current_group_name}' on board '{target_group.board.name}'"
         db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=change))
         
-        # Update group
-        task.group_id = resolved_group_id
+        # Update group and merge fields across boards
+        merge_task_into_target_board(task, resolved_group_id)
 
     db.session.commit()
     return jsonify({"message": f"Successfully moved {len(tasks)} task(s)"}), 200
