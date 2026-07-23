@@ -367,11 +367,14 @@ def start_conversation():
     return jsonify({'message': 'Conversation created', 'conversation_id': new_conversation.id}), 201
 
 
-@messaging_bp.route('/channels', methods=['POST'])
-@jwt_required()
+@messaging_bp.route('/channels', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def create_channel():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
     user, role = get_current_user()
-    if role not in {'superadmin', 'staff'}:
+    if not user or role not in {'superadmin', 'staff'}:
         return jsonify({"error": "Only staff and super admins can create channels."}), 403
 
     data = request.get_json() or {}
@@ -423,6 +426,45 @@ def create_channel():
         "department_name": department.name if department else None,
         "is_restricted": channel.conversation_type == 'department'
     }), 201
+
+
+@messaging_bp.route('/channels/<int:channel_id>', methods=['PUT', 'PATCH', 'OPTIONS'])
+@jwt_required(optional=True)
+def rename_channel(channel_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    conversation = Conversation.query.get_or_404(channel_id)
+    if conversation.conversation_type not in ('channel', 'department'):
+        return jsonify({"error": "Can only rename channels or department threads"}), 400
+
+    data = request.get_json() or {}
+    new_name = (data.get('name') or data.get('title') or '').strip()
+    if not new_name:
+        return jsonify({"error": "Channel name cannot be empty"}), 400
+
+    conversation.name = new_name
+    conversation.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    try:
+        from app import socketio
+        socketio.emit('conversation_updated', {
+            'conversation_id': conversation.id,
+            'name': new_name
+        })
+    except Exception as e:
+        print("Socket emit failed on rename_channel:", e)
+
+    return jsonify({
+        "id": conversation.id,
+        "title": conversation.name,
+        "message": "Channel renamed successfully"
+    }), 200
 
 
 @messaging_bp.route('/conversations/<int:conversation_id>/unfollow', methods=['POST'])
