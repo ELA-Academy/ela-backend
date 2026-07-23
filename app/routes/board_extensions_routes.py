@@ -40,6 +40,35 @@ def ensure_board_access(board, actor, role):
         return True
     return any(member.staff_id == actor.id for member in board.access_members)
 
+def format_ans_html(ans, label="", qtype=""):
+    if ans is None or ans == "":
+        return "<em>(No response)</em>"
+    
+    if isinstance(ans, dict) and ('file_url' in ans or 'filename' in ans):
+        url = ans.get('file_url', '')
+        filename = ans.get('filename') or 'View File'
+        if url:
+            is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+            link_html = f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{filename} 🔗</a>'
+            if is_img:
+                link_html += f'<br/><a href="{url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{url}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
+            return link_html
+        return filename
+
+    if isinstance(ans, list):
+        return ", ".join(map(str, ans))
+
+    s_ans = str(ans).strip()
+    if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
+        fname = s_ans.split('/')[-1]
+        is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+        link_html = f'<a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{fname} 🔗</a>'
+        if is_img:
+            link_html += f'<br/><a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{s_ans}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
+        return link_html
+
+    return s_ans
+
 # ==========================================
 # 1. Custom Fields APIs
 # ==========================================
@@ -479,36 +508,6 @@ def submit_form_response(form_id):
 
         if extracted_due_date:
             task_payload['due_date'] = extracted_due_date
-
-        # Helper to format response answer values nicely as text/links
-        def format_ans_html(ans, label="", qtype=""):
-            if ans is None or ans == "":
-                return "<em>(No response)</em>"
-            
-            if isinstance(ans, dict) and ('file_url' in ans or 'filename' in ans):
-                url = ans.get('file_url', '')
-                filename = ans.get('filename') or 'View File'
-                if url:
-                    is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
-                    link_html = f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{filename} 🔗</a>'
-                    if is_img:
-                        link_html += f'<br/><a href="{url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{url}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
-                    return link_html
-                return filename
-
-            if isinstance(ans, list):
-                return ", ".join(map(str, ans))
-
-            s_ans = str(ans).strip()
-            if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
-                fname = s_ans.split('/')[-1]
-                is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
-                link_html = f'<a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{fname} 🔗</a>'
-                if is_img:
-                    link_html += f'<br/><a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{s_ans}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
-                return link_html
-
-            return s_ans
 
         # Format submission answers into task description
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
