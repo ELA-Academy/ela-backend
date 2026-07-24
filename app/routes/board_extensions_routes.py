@@ -224,6 +224,9 @@ def import_board_tasks(board_id):
                 db.session.flush()
                 created_fields_map[cf_name.lower()] = new_field.id
             else:
+                existing.type = cf_type
+                if cf_config:
+                    existing.config_json = json.dumps(cf_config)
                 created_fields_map[cf_name.lower()] = existing.id
 
     # Create tasks
