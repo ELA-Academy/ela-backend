@@ -604,18 +604,38 @@ def send_message(conversation_id):
     import hashlib
 
     for mention in mentions:
-        m_id = mention.get('id')
-        m_role = mention.get('role')
-        if m_id and m_role:
-            key = f"{m_role}_{m_id}"
+        m_id_raw = mention.get('id')
+        m_role_raw = str(mention.get('role') or '').lower().replace(' ', '')
+        m_id = None
+
+        if m_id_raw is not None:
+            if isinstance(m_id_raw, str):
+                if '_' in m_id_raw:
+                    parts = m_id_raw.split('_', 1)
+                    if not m_role_raw or m_role_raw not in ('staff', 'superadmin'):
+                        m_role_raw = parts[0].lower()
+                    try:
+                        m_id = int(parts[1])
+                    except ValueError:
+                        m_id = None
+                else:
+                    try:
+                        m_id = int(m_id_raw)
+                    except ValueError:
+                        m_id = None
+            elif isinstance(m_id_raw, int):
+                m_id = m_id_raw
+
+        if m_role_raw in ('staff', 'superadmin') and m_id is not None:
+            key = f"{m_role_raw}_{m_id}"
             if key not in notified_mentions:
                 notified_mentions.add(key)
                 # 15s window to deduplicate consecutive mentions
-                raw_key = f"mention:{conversation.id}:{m_role}:{m_id}:{int(time.time() / 15)}"
+                raw_key = f"mention:{conversation.id}:{m_role_raw}:{m_id}:{int(time.time() / 15)}"
                 idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
                 enqueue_user_notification(
                     user_id=m_id,
-                    user_role=m_role,
+                    user_role=m_role_raw,
                     message=f"{user.name} @mentioned you in conversation '{conversation.name or 'a conversation'}'.",
                     category='mention',
                     target_type="Conversation",
