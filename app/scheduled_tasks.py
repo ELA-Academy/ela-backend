@@ -266,8 +266,10 @@ def process_notifications_command():
                 try:
                     check_due_date_reminders()
                 except Exception as ex_rem:
+                    db.session.rollback()
                     print(f"Error checking due date reminders: {ex_rem}")
         except Exception as e_rem_outer:
+            db.session.rollback()
             print(f"Outer error checking reminders: {e_rem_outer}")
 
         try:
@@ -278,8 +280,10 @@ def process_notifications_command():
                 try:
                     check_calendar_event_reminders()
                 except Exception as ex_cal_rem:
+                    db.session.rollback()
                     print(f"Error checking calendar event reminders: {ex_cal_rem}")
         except Exception as e_cal_rem_outer:
+            db.session.rollback()
             print(f"Outer error checking calendar reminders: {e_cal_rem_outer}")
 
         try:
@@ -404,6 +408,7 @@ def process_notifications_command():
             time.sleep(3)
             
         except Exception as err:
+            db.session.rollback()
             print(f"Queue Worker Loop Exception: {err}")
             time.sleep(3)
 
