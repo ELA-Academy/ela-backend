@@ -14,6 +14,8 @@ def register_blueprints(app):
     app.register_blueprint(board_bp, url_prefix="/api/boards")
     from .board_extensions_routes import board_extensions_bp
     app.register_blueprint(board_extensions_bp, url_prefix="/api/board-extensions")
+    from .overview_routes import overview_bp
+    app.register_blueprint(overview_bp, url_prefix="/api")
 
     # Core Admin blueprints
     from .dashboard_routes import dashboard_bp
