@@ -115,6 +115,7 @@ def init_db(app):
             WorkspaceDocumentFolder, WorkspaceDocumentFile, WorkspaceDocumentFileVersion
         )
         from app.models.notification_request_model import NotificationRequest, UserNotificationPreference
+        from app.models.overview_card_model import OverviewCard, SpaceBookmark
         
         db.create_all()
         ensure_runtime_schema_updates()

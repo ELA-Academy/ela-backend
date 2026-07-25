@@ -49,9 +49,18 @@ def create_app():
     jwt = JWTManager(app)
     mail.init_app(app)
     
-    # For single-node hosting, we don't need a Redis message queue for Socket.IO event propagation
-    # (Socket.IO broadcasts directly to all connected users on this node). We keep Redis active for fast preference caching.
-    socketio.init_app(app, cors_allowed_origins=origins)
+    # Enable Redis as Socket.IO message queue for cross-process notification delivery.
+    # The process-notifications worker runs as a separate daemon; without a message queue,
+    # socketio.emit() from the worker never reaches connected browser clients.
+    redis_mq = os.getenv('REDIS_URL')
+    if redis_mq:
+        try:
+            socketio.init_app(app, cors_allowed_origins=origins, message_queue=redis_mq)
+        except Exception as e:
+            app.logger.warning(f"SocketIO message_queue init warning: {e}")
+            socketio.init_app(app, cors_allowed_origins=origins)
+    else:
+        socketio.init_app(app, cors_allowed_origins=origins)
         
     init_db(app)
     Migrate(app, db)
