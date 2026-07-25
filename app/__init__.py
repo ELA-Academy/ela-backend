@@ -54,7 +54,11 @@ def create_app():
     # socketio.emit() from the worker never reaches connected browser clients.
     redis_mq = os.getenv('REDIS_URL')
     if redis_mq:
-        socketio.init_app(app, cors_allowed_origins=origins, message_queue=redis_mq, async_mode='threading')
+        try:
+            socketio.init_app(app, cors_allowed_origins=origins, message_queue=redis_mq)
+        except Exception as e:
+            app.logger.warning(f"SocketIO message_queue init warning: {e}")
+            socketio.init_app(app, cors_allowed_origins=origins)
     else:
         socketio.init_app(app, cors_allowed_origins=origins)
         
