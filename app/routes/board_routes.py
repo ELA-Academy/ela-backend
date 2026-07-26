@@ -1,3 +1,5 @@
+import os
+import json
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -46,7 +48,7 @@ def board_is_accessible(board, actor, role):
     return any(member.staff_id == actor.id for member in board.access_members)
 
 
-def merge_task_into_target_board(task, target_group_id):
+def merge_task_into_target_board(task, target_group_id, new_status=None):
     from app.models.board_model import BoardGroup
     from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
 
@@ -57,11 +59,64 @@ def merge_task_into_target_board(task, target_group_id):
     old_group = task.group
     old_board_id = old_group.board_id if old_group else None
     new_board_id = target_group.board_id
+    new_board = target_group.board
 
     # Update group ID
     task.group_id = target_group.id
 
-    # Merge custom fields if moving across boards/spaces
+    # 1. Status Update & Synchronization
+    if new_status and str(new_status).strip():
+        task.status = str(new_status).strip()
+
+    # If target group has a specific name and it's not a generic container, align status or group
+    if new_board and task.status:
+        try:
+            statuses = json.loads(new_board.custom_statuses) if new_board.custom_statuses else []
+        except Exception:
+            statuses = []
+
+        status_names = []
+        for s in statuses:
+            if isinstance(s, dict):
+                status_names.append(s.get('label', s.get('name', s.get('id', ''))).strip().lower())
+            else:
+                status_names.append(str(s).strip().lower())
+
+        # If task's status doesn't exist on target board, automatically register it in target board's custom_statuses!
+        if task.status.strip().lower() not in status_names and task.status.strip().lower() not in ['not started', 'in progress', 'done', 'to do', 'completed']:
+            new_status_obj = {
+                "id": task.status,
+                "label": task.status,
+                "color": getattr(old_group, 'color', '#673de6') or '#673de6',
+                "type": "Active"
+            }
+            statuses.append(new_status_obj)
+            new_board.custom_statuses = json.dumps(statuses)
+            db.session.flush()
+
+        # Ensure a matching group exists on new_board for this status if target_group is generic
+        matching_group = BoardGroup.query.filter(
+            BoardGroup.board_id == new_board_id,
+            db.func.lower(BoardGroup.name) == db.func.lower(task.status)
+        ).first()
+
+        if matching_group:
+            task.group_id = matching_group.id
+        elif target_group.name.lower() in ['list', 'default', 'general', 'tasks', 'not started']:
+            # Create a dedicated group for this custom status on target board
+            last_group = BoardGroup.query.filter_by(board_id=new_board_id).order_by(BoardGroup.position.desc()).first()
+            next_pos = (last_group.position + 1) if last_group else 0
+            created_group = BoardGroup(
+                board_id=new_board_id,
+                name=task.status,
+                color=getattr(old_group, 'color', '#673de6') or '#673de6',
+                position=next_pos
+            )
+            db.session.add(created_group)
+            db.session.flush()
+            task.group_id = created_group.id
+
+    # 2. Merge custom fields if moving across boards/spaces
     if old_board_id and old_board_id != new_board_id:
         existing_values = TaskCustomFieldValue.query.filter_by(task_id=task.id).all()
         if not existing_values:
@@ -2204,7 +2259,7 @@ def bulk_move_tasks():
     if not ensure_board_access(target_group.board, actor, role):
         return jsonify({"error": "Forbidden - No access to target board"}), 403
 
-    DEFAULT_STATUSES = {"not started", "in progress", "done", "to do", "completed", "complete", "list"}
+    new_status = data.get('target_status') or data.get('new_status')
 
     tasks = BoardTask.query.filter(BoardTask.id.in_(task_ids)).all()
     for task in tasks:
@@ -2213,34 +2268,14 @@ def bulk_move_tasks():
             continue
         
         current_group_name = task.group.name
-        is_custom = current_group_name.lower() not in DEFAULT_STATUSES
-
-        if is_custom:
-            dest_board = target_group.board
-            existing_group = BoardGroup.query.filter_by(board_id=dest_board.id, name=current_group_name).first()
-            if not existing_group:
-                last_group = BoardGroup.query.filter_by(board_id=dest_board.id).order_by(BoardGroup.position.desc()).first()
-                next_pos = (last_group.position + 1) if last_group else 0
-                new_group = BoardGroup(
-                    board_id=dest_board.id,
-                    name=current_group_name,
-                    color=task.group.color or "#673de6",
-                    position=next_pos
-                )
-                db.session.add(new_group)
-                db.session.flush()
-                resolved_group_id = new_group.id
-            else:
-                resolved_group_id = existing_group.id
-        else:
-            resolved_group_id = target_group.id
+        resolved_group_id = target_group.id
 
         # Log change
-        change = f"Moved task to group '{current_group_name}' on board '{target_group.board.name}'"
+        change = f"Moved task to group '{target_group.name}' on board '{target_group.board.name}'"
         db.session.add(BoardTaskHistory(task_id=task.id, actor_name=actor.name, action=change))
         
-        # Update group and merge fields across boards
-        merge_task_into_target_board(task, resolved_group_id)
+        # Update group, sync status, and merge custom fields across boards
+        merge_task_into_target_board(task, resolved_group_id, new_status=new_status)
 
     db.session.commit()
     return jsonify({"message": f"Successfully moved {len(tasks)} task(s)"}), 200

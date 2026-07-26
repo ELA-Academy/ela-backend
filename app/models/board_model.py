@@ -155,7 +155,7 @@ class BoardTask(db.Model):
     description_html = db.Column(db.Text, nullable=True)
     time_estimate_minutes = db.Column(db.Integer, nullable=True)
     
-    notes = db.Column(db.String(500), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
     position = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     due_date_reminder_sent = db.Column(db.Boolean, default=False, nullable=False)

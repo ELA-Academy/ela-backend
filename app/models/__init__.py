@@ -13,6 +13,22 @@ def ensure_runtime_schema_updates():
         db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}"))
         db.session.commit()
 
+    def alter_column_type_if_needed(table_name, column_name, target_type_keyword):
+        """Alter a column's type if it doesn't match the target type (e.g. VARCHAR -> TEXT)."""
+        try:
+            inspector = inspect(db.engine)
+            columns = {col['name']: col for col in inspector.get_columns(table_name)}
+            if column_name not in columns:
+                return
+            current_type = str(columns[column_name]['type']).upper()
+            if target_type_keyword.upper() not in current_type:
+                db.session.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE {target_type_keyword}"))
+                db.session.commit()
+                print(f"[Schema] Altered {table_name}.{column_name} to {target_type_keyword}")
+        except Exception as e:
+            db.session.rollback()
+            print(f"[Schema] Could not alter {table_name}.{column_name}: {e}")
+
     inspector = inspect(db.engine)
     if inspector.has_table('super_admins'):
         add_column_if_missing('super_admins', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE')
@@ -54,6 +70,8 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('board_tasks', 'description_html', 'TEXT NULL')
         add_column_if_missing('board_tasks', 'time_estimate_minutes', 'INTEGER NULL')
         add_column_if_missing('board_tasks', 'due_date_reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        # Migrate notes from VARCHAR(500) to TEXT for long form submission content
+        alter_column_type_if_needed('board_tasks', 'notes', 'TEXT')
 
     if inspector.has_table('task_time_entries'):
         add_column_if_missing('task_time_entries', 'is_billable', 'BOOLEAN NOT NULL DEFAULT FALSE')
