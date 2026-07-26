@@ -7,7 +7,7 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 from werkzeug.utils import secure_filename
 
 from app.models import db
-from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskAssignee, TaskTimeEntry, WorkspaceDoc, BoardTaskAttachment
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, TaskTimeEntry, WorkspaceDoc, BoardTaskAttachment
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
 from app.models.board_model_extensions import (
@@ -577,6 +577,45 @@ def submit_form_response(form_id):
         db.session.add(response_record)
         db.session.commit()
 
+        # Trigger live notification to form creator and board access members
+        try:
+            from app.utils.notifications import enqueue_user_notification
+            notified_users = set()
+
+            # Notify form creator
+            if form.creator_staff_id:
+                notified_users.add(('staff', form.creator_staff_id))
+            if form.creator_super_admin_id:
+                notified_users.add(('superadmin', form.creator_super_admin_id))
+
+            # Notify all board access members
+            board_members = BoardAccessMember.query.filter_by(board_id=board.id).all()
+            for member in board_members:
+                if member.staff_id:
+                    notified_users.add(('staff', member.staff_id))
+                if member.super_admin_id:
+                    notified_users.add(('superadmin', member.super_admin_id))
+
+            # Remove the submitter from notification list (don't notify yourself)
+            if role == 'staff' and actor:
+                notified_users.discard(('staff', actor.id))
+            elif role == 'superadmin' and actor:
+                notified_users.discard(('superadmin', actor.id))
+
+            submitter_name = actor.name if actor else 'Unknown'
+            for r, uid in notified_users:
+                enqueue_user_notification(
+                    user_id=uid,
+                    user_role=r,
+                    message=f"📋 {submitter_name} submitted form '{form.name}' — Task: '{task.title}'",
+                    category='assignment',
+                    target_type='Board',
+                    target_id=board.id,
+                    target_link=f"/admin/boards/{board.id}?task={task.id}"
+                )
+        except Exception as notif_err:
+            print(f"Failed to queue form submission notifications: {notif_err}")
+
         log_activity(actor, f"Submitted form response to '{form.name}' resulting in Task '{task.title}'")
         return jsonify({
             "message": "Form submitted successfully",
@@ -776,23 +815,38 @@ def submit_public_form_response(form_id):
         db.session.add(response_record)
         db.session.commit()
 
-        # Trigger live notification to creator
-        if form.creator_staff_id or form.creator_super_admin_id:
-            try:
-                from app.utils.notifications import enqueue_user_notification
-                recipient_id = form.creator_staff_id if form.creator_staff_id else form.creator_super_admin_id
-                recipient_role = 'staff' if form.creator_staff_id else 'superadmin'
+        # Trigger live notification to form creator AND all board access members
+        try:
+            from app.utils.notifications import enqueue_user_notification
+            notified_users = set()  # (role, user_id) to deduplicate
+
+            # 1. Notify form creator first
+            if form.creator_staff_id:
+                notified_users.add(('staff', form.creator_staff_id))
+            if form.creator_super_admin_id:
+                notified_users.add(('superadmin', form.creator_super_admin_id))
+
+            # 2. Notify all board access members
+            board_members = BoardAccessMember.query.filter_by(board_id=board.id).all()
+            for member in board_members:
+                if member.staff_id:
+                    notified_users.add(('staff', member.staff_id))
+                if member.super_admin_id:
+                    notified_users.add(('superadmin', member.super_admin_id))
+
+            # 3. Send notification to each unique recipient
+            for role, user_id in notified_users:
                 enqueue_user_notification(
-                    user_id=recipient_id,
-                    user_role=recipient_role,
-                    message=f"New submission received for form '{form.name}' & assigned to you: '{task.title}'",
+                    user_id=user_id,
+                    user_role=role,
+                    message=f"📋 New form submission: '{form.name}' — Task created: '{task.title}'",
                     category='assignment',
                     target_type='Board',
                     target_id=board.id,
                     target_link=f"/admin/boards/{board.id}?task={task.id}"
                 )
-            except Exception as notif_err:
-                print(f"Failed to queue assignment notification: {notif_err}")
+        except Exception as notif_err:
+            print(f"Failed to queue form submission notifications: {notif_err}")
 
         log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
         return jsonify({
