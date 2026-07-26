@@ -1,6 +1,6 @@
 import os
 import json
-from flask import current_app, render_template
+from flask import current_app, render_template, has_app_context
 from flask_mail import Message
 from threading import Thread
 from app.models import db
@@ -8,26 +8,48 @@ from app.models.notification_model import Notification
 from app.models.push_subscription_model import PushSubscription
 from pywebpush import webpush, WebPushException
 
+def _safe_log(level, msg):
+    try:
+        if has_app_context() and current_app:
+            logger = getattr(current_app, 'logger', None)
+            if logger:
+                log_fn = getattr(logger, level, logger.info)
+                log_fn(msg)
+                return
+    except Exception:
+        pass
+    print(f"[{level.upper()}] {msg}")
+
 def send_async_email(app, msg):
     with app.app_context():
         from app import mail
         try:
             mail.send(msg)
         except Exception as e:
-            app.logger.error(f"Failed to send email: {e}")
+            _safe_log('error', f"Failed to send email: {e}")
 
 def send_email_in_background(subject, recipients, template_data):
-    app = current_app._get_current_object()
-    html_body = render_template('email/notification.html', **template_data)
-    
-    sender_name = "Ela Academy"
-    sender_email = os.getenv("MAIL_USERNAME")
-    sender = f"{sender_name} <{sender_email}>" if sender_email else None
-    
-    msg = Message(subject, sender=sender, recipients=recipients, html=html_body)
-    thr = Thread(target=send_async_email, args=[app, msg])
-    thr.start()
-    return thr
+    try:
+        if has_app_context() and current_app:
+            app = current_app._get_current_object()
+        else:
+            from app import create_app
+            app = create_app()
+
+        with app.test_request_context('/'):
+            html_body = render_template('email/notification.html', **template_data)
+        
+        sender_name = "Ela Academy"
+        sender_email = os.getenv("MAIL_USERNAME")
+        sender = f"{sender_name} <{sender_email}>" if sender_email else None
+        
+        msg = Message(subject, sender=sender, recipients=recipients, html=html_body)
+        thr = Thread(target=send_async_email, args=[app, msg])
+        thr.start()
+        return thr
+    except Exception as e:
+        _safe_log('error', f"Failed to queue background email: {e}")
+        return None
 
 def send_push_notification(user, payload):
     """Finds a user's subscription and sends a push notification."""
@@ -39,7 +61,7 @@ def send_push_notification(user, payload):
         sub_record = PushSubscription.query.filter_by(super_admin_id=user.id).first()
 
     if not sub_record:
-        current_app.logger.info(f"No push subscription found for user {user.id}.")
+        _safe_log('info', f"No push subscription found for user {user.id}.")
         return
 
     try:
@@ -58,15 +80,15 @@ def send_push_notification(user, payload):
             vapid_private_key=os.getenv("VAPID_PRIVATE_KEY"),
             vapid_claims={"sub": os.getenv("VAPID_CLAIMS_EMAIL")}
         )
-        current_app.logger.info(f"Successfully sent push to user {user.id}")
+        _safe_log('info', f"Successfully sent push to user {user.id}")
     except WebPushException as ex:
-        current_app.logger.error(f"WebPush Error for user {user.id}: {ex}")
+        _safe_log('error', f"WebPush Error for user {user.id}: {ex}")
         if ex.response and ex.response.status_code in [404, 410]:
-            current_app.logger.warning(f"Deleting expired subscription for user {user.id}")
+            _safe_log('warning', f"Deleting expired subscription for user {user.id}")
             db.session.delete(sub_record)
             db.session.commit()
     except Exception as e:
-        current_app.logger.error(f"An unexpected error occurred in send_push_notification: {e}")
+        _safe_log('error', f"An unexpected error occurred in send_push_notification: {e}")
 
 
 def get_user_allowed_channels(user_id, user_role, category='general'):
@@ -140,10 +162,10 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
         try:
             existing = NotificationRequest.query.filter_by(idempotency_key=idempotency_key).first()
             if existing:
-                current_app.logger.info(f"Duplicate notification skipped (idempotency: {idempotency_key})")
+                _safe_log('info', f"Duplicate notification skipped (idempotency: {idempotency_key})")
                 return existing
         except Exception as e:
-            current_app.logger.error(f"Error checking idempotency: {e}")
+            _safe_log('error', f"Error checking idempotency: {e}")
 
     # Determine recipient details
     recipient_role = 'staff' if recipient.__class__.__name__ == 'Staff' else 'superadmin'
@@ -155,7 +177,7 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
     else:
         allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
     if not allowed_channels:
-        current_app.logger.info(f"User {recipient_role} {recipient_id} has opted out of all notifications for category {category}.")
+        _safe_log('info', f"User {recipient_role} {recipient_id} has opted out of all notifications for category {category}.")
         return None
 
     # Resolve target details
@@ -188,10 +210,12 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
     # Commit ingestion transaction to make request visible to workers
     try:
         db.session.commit()
-        current_app.logger.info(f"Notification request enqueued (id: {req.id}) for recipient {recipient_id} ({recipient_role})")
+        _safe_log('info', f"Notification request enqueued (id: {req.id}) for recipient {recipient_id} ({recipient_role})")
     except Exception as e:
         db.session.rollback()
-        current_app.logger.error(f"Failed to enqueue notification request: {e}")
+        _safe_log('error', f"Failed to enqueue notification request: {e}")
+        
+    return req
         
     return req
 
