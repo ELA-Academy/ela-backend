@@ -76,6 +76,7 @@ class TaskUpdateReply(db.Model):
     sender_name = db.Column(db.String(100), nullable=False)
     
     content = db.Column(db.Text, nullable=False)
+    reply_to_name = db.Column(db.String(100), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     sender_staff = db.relationship('Staff')
@@ -90,6 +91,7 @@ class TaskUpdateReply(db.Model):
             'sender_name': self.sender_name,
             'sender_role': role,
             'sender_email': email,
+            'reply_to_name': self.reply_to_name,
             'content': self.content,
             'created_at': self.created_at.isoformat() + 'Z'
         }
