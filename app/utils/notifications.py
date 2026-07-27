@@ -28,8 +28,10 @@ def send_async_email(app, msg):
         except Exception as e:
             _safe_log('error', f"Failed to send email: {e}")
 
-def send_email_in_background(subject, recipients, template_data):
+def send_email_in_background(subject, recipients, template_data, sender_email=None):
     try:
+        from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background
+        
         if has_app_context() and current_app:
             app = current_app._get_current_object()
         else:
@@ -38,10 +40,16 @@ def send_email_in_background(subject, recipients, template_data):
 
         with app.test_request_context('/'):
             html_body = render_template('email/notification.html', **template_data)
-        
+
+        # 1. Use Microsoft Graph API if credentials are set
+        if is_ms_graph_configured():
+            _safe_log('info', f"Dispatching email via Microsoft Graph API ({sender_email or 'default'})")
+            return send_email_via_graph_background(subject, recipients, html_body, sender_email=sender_email)
+
+        # 2. Fallback to SMTP/Flask-Mail
         sender_name = "Ela Academy"
-        sender_email = os.getenv("MAIL_USERNAME")
-        sender = f"{sender_name} <{sender_email}>" if sender_email else None
+        from_email = sender_email or os.getenv("MAIL_USERNAME")
+        sender = f"{sender_name} <{from_email}>" if from_email else None
         
         msg = Message(subject, sender=sender, recipients=recipients, html=html_body)
         thr = Thread(target=send_async_email, args=[app, msg])

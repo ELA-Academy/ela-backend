@@ -71,10 +71,15 @@ def create_staff():
             expires_delta=timedelta(days=7)
         )
         
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-        invite_link = f"{frontend_url}/setup-password?token={setup_token}"
-        
-        send_staff_invite_email(mail, email, name, invite_link)
+        # Resolve department email for the invite
+        from app.utils.ms_graph_email import get_dept_email_from_dept
+        dept_email = None
+        if department_ids:
+            first_dept = Department.query.get(department_ids[0])
+            if first_dept:
+                dept_email = get_dept_email_from_dept(first_dept)
+
+        send_staff_invite_email(mail, email, name, invite_link, sender_email=dept_email)
         
     db.session.commit()
     return jsonify(new_staff.to_dict()), 201

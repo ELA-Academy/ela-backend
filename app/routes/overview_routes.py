@@ -150,7 +150,9 @@ def get_card_aggregate(space_id, card_id):
     filters = {}
     if card.filters_json:
         try:
-            filters = json.loads(card.filters_json)
+            parsed = json.loads(card.filters_json)
+            if isinstance(parsed, dict):
+                filters = parsed
         except Exception:
             pass
 
@@ -240,7 +242,9 @@ def get_card_data(space_id, card_id):
     filters = {}
     if card.filters_json:
         try:
-            filters = json.loads(card.filters_json)
+            parsed = json.loads(card.filters_json)
+            if isinstance(parsed, dict):
+                filters = parsed
         except Exception:
             pass
 
