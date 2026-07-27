@@ -15,17 +15,23 @@ auth_bp = Blueprint('auth', __name__)
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    email = data.get('email')
+    data = request.get_json() or {}
+    email = (data.get('email') or '').strip()
     password = data.get('password')
 
     if not email or not password:
         return jsonify({"msg": "Email and password are required"}), 400
 
-    staff_member = Staff.query.filter_by(email=email).first()
+    # Case-insensitive email lookup
+    staff_member = Staff.query.filter(db.func.lower(Staff.email) == db.func.lower(email)).first()
 
     if staff_member:
-        if not staff_member.is_active or not staff_member.check_password(password):
+        if hasattr(staff_member, 'is_active') and staff_member.is_active is False:
+            print(f"[LOGIN FAIL] Staff '{email}' account is inactive (is_active=False)")
+            return jsonify({"msg": "Account is inactive. Please contact support."}), 401
+
+        if not staff_member.check_password(password):
+            print(f"[LOGIN FAIL] Password mismatch for Staff '{email}'")
             return jsonify({"msg": "Invalid credentials"}), 401
 
         additional_claims = {
@@ -40,9 +46,9 @@ def login():
         otp = generate_otp()
         
         # Save to database (deleting any existing pending OTPs for this email first)
-        LoginOTP.query.filter_by(email=email).delete()
+        LoginOTP.query.filter_by(email=staff_member.email).delete()
         login_otp_record = LoginOTP(
-            email=email,
+            email=staff_member.email,
             otp=otp,
             role="staff",
             claims=additional_claims,
@@ -51,20 +57,22 @@ def login():
         db.session.add(login_otp_record)
         db.session.commit()
         
-        # Log to console for testing/development
-        print(f"=== [OTP LOG] Staff '{email}' OTP: {otp} ===")
+        print(f"=== [OTP LOG] Staff '{staff_member.email}' OTP: {otp} ===")
+        send_otp_email(mail, staff_member.email, otp)
         
-        # Send OTP email
-        send_otp_email(mail, email, otp)
-        
-        return jsonify({"otp_required": True, "email": email, "role": "staff"}), 200
- 
-    admin_member = SuperAdmin.query.filter_by(email=email).first()
- 
+        return jsonify({"otp_required": True, "email": staff_member.email, "role": "staff"}), 200
+
+    admin_member = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
+
     if admin_member:
-        if not admin_member.is_active or not admin_member.check_password(password):
+        if hasattr(admin_member, 'is_active') and admin_member.is_active is False:
+            print(f"[LOGIN FAIL] SuperAdmin '{email}' account is inactive (is_active=False)")
+            return jsonify({"msg": "Account is inactive. Please contact support."}), 401
+
+        if not admin_member.check_password(password):
+            print(f"[LOGIN FAIL] Password mismatch for SuperAdmin '{email}'")
             return jsonify({"msg": "Invalid credentials"}), 401
- 
+
         additional_claims = {
             "id": admin_member.id,
             "role": "superadmin",
@@ -75,9 +83,9 @@ def login():
         otp = generate_otp()
         
         # Save to database (deleting any existing pending OTPs for this email first)
-        LoginOTP.query.filter_by(email=email).delete()
+        LoginOTP.query.filter_by(email=admin_member.email).delete()
         login_otp_record = LoginOTP(
-            email=email,
+            email=admin_member.email,
             otp=otp,
             role="superadmin",
             claims=additional_claims,
@@ -86,14 +94,12 @@ def login():
         db.session.add(login_otp_record)
         db.session.commit()
         
-        # Log to console for testing/development
-        print(f"=== [OTP LOG] SuperAdmin '{email}' OTP: {otp} ===")
+        print(f"=== [OTP LOG] SuperAdmin '{admin_member.email}' OTP: {otp} ===")
+        send_otp_email(mail, admin_member.email, otp)
         
-        # Send OTP email
-        send_otp_email(mail, email, otp)
-        
-        return jsonify({"otp_required": True, "email": email, "role": "superadmin"}), 200
- 
+        return jsonify({"otp_required": True, "email": admin_member.email, "role": "superadmin"}), 200
+
+    print(f"[LOGIN FAIL] No user found with email '{email}'")
     return jsonify({"msg": "Invalid credentials"}), 401
  
  

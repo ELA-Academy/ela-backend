@@ -837,6 +837,8 @@ def create_task_update(task_id):
         if not content:
             return jsonify({"error": "Content is required"}), 400
 
+        send_via_email = data.get('send_via_email', False)
+
         new_update = TaskUpdate(task_id=task.id, content=content, sender_name=actor.name)
         if role == 'superadmin':
             new_update.sender_super_admin_id = actor.id
@@ -944,6 +946,53 @@ def create_task_update(task_id):
                     )
 
         db.session.commit()
+
+        # Send comment via email if requested
+        if send_via_email:
+            try:
+                from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background, get_department_sender_email, format_task_comment_email
+                if is_ms_graph_configured():
+                    sender_dept_email = get_department_sender_email(actor)
+                    email_html = format_task_comment_email(actor.name, task.title, content, board.name)
+                    
+                    # Collect unique recipient emails (assignees + responsible)
+                    recipient_emails = set()
+                    from app.models.staff_model import Staff
+                    from app.models.super_admin_model import SuperAdmin
+                    
+                    if task.responsible_staff_id:
+                        resp = Staff.query.get(task.responsible_staff_id)
+                        if resp and resp.email:
+                            recipient_emails.add(resp.email)
+                    if task.responsible_super_admin_id:
+                        resp = SuperAdmin.query.get(task.responsible_super_admin_id)
+                        if resp and resp.email:
+                            recipient_emails.add(resp.email)
+                    for ass in task.assignees:
+                        if ass.staff_id:
+                            u = Staff.query.get(ass.staff_id)
+                            if u and u.email:
+                                recipient_emails.add(u.email)
+                        elif ass.super_admin_id:
+                            u = SuperAdmin.query.get(ass.super_admin_id)
+                            if u and u.email:
+                                recipient_emails.add(u.email)
+                    
+                    # Remove the sender's own email
+                    if hasattr(actor, 'email') and actor.email in recipient_emails:
+                        recipient_emails.discard(actor.email)
+                    
+                    if recipient_emails:
+                        send_email_via_graph_background(
+                            subject=f"[Task Email] {task.title} — {board.name}",
+                            recipients=list(recipient_emails),
+                            html_content=email_html,
+                            sender_email=sender_dept_email
+                        )
+                        print(f"[Email Comment] Sent from {sender_dept_email} to {recipient_emails}")
+            except Exception as email_err:
+                print(f"[Email Comment Error] {email_err}")
+
         return jsonify(new_update.to_dict()), 201
     except Exception as e:
         db.session.rollback()

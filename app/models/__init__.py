@@ -34,6 +34,9 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('super_admins', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE')
         add_column_if_missing('super_admins', 'notification_preferences', 'TEXT NULL')
 
+    if inspector.has_table('departments'):
+        add_column_if_missing('departments', 'email', 'VARCHAR(150) NULL')
+
     if inspector.has_table('staff'):
         add_column_if_missing('staff', 'notification_preferences', 'TEXT NULL')
 
