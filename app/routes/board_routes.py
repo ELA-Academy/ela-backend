@@ -838,6 +838,8 @@ def create_task_update(task_id):
             return jsonify({"error": "Content is required"}), 400
 
         send_via_email = data.get('send_via_email', False)
+        to_email = data.get('to_email')
+        subject_override = data.get('subject')
 
         new_update = TaskUpdate(task_id=task.id, content=content, sender_name=actor.name)
         if role == 'superadmin':
@@ -951,45 +953,60 @@ def create_task_update(task_id):
         if send_via_email:
             try:
                 from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background, get_department_sender_email, format_task_comment_email
-                if is_ms_graph_configured():
-                    sender_dept_email = get_department_sender_email(actor)
-                    email_html = format_task_comment_email(actor.name, task.title, content, board.name)
-                    
-                    # Collect unique recipient emails (assignees + responsible)
-                    recipient_emails = set()
-                    from app.models.staff_model import Staff
-                    from app.models.super_admin_model import SuperAdmin
-                    
-                    if task.responsible_staff_id:
-                        resp = Staff.query.get(task.responsible_staff_id)
-                        if resp and resp.email:
-                            recipient_emails.add(resp.email)
-                    if task.responsible_super_admin_id:
-                        resp = SuperAdmin.query.get(task.responsible_super_admin_id)
-                        if resp and resp.email:
-                            recipient_emails.add(resp.email)
-                    for ass in task.assignees:
-                        if ass.staff_id:
-                            u = Staff.query.get(ass.staff_id)
-                            if u and u.email:
-                                recipient_emails.add(u.email)
-                        elif ass.super_admin_id:
-                            u = SuperAdmin.query.get(ass.super_admin_id)
-                            if u and u.email:
-                                recipient_emails.add(u.email)
-                    
-                    # Remove the sender's own email
-                    if hasattr(actor, 'email') and actor.email in recipient_emails:
-                        recipient_emails.discard(actor.email)
-                    
-                    if recipient_emails:
+                sender_dept_email = get_department_sender_email(actor)
+                email_html = format_task_comment_email(actor.name, task.title, content, board.name)
+                
+                # Collect unique recipient emails
+                recipient_emails = set()
+
+                # 1. If explicit to_email is provided (e.g. form submitter's email), add it
+                has_explicit_to = False
+                if to_email and isinstance(to_email, str) and '@' in to_email:
+                    for addr in to_email.split(','):
+                        clean_addr = addr.strip()
+                        if '@' in clean_addr:
+                            recipient_emails.add(clean_addr)
+                            has_explicit_to = True
+
+                # 2. Add task assignees and responsible staff
+                from app.models.staff_model import Staff
+                from app.models.super_admin_model import SuperAdmin
+                
+                if task.responsible_staff_id:
+                    resp = Staff.query.get(task.responsible_staff_id)
+                    if resp and resp.email:
+                        recipient_emails.add(resp.email)
+                if task.responsible_super_admin_id:
+                    resp = SuperAdmin.query.get(task.responsible_super_admin_id)
+                    if resp and resp.email:
+                        recipient_emails.add(resp.email)
+                for ass in task.assignees:
+                    if ass.staff_id:
+                        u = Staff.query.get(ass.staff_id)
+                        if u and u.email:
+                            recipient_emails.add(u.email)
+                    elif ass.super_admin_id:
+                        u = SuperAdmin.query.get(ass.super_admin_id)
+                        if u and u.email:
+                            recipient_emails.add(u.email)
+                
+                # Remove the sender's own email ONLY if no explicit to_email was typed
+                if not has_explicit_to and hasattr(actor, 'email') and actor.email in recipient_emails and len(recipient_emails) > 1:
+                    recipient_emails.discard(actor.email)
+                
+                email_subject = subject_override if subject_override else f"[Task Email] {task.title} — {board.name}"
+
+                if recipient_emails:
+                    if is_ms_graph_configured():
                         send_email_via_graph_background(
-                            subject=f"[Task Email] {task.title} — {board.name}",
+                            subject=email_subject,
                             recipients=list(recipient_emails),
                             html_content=email_html,
                             sender_email=sender_dept_email
                         )
-                        print(f"[Email Comment] Sent from {sender_dept_email} to {recipient_emails}")
+                        print(f"[Email Comment] Sent from {sender_dept_email} to {recipient_emails} with subject '{email_subject}'")
+                    else:
+                        print(f"[Email Comment Notice] MS_GRAPH credentials not set in .env on localhost. Email from {sender_dept_email} to {recipient_emails} prepared successfully.")
             except Exception as email_err:
                 print(f"[Email Comment Error] {email_err}")
 
@@ -1095,10 +1112,12 @@ def create_reply(update_id):
     data = request.get_json() or {}
     content = data.get('content')
     mentions = data.get('mentions', [])
+    reply_to_name = data.get('reply_to_name')
+
     if not content:
         return jsonify({"error": "Reply content is required"}), 400
 
-    reply = TaskUpdateReply(update_id=update.id, content=content, sender_name=actor.name)
+    reply = TaskUpdateReply(update_id=update.id, content=content, sender_name=actor.name, reply_to_name=reply_to_name)
     if role == 'superadmin':
         reply.sender_super_admin_id = actor.id
     else:

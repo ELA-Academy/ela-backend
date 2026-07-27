@@ -73,8 +73,12 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('board_tasks', 'description_html', 'TEXT NULL')
         add_column_if_missing('board_tasks', 'time_estimate_minutes', 'INTEGER NULL')
         add_column_if_missing('board_tasks', 'due_date_reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('board_tasks', 'submitter_email', 'VARCHAR(150) NULL')
         # Migrate notes from VARCHAR(500) to TEXT for long form submission content
         alter_column_type_if_needed('board_tasks', 'notes', 'TEXT')
+
+    if inspector.has_table('task_update_replies'):
+        add_column_if_missing('task_update_replies', 'reply_to_name', 'VARCHAR(100) NULL')
 
     if inspector.has_table('task_time_entries'):
         add_column_if_missing('task_time_entries', 'is_billable', 'BOOLEAN NOT NULL DEFAULT FALSE')

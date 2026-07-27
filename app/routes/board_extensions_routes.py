@@ -468,6 +468,7 @@ def submit_form_response(form_id):
         extracted_title = None
         extracted_start_date = None
         extracted_due_date = None
+        extracted_submitter_email = None
 
         # Pre-fetch existing board custom fields
         existing_fields = BoardCustomField.query.filter_by(board_id=board.id).all()
@@ -501,6 +502,12 @@ def submit_form_response(form_id):
                 if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject', 'full name')):
                     if isinstance(answer, str) and answer.strip():
                         extracted_title = answer.strip()
+
+            # 1.5. Smart Submitter Email detection
+            if not extracted_submitter_email:
+                if mapping in {'email', 'submitter_email'} or any(k in label for k in ('email', 'e-mail', 'mail address')):
+                    if isinstance(answer, str) and '@' in answer:
+                        extracted_submitter_email = answer.strip()
 
             # 2. Smart Start Date detection
             if not extracted_start_date:
@@ -571,6 +578,8 @@ def submit_form_response(form_id):
             task_payload['due_date'] = extracted_due_date
         if extracted_start_date:
             task_payload['start_date'] = extracted_start_date
+        if extracted_submitter_email:
+            task_payload['submitter_email'] = extracted_submitter_email
 
         # Format submission answers into task description
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
@@ -600,7 +609,8 @@ def submit_form_response(form_id):
             priority=task_payload['priority'],
             notes=task_payload['notes'],
             due_date=task_payload.get('due_date'),
-            start_date=task_payload.get('start_date')
+            start_date=task_payload.get('start_date'),
+            submitter_email=task_payload.get('submitter_email')
         )
         db.session.add(task)
         db.session.flush()
@@ -757,6 +767,7 @@ def submit_public_form_response(form_id):
         extracted_title = None
         extracted_start_date = None
         extracted_due_date = None
+        extracted_submitter_email = None
 
         # Pre-fetch existing board custom fields
         existing_fields = BoardCustomField.query.filter_by(board_id=board.id).all()
@@ -790,6 +801,12 @@ def submit_public_form_response(form_id):
                 if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject', 'full name')):
                     if isinstance(answer, str) and answer.strip():
                         extracted_title = answer.strip()
+
+            # 1.5. Smart Submitter Email detection
+            if not extracted_submitter_email:
+                if mapping in {'email', 'submitter_email'} or any(k in label for k in ('email', 'e-mail', 'mail address')):
+                    if isinstance(answer, str) and '@' in answer:
+                        extracted_submitter_email = answer.strip()
 
             # 2. Smart Start Date detection
             if not extracted_start_date:
@@ -860,6 +877,8 @@ def submit_public_form_response(form_id):
             task_payload['due_date'] = extracted_due_date
         if extracted_start_date:
             task_payload['start_date'] = extracted_start_date
+        if extracted_submitter_email:
+            task_payload['submitter_email'] = extracted_submitter_email
 
         # Format submission answers into task description
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
@@ -888,7 +907,8 @@ def submit_public_form_response(form_id):
             priority=task_payload['priority'],
             notes=task_payload['notes'],
             due_date=task_payload.get('due_date'),
-            start_date=task_payload.get('start_date')
+            start_date=task_payload.get('start_date'),
+            submitter_email=task_payload.get('submitter_email')
         )
         db.session.add(task)
         db.session.flush()

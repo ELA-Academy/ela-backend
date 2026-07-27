@@ -156,6 +156,7 @@ class BoardTask(db.Model):
     time_estimate_minutes = db.Column(db.Integer, nullable=True)
     
     notes = db.Column(db.Text, nullable=True)
+    submitter_email = db.Column(db.String(150), nullable=True)
     position = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     due_date_reminder_sent = db.Column(db.Boolean, default=False, nullable=False)
@@ -221,6 +222,7 @@ class BoardTask(db.Model):
             'tags': self.tags,
             'description_html': self.description_html,
             'notes': self.notes,
+            'submitter_email': self.submitter_email,
             'position': self.position,
             'assignee_id': assignee_id,
             'assignee_name': assignee_name,
