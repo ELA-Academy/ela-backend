@@ -465,44 +465,102 @@ def submit_form_response(form_id):
         custom_field_answers = {}
         file_attachments = []
 
-        # Smart Title & End Date extraction logic
         extracted_title = None
+        extracted_start_date = None
         extracted_due_date = None
+
+        # Pre-fetch existing board custom fields
+        existing_fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+        field_by_id = {f.id: f for f in existing_fields}
+        field_by_name = {f.name.strip().lower(): f for f in existing_fields}
 
         for question in form_struct:
             qid = str(question.get('id'))
-            label = (question.get('label') or '').strip().lower()
+            raw_label = question.get('label') or f"Question {qid}"
+            label = raw_label.strip().lower()
             mapping = question.get('mapping')
             answer = response_data.get(qid)
-            qtype = question.get('type')
+            qtype = question.get('type', '')
 
             if answer is None or str(answer).strip() == '':
+                continue
+
+            if qtype in ('welcome', 'thankyou'):
                 continue
 
             if qtype == 'file' or mapping == 'file':
                 if isinstance(answer, dict) and 'file_url' in answer:
                     file_attachments.append(answer)
+                elif isinstance(answer, list):
+                    for f_item in answer:
+                        if isinstance(f_item, dict) and 'file_url' in f_item:
+                            file_attachments.append(f_item)
 
-            # 1. Smart Title detection: explicit mapping 'title' or label matching name/title
+            # 1. Smart Title detection
             if not extracted_title:
-                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject')):
+                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject', 'full name')):
                     if isinstance(answer, str) and answer.strip():
                         extracted_title = answer.strip()
 
-            # 2. Smart End Date / Due Date detection
-            if not extracted_due_date:
-                if mapping in {'due_date', 'end_date', 'start_date'} or any(k in label for k in ('end date', 'due date', 'deadline')):
+            # 2. Smart Start Date detection
+            if not extracted_start_date:
+                if mapping == 'start_date' or ('start' in label and 'end' not in label and 'due' not in label):
                     try:
-                        extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                        extracted_start_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
                     except Exception:
                         pass
 
+            # 3. Smart Due / End Date detection
+            if not extracted_due_date:
+                if mapping in {'due_date', 'end_date'} or any(k in label for k in ('end date', 'due date', 'deadline', 'due date', 'end')):
+                    if not ('start' in label and 'end' not in label):
+                        try:
+                            extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                        except Exception:
+                            pass
+
+            # 4. Custom Field Auto-Matching & Auto-Creation
+            target_field = None
             if mapping and mapping.startswith('custom_field_'):
                 try:
-                    field_id = int(mapping.split('_')[-1])
-                    custom_field_answers[field_id] = answer
+                    fid = int(mapping.split('_')[-1])
+                    target_field = field_by_id.get(fid)
                 except Exception:
                     pass
+
+            if not target_field:
+                target_field = field_by_name.get(label)
+
+            if not target_field and qtype not in ('file', 'welcome', 'thankyou'):
+                new_field_type = 'text'
+                if qtype in ('number', 'rating'):
+                    new_field_type = 'number'
+                elif qtype == 'currency':
+                    new_field_type = 'currency'
+                elif qtype == 'date':
+                    new_field_type = 'date'
+                elif qtype in ('select', 'dropdown', 'choice'):
+                    new_field_type = 'dropdown'
+
+                config_data = None
+                options = question.get('options')
+                if options and isinstance(options, list):
+                    config_data = json.dumps({'options': [str(o) for o in options]})
+
+                target_field = BoardCustomField(
+                    board_id=board.id,
+                    name=raw_label.strip(),
+                    type=new_field_type,
+                    config_json=config_data
+                )
+                db.session.add(target_field)
+                db.session.flush()
+
+                field_by_id[target_field.id] = target_field
+                field_by_name[label] = target_field
+
+            if target_field:
+                custom_field_answers[target_field.id] = answer
 
         if extracted_title:
             task_payload['title'] = extracted_title
@@ -511,6 +569,8 @@ def submit_form_response(form_id):
 
         if extracted_due_date:
             task_payload['due_date'] = extracted_due_date
+        if extracted_start_date:
+            task_payload['start_date'] = extracted_start_date
 
         # Format submission answers into task description
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
@@ -694,44 +754,102 @@ def submit_public_form_response(form_id):
         custom_field_answers = {}
         file_attachments = []
 
-        # Smart Title & End Date extraction logic
         extracted_title = None
+        extracted_start_date = None
         extracted_due_date = None
+
+        # Pre-fetch existing board custom fields
+        existing_fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+        field_by_id = {f.id: f for f in existing_fields}
+        field_by_name = {f.name.strip().lower(): f for f in existing_fields}
 
         for question in form_struct:
             qid = str(question.get('id'))
-            label = (question.get('label') or '').strip().lower()
+            raw_label = question.get('label') or f"Question {qid}"
+            label = raw_label.strip().lower()
             mapping = question.get('mapping')
             answer = response_data.get(qid)
-            qtype = question.get('type')
+            qtype = question.get('type', '')
 
             if answer is None or str(answer).strip() == '':
+                continue
+
+            if qtype in ('welcome', 'thankyou'):
                 continue
 
             if qtype == 'file' or mapping == 'file':
                 if isinstance(answer, dict) and 'file_url' in answer:
                     file_attachments.append(answer)
+                elif isinstance(answer, list):
+                    for f_item in answer:
+                        if isinstance(f_item, dict) and 'file_url' in f_item:
+                            file_attachments.append(f_item)
 
-            # 1. Smart Title detection: explicit mapping 'title' or label matching name/title
+            # 1. Smart Title detection
             if not extracted_title:
-                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject')):
+                if mapping == 'title' or any(k in label for k in ('name', 'title', 'subject', 'full name')):
                     if isinstance(answer, str) and answer.strip():
                         extracted_title = answer.strip()
 
-            # 2. Smart End Date / Due Date detection
-            if not extracted_due_date:
-                if mapping in {'due_date', 'end_date', 'start_date'} or any(k in label for k in ('end date', 'due date', 'deadline')):
+            # 2. Smart Start Date detection
+            if not extracted_start_date:
+                if mapping == 'start_date' or ('start' in label and 'end' not in label and 'due' not in label):
                     try:
-                        extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                        extracted_start_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
                     except Exception:
                         pass
 
+            # 3. Smart Due / End Date detection
+            if not extracted_due_date:
+                if mapping in {'due_date', 'end_date'} or any(k in label for k in ('end date', 'due date', 'deadline', 'due date', 'end')):
+                    if not ('start' in label and 'end' not in label):
+                        try:
+                            extracted_due_date = datetime.fromisoformat(str(answer).replace('Z', '+00:00')).date()
+                        except Exception:
+                            pass
+
+            # 4. Custom Field Auto-Matching & Auto-Creation
+            target_field = None
             if mapping and mapping.startswith('custom_field_'):
                 try:
-                    field_id = int(mapping.split('_')[-1])
-                    custom_field_answers[field_id] = answer
+                    fid = int(mapping.split('_')[-1])
+                    target_field = field_by_id.get(fid)
                 except Exception:
                     pass
+
+            if not target_field:
+                target_field = field_by_name.get(label)
+
+            if not target_field and qtype not in ('file', 'welcome', 'thankyou'):
+                new_field_type = 'text'
+                if qtype in ('number', 'rating'):
+                    new_field_type = 'number'
+                elif qtype == 'currency':
+                    new_field_type = 'currency'
+                elif qtype == 'date':
+                    new_field_type = 'date'
+                elif qtype in ('select', 'dropdown', 'choice'):
+                    new_field_type = 'dropdown'
+
+                config_data = None
+                options = question.get('options')
+                if options and isinstance(options, list):
+                    config_data = json.dumps({'options': [str(o) for o in options]})
+
+                target_field = BoardCustomField(
+                    board_id=board.id,
+                    name=raw_label.strip(),
+                    type=new_field_type,
+                    config_json=config_data
+                )
+                db.session.add(target_field)
+                db.session.flush()
+
+                field_by_id[target_field.id] = target_field
+                field_by_name[label] = target_field
+
+            if target_field:
+                custom_field_answers[target_field.id] = answer
 
         if extracted_title:
             task_payload['title'] = extracted_title
@@ -740,6 +858,8 @@ def submit_public_form_response(form_id):
 
         if extracted_due_date:
             task_payload['due_date'] = extracted_due_date
+        if extracted_start_date:
+            task_payload['start_date'] = extracted_start_date
 
         # Format submission answers into task description
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
