@@ -59,12 +59,14 @@ def get_my_tasks():
     # 2. Fetch Board Tasks (Monday.com style)
     from app.models.board_model import BoardTask, BoardTaskAssignee
     if staff_member:
-        board_tasks = BoardTask.query.filter(
-            or_(
-                BoardTask.responsible_staff_id == staff_member.id,
-                BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
-            )
-        ).all()
+        staff_department_ids = [dept.id for dept in staff_member.departments]
+        board_tasks_filter = [
+            BoardTask.responsible_staff_id == staff_member.id,
+            BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
+        ]
+        if staff_department_ids:
+            board_tasks_filter.append(BoardTask.assignees.any(BoardTaskAssignee.department_id.in_(staff_department_ids)))
+        board_tasks = BoardTask.query.filter(or_(*board_tasks_filter)).all()
     elif super_admin:
         board_tasks = BoardTask.query.filter(
             or_(
@@ -87,8 +89,8 @@ def get_my_tasks():
             'due_date': bt.due_date.isoformat() + 'T00:00:00Z' if bt.due_date else None,
             'lead_id': None,
             'lead_status': None,
-            'assigned_department_ids': [],
-            'assigned_department_names': [],
+            'assigned_department_ids': [item['id'] for item in bt_dict.get('assignees', []) if item.get('role') == 'department'],
+            'assigned_department_names': [item['name'] for item in bt_dict.get('assignees', []) if item.get('role') == 'department'],
             'assigned_staff_ids': [item['id'] for item in bt_dict.get('assignees', []) if item.get('role') == 'staff'],
             'assigned_staff_names': assignees,
             'created_by_staff_name': None,
@@ -177,11 +179,16 @@ def get_my_tasks_count():
     # 2. Count Board Tasks
     from app.models.board_model import BoardTask, BoardTaskAssignee
     if staff_member:
+        staff_department_ids = [dept.id for dept in staff_member.departments]
+        board_tasks_filter = [
+            BoardTask.responsible_staff_id == staff_member.id,
+            BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
+        ]
+        if staff_department_ids:
+            board_tasks_filter.append(BoardTask.assignees.any(BoardTaskAssignee.department_id.in_(staff_department_ids)))
+
         count += BoardTask.query.filter(
-            or_(
-                BoardTask.responsible_staff_id == staff_member.id,
-                BoardTask.assignees.any(BoardTaskAssignee.staff_id == staff_member.id)
-            ),
+            or_(*board_tasks_filter),
             BoardTask.status != 'Done'
         ).count()
     elif super_admin:

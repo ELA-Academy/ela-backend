@@ -291,7 +291,7 @@ def normalize_task_assignees(data):
     for assignee in assignees or []:
         assignee_id = assignee.get('id')
         assignee_role = assignee.get('role')
-        if not assignee_id or assignee_role not in {'staff', 'superadmin'}:
+        if not assignee_id or assignee_role not in {'staff', 'superadmin', 'department'}:
             continue
         normalized[f'{assignee_role}_{assignee_id}'] = {
             'id': int(assignee_id),
@@ -312,12 +312,13 @@ def sync_task_assignees(task, assignees):
             BoardTaskAssignee(
                 staff_id=assignee_id if assignee_role == 'staff' else None,
                 super_admin_id=assignee_id if assignee_role == 'superadmin' else None,
+                department_id=assignee_id if assignee_role == 'department' else None,
             )
         )
         if index == 0:
             if assignee_role == 'superadmin':
                 task.responsible_super_admin_id = assignee_id
-            else:
+            elif assignee_role == 'staff':
                 task.responsible_staff_id = assignee_id
 
 

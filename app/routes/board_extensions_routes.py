@@ -69,6 +69,139 @@ def format_ans_html(ans, label="", qtype=""):
 
     return s_ans
 
+def format_ans_email(ans, label="", qtype=""):
+    if ans is None or ans == "":
+        return "<em>(No response)</em>"
+
+    # Signature fields - format cleanly as text badge without embedding base64 images
+    if qtype == 'signature' or 'signature' in label.lower():
+        return "<span style='color: #475569; font-weight: 600;'>[Signature Provided — View in Dashboard]</span>"
+
+    # File fields - format cleanly as text label
+    if qtype == 'file' or 'file' in label.lower():
+        if isinstance(ans, dict):
+            fname = ans.get('filename') or 'Uploaded File'
+            return f"<span style='color: #673de6; font-weight: 600;'>[File Attached: {fname}]</span>"
+        return "<span style='color: #673de6; font-weight: 600;'>[File Uploaded — View in Dashboard]</span>"
+
+    if isinstance(ans, dict) and ('file_url' in ans or 'filename' in ans):
+        fname = ans.get('filename') or 'Uploaded File'
+        return f"<span style='color: #673de6; font-weight: 600;'>[File Attached: {fname}]</span>"
+
+    if isinstance(ans, list):
+        return ", ".join(map(str, ans))
+
+    s_ans = str(ans).strip()
+    if s_ans.startswith('data:image') or 'base64,' in s_ans:
+        return "<span style='color: #475569; font-weight: 600;'>[Signature / Image Provided — View in Dashboard]</span>"
+
+    if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
+        fname = s_ans.split('/')[-1]
+        return f"<span style='color: #673de6; font-weight: 600;'>[Attachment: {fname}]</span>"
+
+    return s_ans
+
+def dispatch_form_response_emails(form, task, response_data, form_struct, submitter_email=None, submitter_name=None):
+    try:
+        from app.utils.notifications import send_email_in_background
+        from app.models.department_model import Department
+        from app.models.staff_model import Staff
+        from app.models.super_admin_model import SuperAdmin
+
+        sub_name = submitter_name or 'Form Submitter'
+        sub_email_str = f" ({submitter_email})" if submitter_email else ""
+        
+        # Build clean HTML table of answers for email
+        rows_html = []
+        for question in form_struct:
+            qtype = question.get('type', '')
+            if qtype in ('welcome', 'thankyou'):
+                continue
+            qid = str(question.get('id'))
+            label = question.get('label') or f"Field {qid}"
+            ans = response_data.get(qid)
+            ans_formatted = format_ans_email(ans, label=label, qtype=qtype)
+            rows_html.append(f"""
+            <tr>
+                <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #334155; width: 40%;">{label}</td>
+                <td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">{ans_formatted}</td>
+            </tr>
+            """)
+
+        answers_table = "".join(rows_html)
+
+        email_html = f"""
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 650px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: #673de6; padding: 24px; text-align: center; color: #ffffff;">
+                <h2 style="margin: 0; font-size: 20px; font-weight: 700;">📋 Form Response: {form.name}</h2>
+                <p style="margin: 6px 0 0 0; font-size: 13px; opacity: 0.9;">Submitted by {sub_name}{sub_email_str}</p>
+            </div>
+            <div style="padding: 24px;">
+                <p style="font-size: 14px; color: #475569; margin-top: 0;">Below are the submitted responses for <strong>{form.name}</strong>:</p>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px;">
+                    {answers_table}
+                </table>
+                <div style="margin-top: 24px; padding: 12px 16px; background-color: #f8fafc; border-radius: 6px; border-left: 4px solid #673de6;">
+                    <p style="margin: 0; font-size: 12px; color: #64748b;">
+                        Task created automatically: <strong>{task.title}</strong>
+                    </p>
+                </div>
+            </div>
+        </div>
+        """
+
+        internal_recipients = set()
+        submitter_recipients = set()
+
+        if submitter_email and '@' in submitter_email:
+            submitter_recipients.add(submitter_email.strip())
+
+        # 1. Form Creator
+        if form.creator_staff_id:
+            c_staff = Staff.query.get(form.creator_staff_id)
+            if c_staff and c_staff.email:
+                internal_recipients.add(c_staff.email)
+        if form.creator_super_admin_id:
+            c_admin = SuperAdmin.query.get(form.creator_super_admin_id)
+            if c_admin and c_admin.email:
+                internal_recipients.add(c_admin.email)
+
+        # 2. Target Department / Creator's Department
+        dept = None
+        if getattr(form, 'target_department_id', None):
+            dept = Department.query.get(form.target_department_id)
+        elif form.creator_staff_id:
+            c_staff = Staff.query.get(form.creator_staff_id)
+            if c_staff and c_staff.departments:
+                dept = c_staff.departments[0]
+
+        if dept:
+            if getattr(dept, 'email', None):
+                internal_recipients.add(dept.email)
+            for m in dept.staff_members:
+                if m.email:
+                    internal_recipients.add(m.email)
+
+        # Dispatch emails
+        subject_internal = f"[Form Response] {form.name} — {sub_name}"
+        subject_submitter = f"Confirmation: Your submission for '{form.name}'"
+
+        from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background
+
+        if internal_recipients:
+            if is_ms_graph_configured():
+                send_email_via_graph_background(subject_internal, list(internal_recipients), email_html)
+            else:
+                send_email_in_background(subject_internal, list(internal_recipients), {"html_content": email_html})
+
+        if submitter_recipients:
+            if is_ms_graph_configured():
+                send_email_via_graph_background(subject_submitter, list(submitter_recipients), email_html)
+            else:
+                send_email_in_background(subject_submitter, list(submitter_recipients), {"html_content": email_html})
+    except Exception as e:
+        print("Failed to dispatch form response emails:", e)
+
 # ==========================================
 # 1. Custom Fields APIs
 # ==========================================
@@ -686,6 +819,11 @@ def submit_form_response(form_id):
         except Exception as notif_err:
             print(f"Failed to queue form submission notifications: {notif_err}")
 
+        # Dispatch emails to Submitter, Creator, and Department
+        sub_email = extracted_submitter_email or (actor.email if actor else None)
+        sub_name = actor.name if actor else 'Form Submitter'
+        dispatch_form_response_emails(form, task, response_data, form_struct, submitter_email=sub_email, submitter_name=sub_name)
+
         log_activity(actor, f"Submitted form response to '{form.name}' resulting in Task '{task.title}'")
         return jsonify({
             "message": "Form submitted successfully",
@@ -987,6 +1125,11 @@ def submit_public_form_response(form_id):
                 )
         except Exception as notif_err:
             print(f"Failed to queue form submission notifications: {notif_err}")
+
+        # Dispatch emails to Submitter, Creator, and Department
+        sub_email = extracted_submitter_email
+        sub_name = extracted_title or 'Public Submitter'
+        dispatch_form_response_emails(form, task, response_data, form_struct, submitter_email=sub_email, submitter_name=sub_name)
 
         log_activity(None, f"Public visitor submitted form response to '{form.name}' resulting in Task '{task.title}'")
         return jsonify({

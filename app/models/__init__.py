@@ -100,6 +100,10 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('board_form_configs', 'header_image_url', 'VARCHAR(500) NULL')
         add_column_if_missing('board_form_configs', 'creator_staff_id', 'INTEGER NULL')
         add_column_if_missing('board_form_configs', 'creator_super_admin_id', 'INTEGER NULL')
+        add_column_if_missing('board_form_configs', 'target_department_id', 'INTEGER NULL')
+
+    if inspector.has_table('board_task_assignees'):
+        add_column_if_missing('board_task_assignees', 'department_id', 'INTEGER NULL')
 
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
@@ -108,7 +112,7 @@ def init_db(app):
     # Import models here to ensure they're registered before creating tables
     with app.app_context():
         from app.models.super_admin_model import SuperAdmin
-        from app.models.login_otp_model import LoginOTP
+        from app.models.login_otp_model import LoginOTP, RememberedDevice
         from app.models.used_token_model import UsedToken
         from app.models.department_model import Department
         from app.models.staff_model import Staff
