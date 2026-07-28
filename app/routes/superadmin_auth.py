@@ -141,24 +141,36 @@ def verify_and_create_super_admin():
 
 
 from app.utils.email_otp import send_login_notice_email
+from app.routes.auth_routes import check_remembered_device, register_remembered_device
 
 @super_admin_bp.route('/login', methods=['POST'])
 def login_super_admin():
     data = request.get_json() or {}
-    email = data.get('email')
-    password = data.get('password')
+    email = (data.get('email') or '').strip()
+    password = data.get('password') or ''
+    device_id = data.get('device_id')
 
-    admin = SuperAdmin.query.filter_by(email=email).first()
+    admin = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
     if not admin or not admin.is_active or not admin.check_password(password):
         return jsonify({"msg": "Invalid email or password."}), 401
+
+    # Check 30-day Remembered Device
+    if device_id and check_remembered_device(email, device_id):
+        print(f"=== [DEVICE LOG] SuperAdmin '{email}' device remembered. Bypassing OTP. ===")
+        access_token = build_access_token(admin)
+        timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ip_address = request.remote_addr or '127.0.0.1'
+        device_str = request.user_agent.string or 'Unknown device'
+        send_login_notice_email(mail, admin.email, timestamp_str, ip_address, device_str)
+        return jsonify(access_token=access_token), 200
 
     # Generate OTP
     otp = generate_otp()
     
     # Save to database (deleting any existing pending OTPs for this email first)
-    LoginOTP.query.filter_by(email=email).delete()
+    LoginOTP.query.filter(db.func.lower(LoginOTP.email) == db.func.lower(email)).delete()
     login_otp_record = LoginOTP(
-        email=email,
+        email=admin.email,
         otp=otp,
         role="superadmin",
         claims={"admin_id": admin.id},
@@ -168,24 +180,26 @@ def login_super_admin():
     db.session.commit()
 
     # Log to console for testing/development
-    print(f"=== [OTP LOG] SuperAdmin Setup Login '{email}' OTP: {otp} ===")
+    print(f"=== [OTP LOG] SuperAdmin Setup Login '{admin.email}' OTP: {otp} ===")
 
     # Send OTP email
-    send_otp_email(mail, email, otp)
+    send_otp_email(mail, admin.email, otp)
 
-    return jsonify({"otp_required": True, "email": email, "role": "superadmin"}), 200
+    return jsonify({"otp_required": True, "email": admin.email, "role": "superadmin"}), 200
 
 
 @super_admin_bp.route('/verify-login-otp', methods=['POST'])
 def verify_login_otp():
     data = request.get_json() or {}
-    email = data.get('email')
-    otp_received = data.get('otp')
+    email = (data.get('email') or '').strip()
+    otp_received = (data.get('otp') or '').strip()
+    device_id = data.get('device_id')
+    remember_device = data.get('remember_device', True)
 
     if not email or not otp_received:
         return jsonify({"msg": "Email and OTP are required"}), 400
 
-    pending = LoginOTP.query.filter_by(email=email).order_by(LoginOTP.created_at.desc()).first()
+    pending = LoginOTP.query.filter(db.func.lower(LoginOTP.email) == db.func.lower(email)).order_by(LoginOTP.created_at.desc()).first()
     if not pending:
         return jsonify({"msg": "Invalid session or OTP expired. Please log in again."}), 400
 
@@ -194,7 +208,7 @@ def verify_login_otp():
         db.session.commit()
         return jsonify({"msg": "OTP has expired. Please log in again."}), 400
 
-    if pending.otp != otp_received:
+    if pending.otp.strip() != otp_received:
         return jsonify({"msg": "Invalid verification code"}), 400
 
     admin_id = None
@@ -210,6 +224,9 @@ def verify_login_otp():
     db.session.delete(pending)
     db.session.commit()
     access_token = build_access_token(admin)
+
+    if remember_device and device_id:
+        register_remembered_device(email, device_id, request)
 
     # Send successful login email notice
     timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -352,3 +369,46 @@ def delete_super_admin(admin_id):
     db.session.commit()
 
     return jsonify({"message": "Super admin deleted successfully"}), 200
+
+
+@super_admin_bp.route('/upgrade-staff/<int:staff_id>', methods=['POST'])
+@jwt_required()
+def upgrade_staff_to_superadmin(staff_id):
+    from app.models.staff_model import Staff
+    actor = get_current_super_admin()
+    if not actor:
+        return jsonify({"error": "Unauthorized actor"}), 401
+
+    staff = Staff.query.get_or_404(staff_id)
+    existing_admin = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(staff.email)).first()
+
+    if existing_admin:
+        if staff.password_hash and not existing_admin.password_hash:
+            existing_admin.password_hash = staff.password_hash
+        existing_admin.is_active = True
+        staff.is_active = False
+        db.session.commit()
+        log_activity(actor, f"Upgraded staff '{staff.name}' to SuperAdmin", existing_admin)
+        return jsonify({
+            "message": f"Staff member '{staff.name}' upgraded to SuperAdmin successfully.",
+            "superadmin": existing_admin.to_dict()
+        }), 200
+
+    new_admin = SuperAdmin(
+        name=staff.name,
+        email=staff.email,
+        is_active=True
+    )
+    new_admin.password_hash = staff.password_hash
+    db.session.add(new_admin)
+
+    # Deactivate staff record to prevent duplicate active accounts
+    staff.is_active = False
+
+    log_activity(actor, f"Upgraded staff '{staff.name}' to SuperAdmin", new_admin)
+    db.session.commit()
+
+    return jsonify({
+        "message": f"Staff member '{staff.name}' upgraded to SuperAdmin successfully.",
+        "superadmin": new_admin.to_dict()
+    }), 201

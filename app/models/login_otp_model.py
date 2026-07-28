@@ -28,3 +28,16 @@ class LoginOTP(db.Model):
             self._claims = json.dumps(value)
         else:
             self._claims = None
+
+
+class RememberedDevice(db.Model):
+    __tablename__ = 'remembered_devices'
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(150), nullable=False, index=True)
+    device_id = db.Column(db.String(255), nullable=False, index=True)
+    user_agent = db.Column(db.String(500), nullable=True)
+    ip_address = db.Column(db.String(100), nullable=True)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+

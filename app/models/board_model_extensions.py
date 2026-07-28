@@ -75,7 +75,10 @@ class BoardFormConfig(db.Model):
     header_image_url = db.Column(db.String(500), nullable=True)
     creator_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='SET NULL'), nullable=True)
     creator_super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='SET NULL'), nullable=True)
+    target_department_id = db.Column(db.Integer, db.ForeignKey('departments.id', ondelete='SET NULL'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    target_department = db.relationship('Department')
 
     def to_dict(self):
         struct = []
@@ -94,6 +97,8 @@ class BoardFormConfig(db.Model):
             'header_image_url': self.header_image_url,
             'creator_staff_id': self.creator_staff_id,
             'creator_super_admin_id': self.creator_super_admin_id,
+            'target_department_id': self.target_department_id,
+            'target_department_name': self.target_department.name if self.target_department else None,
             'created_at': self.created_at.isoformat() + 'Z'
         }
 

@@ -258,10 +258,12 @@ class BoardTaskAssignee(db.Model):
     task_id = db.Column(db.Integer, db.ForeignKey('board_tasks.id', ondelete='CASCADE'), nullable=False)
     staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
     super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
+    department_id = db.Column(db.Integer, db.ForeignKey('departments.id', ondelete='CASCADE'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     staff = db.relationship('Staff')
     super_admin = db.relationship('SuperAdmin')
+    department = db.relationship('Department')
 
     def to_dict(self):
         if self.super_admin:
@@ -277,6 +279,13 @@ class BoardTaskAssignee(db.Model):
                 'name': self.staff.name,
                 'email': self.staff.email,
                 'role': 'staff'
+            }
+        if self.department:
+            return {
+                'id': self.department.id,
+                'name': self.department.name,
+                'email': self.department.email or '',
+                'role': 'department'
             }
         return {'id': None, 'name': '', 'email': '', 'role': ''}
 
