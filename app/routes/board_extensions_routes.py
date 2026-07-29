@@ -300,12 +300,59 @@ def update_board_custom_field(field_id):
     field_type = data.get('type')
     config = data.get('config')
 
+    old_type = field.type
+
     if name:
         field.name = name.strip()
     if field_type:
         field.type = field_type
     if config is not None:
         field.config_json = json.dumps(config)
+
+    # Migrate existing values when field type changes
+    if field_type and field_type != old_type:
+        existing_values = TaskCustomFieldValue.query.filter_by(field_id=field_id).all()
+        for val_record in existing_values:
+            if val_record.value_json:
+                try:
+                    current_val = json.loads(val_record.value_json)
+                except:
+                    current_val = val_record.value_json
+
+                new_val = current_val
+
+                # Migrating TO multi_select/labels: convert string to array
+                if field_type in ('multi_select', 'labels'):
+                    if isinstance(current_val, str) and current_val.strip():
+                        if ',' in current_val:
+                            new_val = [v.strip() for v in current_val.split(',') if v.strip()]
+                        else:
+                            new_val = [current_val]
+                    elif not isinstance(current_val, list):
+                        new_val = [str(current_val)] if current_val else []
+
+                # Migrating FROM multi_select/labels to text/other: convert array to string
+                elif old_type in ('multi_select', 'labels'):
+                    if isinstance(current_val, list):
+                        new_val = ', '.join(str(v) for v in current_val)
+
+                # Migrating TO number/currency/rating: try to convert
+                elif field_type in ('number', 'currency', 'money', 'rating'):
+                    if isinstance(current_val, str):
+                        cleaned = ''.join(c for c in current_val if c.isdigit() or c in '.,-')
+                        try:
+                            new_val = float(cleaned) if '.' in cleaned else int(cleaned)
+                        except (ValueError, TypeError):
+                            new_val = None
+
+                # Migrating TO checkbox
+                elif field_type == 'checkbox':
+                    if isinstance(current_val, str):
+                        new_val = current_val.lower() in ('true', '1', 'yes', 'on')
+                    else:
+                        new_val = bool(current_val)
+
+                val_record.value_json = json.dumps(new_val)
 
     db.session.commit()
     log_activity(actor, f"Updated custom field: '{field.name}' (type: {field.type}) in board '{board.name}'")
