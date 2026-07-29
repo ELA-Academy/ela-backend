@@ -60,6 +60,7 @@ def create_staff():
     if is_invite:
         from flask_jwt_extended import create_access_token
         from datetime import timedelta
+        from flask import current_app
         from app import mail
         from app.utils.email_otp import send_staff_invite_email
         import os
@@ -70,6 +71,10 @@ def create_staff():
             additional_claims={"purpose": "setup-password", "name": name},
             expires_delta=timedelta(days=7)
         )
+
+        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+        frontend_url = os.getenv('FRONTEND_URL', frontend_url)
+        invite_link = f"{frontend_url}/setup-password?token={setup_token}"
         
         # Resolve department email for the invite
         from app.utils.ms_graph_email import get_dept_email_from_dept
@@ -79,7 +84,10 @@ def create_staff():
             if first_dept:
                 dept_email = get_dept_email_from_dept(first_dept)
 
-        send_staff_invite_email(mail, email, name, invite_link, sender_email=dept_email)
+        try:
+            send_staff_invite_email(mail, email, name, invite_link, sender_email=dept_email)
+        except Exception as e:
+            print(f"[STAFF INVITE EMAIL ERROR] Failed to send invite to {email}: {e}")
         
     db.session.commit()
     return jsonify(new_staff.to_dict()), 201
