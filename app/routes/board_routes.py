@@ -840,6 +840,7 @@ def create_task_update(task_id):
 
         send_via_email = data.get('send_via_email', False)
         to_email = data.get('to_email')
+        cc_email = data.get('cc_email')
         subject_override = data.get('subject')
 
         new_update = TaskUpdate(task_id=task.id, content=content, sender_name=actor.name)
@@ -957,8 +958,15 @@ def create_task_update(task_id):
                 sender_dept_email = get_department_sender_email(actor)
                 email_html = format_task_comment_email(actor.name, task.title, content, board.name)
                 
-                # Collect unique recipient emails
+                # Collect unique recipient emails & CC emails
                 recipient_emails = set()
+                cc_emails = set()
+
+                if cc_email and isinstance(cc_email, str):
+                    for addr in cc_email.split(','):
+                        clean_addr = addr.strip()
+                        if '@' in clean_addr:
+                            cc_emails.add(clean_addr)
 
                 # 1. If explicit to_email is provided (e.g. form submitter's email), add it
                 has_explicit_to = False
@@ -969,31 +977,31 @@ def create_task_update(task_id):
                             recipient_emails.add(clean_addr)
                             has_explicit_to = True
 
-                # 2. Add task assignees and responsible staff
-                from app.models.staff_model import Staff
-                from app.models.super_admin_model import SuperAdmin
-                
-                if task.responsible_staff_id:
-                    resp = Staff.query.get(task.responsible_staff_id)
-                    if resp and resp.email:
-                        recipient_emails.add(resp.email)
-                if task.responsible_super_admin_id:
-                    resp = SuperAdmin.query.get(task.responsible_super_admin_id)
-                    if resp and resp.email:
-                        recipient_emails.add(resp.email)
-                for ass in task.assignees:
-                    if ass.staff_id:
-                        u = Staff.query.get(ass.staff_id)
-                        if u and u.email:
-                            recipient_emails.add(u.email)
-                    elif ass.super_admin_id:
-                        u = SuperAdmin.query.get(ass.super_admin_id)
-                        if u and u.email:
-                            recipient_emails.add(u.email)
-                
-                # Remove the sender's own email ONLY if no explicit to_email was typed
-                if not has_explicit_to and hasattr(actor, 'email') and actor.email in recipient_emails and len(recipient_emails) > 1:
-                    recipient_emails.discard(actor.email)
+                # 2. Add task assignees and responsible staff ONLY IF no explicit to_email was provided
+                if not has_explicit_to:
+                    from app.models.staff_model import Staff
+                    from app.models.super_admin_model import SuperAdmin
+                    
+                    if task.responsible_staff_id:
+                        resp = Staff.query.get(task.responsible_staff_id)
+                        if resp and resp.email:
+                            recipient_emails.add(resp.email)
+                    if task.responsible_super_admin_id:
+                        resp = SuperAdmin.query.get(task.responsible_super_admin_id)
+                        if resp and resp.email:
+                            recipient_emails.add(resp.email)
+                    for ass in task.assignees:
+                        if ass.staff_id:
+                            u = Staff.query.get(ass.staff_id)
+                            if u and u.email:
+                                recipient_emails.add(u.email)
+                        elif ass.super_admin_id:
+                            u = SuperAdmin.query.get(ass.super_admin_id)
+                            if u and u.email:
+                                recipient_emails.add(u.email)
+                    
+                    if hasattr(actor, 'email') and actor.email in recipient_emails and len(recipient_emails) > 1:
+                        recipient_emails.discard(actor.email)
                 
                 email_subject = subject_override if subject_override else f"[Task Email] {task.title} — {board.name}"
 
@@ -1003,11 +1011,12 @@ def create_task_update(task_id):
                             subject=email_subject,
                             recipients=list(recipient_emails),
                             html_content=email_html,
-                            sender_email=sender_dept_email
+                            sender_email=sender_dept_email,
+                            cc_recipients=list(cc_emails) if cc_emails else None
                         )
-                        print(f"[Email Comment] Sent from {sender_dept_email} to {recipient_emails} with subject '{email_subject}'")
+                        print(f"[Email Comment] Sent from {sender_dept_email} to {recipient_emails} (CC: {cc_emails}) with subject '{email_subject}'")
                     else:
-                        print(f"[Email Comment Notice] MS_GRAPH credentials not set in .env on localhost. Email from {sender_dept_email} to {recipient_emails} prepared successfully.")
+                        print(f"[Email Comment Notice] MS_GRAPH credentials not set in .env on localhost. Email from {sender_dept_email} to {recipient_emails} (CC: {cc_emails}) prepared successfully.")
             except Exception as email_err:
                 print(f"[Email Comment Error] {email_err}")
 

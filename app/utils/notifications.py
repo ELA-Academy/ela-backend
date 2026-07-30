@@ -38,8 +38,14 @@ def send_email_in_background(subject, recipients, template_data, sender_email=No
             from app import create_app
             app = create_app()
 
-        with app.test_request_context('/'):
-            html_body = render_template('email/notification.html', **template_data)
+        raw_content = template_data.get('html_content') or template_data.get('html_body') or template_data.get('message')
+        if raw_content and ('<!doctype html' in str(raw_content).lower() or '<table' in str(raw_content).lower() or '<div style=' in str(raw_content).lower()):
+            html_body = str(raw_content)
+        else:
+            if 'message' not in template_data and raw_content:
+                template_data['message'] = raw_content
+            with app.test_request_context('/'):
+                html_body = render_template('email/notification.html', **template_data)
 
         # 1. Use Microsoft Graph API if credentials are set
         if is_ms_graph_configured():
