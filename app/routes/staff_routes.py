@@ -8,10 +8,27 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 
 staff_bp = Blueprint('staff', __name__)
 
-# Helper to get the current super admin actor
+import re
+
+def is_it_department_name(name):
+    if not name:
+        return False
+    clean = name.strip().lower()
+    return bool(re.search(r'\b(it|information technology|info tech|tech)\b', clean))
+
+# Helper to get the current authorized actor (SuperAdmin or IT Department Staff)
 def get_actor():
     email = get_jwt_identity()
-    return SuperAdmin.query.filter_by(email=email).first()
+    admin = SuperAdmin.query.filter_by(email=email).first()
+    if admin:
+        return admin
+
+    staff = Staff.query.filter_by(email=email).first()
+    if staff and getattr(staff, 'is_active', True):
+        for dept in staff.departments:
+            if is_it_department_name(dept.name):
+                return staff
+    return None
 
 @staff_bp.route('', methods=['POST'])
 @jwt_required()
