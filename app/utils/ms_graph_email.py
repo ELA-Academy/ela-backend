@@ -89,7 +89,7 @@ def resolve_sender_email(sender_input=None):
 
     return DEFAULT_SENDER
 
-def send_email_via_graph(subject, recipients, html_content, sender_email=None, save_to_sent=True):
+def send_email_via_graph(subject, recipients, html_content, sender_email=None, cc_recipients=None, save_to_sent=True):
     """
     Sends an HTML email via Microsoft Graph API sendMail endpoint.
     
@@ -97,6 +97,7 @@ def send_email_via_graph(subject, recipients, html_content, sender_email=None, s
     :param recipients: List of recipient email addresses (or single email string)
     :param html_content: HTML body string
     :param sender_email: Department mailbox or email string (e.g. 'admissions@ela-academy.org')
+    :param cc_recipients: List of CC recipient email addresses (or single email string)
     :param save_to_sent: Boolean flag to save message in sender's Sent Items folder
     """
     token = get_graph_access_token()
@@ -118,28 +119,41 @@ def send_email_via_graph(subject, recipients, html_content, sender_email=None, s
         print("[MS Graph Email] No valid recipients provided.")
         return False
 
+    cc_recipients_payload = []
+    if cc_recipients:
+        if isinstance(cc_recipients, str):
+            cc_recipients = [cc_recipients]
+        cc_recipients_payload = [
+            {"emailAddress": {"address": addr.strip()}}
+            for addr in cc_recipients if addr and "@" in addr
+        ]
+
     endpoint = f"https://graph.microsoft.com/v1.0/users/{actual_sender}/sendMail"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    body = {
-        "message": {
-            "subject": subject,
-            "body": {
-                "contentType": "HTML",
-                "content": html_content
-            },
-            "toRecipients": to_recipients_payload
+    message_payload = {
+        "subject": subject,
+        "body": {
+            "contentType": "HTML",
+            "content": html_content
         },
+        "toRecipients": to_recipients_payload
+    }
+    if cc_recipients_payload:
+        message_payload["ccRecipients"] = cc_recipients_payload
+
+    body = {
+        "message": message_payload,
         "saveToSentItems": "true" if save_to_sent else "false"
     }
 
     try:
         response = requests.post(endpoint, headers=headers, json=body, timeout=15)
         if response.status_code in [200, 202]:
-            print(f"[MS Graph Email Success] Email '{subject}' sent from {actual_sender} to {recipients}")
+            print(f"[MS Graph Email Success] Email '{subject}' sent from {actual_sender} to {recipients} (CC: {cc_recipients})")
             return True
         else:
             print(f"[MS Graph Email Failure] Status {response.status_code} from {actual_sender}: {response.text}")
@@ -148,12 +162,12 @@ def send_email_via_graph(subject, recipients, html_content, sender_email=None, s
         print(f"[MS Graph Email Exception] Exception sending from {actual_sender}: {e}")
         return False
 
-def _async_graph_send(subject, recipients, html_content, sender_email):
-    send_email_via_graph(subject, recipients, html_content, sender_email)
+def _async_graph_send(subject, recipients, html_content, sender_email, cc_recipients):
+    send_email_via_graph(subject, recipients, html_content, sender_email=sender_email, cc_recipients=cc_recipients)
 
-def send_email_via_graph_background(subject, recipients, html_content, sender_email=None):
+def send_email_via_graph_background(subject, recipients, html_content, sender_email=None, cc_recipients=None):
     """Dispatches email sending via Microsoft Graph API in a non-blocking background thread."""
-    thread = Thread(target=_async_graph_send, args=(subject, recipients, html_content, sender_email))
+    thread = Thread(target=_async_graph_send, args=(subject, recipients, html_content, sender_email, cc_recipients))
     thread.daemon = True
     thread.start()
     return thread
@@ -243,3 +257,132 @@ def format_task_comment_email(sender_name, task_title, comment_content, board_na
         </div>
     </div>
     """
+
+def format_submitter_confirmation_email(form_name, submitter_name, answers_table_html, school_name="Ela Academy"):
+    """Generate executive styled HTML email confirmation for form submitters."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Submission Confirmation</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed; background-color: #f8fafc; padding: 40px 0;">
+        <tr>
+            <td align="center">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); padding: 32px 36px; text-align: left;">
+                            <div style="display: inline-block; background-color: rgba(255, 255, 255, 0.2); color: #ffffff; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px;">
+                                {school_name}
+                            </div>
+                            <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 700; line-height: 1.3;">
+                                Submission Confirmation
+                            </h1>
+                            <p style="margin: 6px 0 0 0; color: #e0e7ff; font-size: 14px;">
+                                Form: {form_name}
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 36px;">
+                            <p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.6; color: #334155; font-weight: 600;">
+                                Dear {submitter_name or 'Applicant'},
+                            </p>
+                            <p style="margin: 0 0 24px 0; font-size: 14px; line-height: 1.6; color: #475569;">
+                                Thank you for reaching out to <strong>{school_name}</strong>. We have successfully received your submission for <strong>{form_name}</strong>. Our team is currently reviewing your information and will be in touch with you shortly.
+                            </p>
+                            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+                                <h3 style="margin: 0 0 16px 0; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em;">
+                                    Submission Details Summary
+                                </h3>
+                                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-size: 13px; border-collapse: collapse;">
+                                    {answers_table_html}
+                                </table>
+                            </div>
+                            <div style="background-color: #eef2ff; border-left: 4px solid #4f46e5; border-radius: 0 6px 6px 0; padding: 14px 18px; margin-bottom: 24px;">
+                                <p style="margin: 0; font-size: 13px; color: #3730a3; line-height: 1.5;">
+                                    💡 <strong>Need to follow up or reply?</strong> Simply reply directly to this email message to communicate directly with our team.
+                                </p>
+                            </div>
+                            <p style="margin: 0; font-size: 14px; line-height: 1.6; color: #475569;">
+                                Best regards,<br>
+                                <strong style="color: #1e293b;">{school_name} Team</strong>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="background-color: #f1f5f9; padding: 20px 36px; text-align: center; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0; font-size: 12px; color: #64748b;">
+                                This is an official automated notification from {school_name}.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
+def format_department_notification_email(form_name, submitter_name, submitter_email, task_title, answers_table_html, school_name="Ela Academy"):
+    """Generate executive styled HTML email notification for internal departments."""
+    sub_info = f"{submitter_name}" + (f" ({submitter_email})" if submitter_email else "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Form Submission</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed; background-color: #f8fafc; padding: 40px 0;">
+        <tr>
+            <td align="center">
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 600px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 28px 36px; text-align: left;">
+                            <div style="display: inline-block; background-color: rgba(255, 255, 255, 0.15); color: #ffffff; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 10px;">
+                                INTERNAL ALERT | {school_name}
+                            </div>
+                            <h1 style="margin: 0; color: #ffffff; font-size: 20px; font-weight: 700;">
+                                📋 New Form Submission Received
+                            </h1>
+                            <p style="margin: 4px 0 0 0; color: #94a3b8; font-size: 13px;">
+                                Form: {form_name}
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 32px;">
+                            <div style="background-color: #f1f5f9; border-radius: 8px; padding: 14px 18px; margin-bottom: 24px;">
+                                <p style="margin: 0 0 4px 0; font-size: 11px; color: #64748b; font-weight: 700; text-transform: uppercase;">Submitted By</p>
+                                <p style="margin: 0; font-size: 15px; color: #0f172a; font-weight: 700;">{sub_info}</p>
+                            </div>
+                            <h3 style="margin: 0 0 12px 0; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em;">
+                                Submitted Responses
+                            </h3>
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-size: 13px; border-collapse: collapse; margin-bottom: 24px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;">
+                                {answers_table_html}
+                            </table>
+                            <div style="background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 0 6px 6px 0;">
+                                <p style="margin: 0; font-size: 13px; color: #1e40af;">
+                                    📌 <strong>Task Created:</strong> {task_title}
+                                </p>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="background-color: #f1f5f9; padding: 18px 36px; text-align: center; border-top: 1px solid #e2e8f0;">
+                            <p style="margin: 0; font-size: 12px; color: #64748b;">
+                                {school_name} Automated Notification System
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""

@@ -467,6 +467,45 @@ def rename_channel(channel_id):
     }), 200
 
 
+@messaging_bp.route('/channels/<int:channel_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required(optional=True)
+def delete_channel(channel_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    conversation = Conversation.query.get_or_404(channel_id)
+    if conversation.conversation_type not in ('channel', 'department'):
+        return jsonify({"error": "Can only delete channels or department threads"}), 400
+
+    # Delete all associated message logs, messages, reactions & participants
+    from app.models.message_log_model import MessageLog
+    MessageLog.query.filter_by(conversation_id=conversation.id).delete(synchronize_session=False)
+
+    MessageReaction.query.filter(
+        MessageReaction.message_id.in_(
+            db.session.query(Message.id).filter_by(conversation_id=conversation.id)
+        )
+    ).delete(synchronize_session=False)
+
+    Message.query.filter_by(conversation_id=conversation.id).delete(synchronize_session=False)
+    ConversationParticipant.query.filter_by(conversation_id=conversation.id).delete(synchronize_session=False)
+
+    db.session.delete(conversation)
+    db.session.commit()
+
+    try:
+        from app import socketio
+        socketio.emit('conversation_deleted', {'conversation_id': channel_id})
+    except Exception as e:
+        print("Socket emit failed on delete_channel:", e)
+
+    return jsonify({"message": "Channel deleted successfully"}), 200
+
+
 @messaging_bp.route('/conversations/<int:conversation_id>/unfollow', methods=['POST'])
 @jwt_required()
 def unfollow_conversation(conversation_id):
@@ -542,6 +581,24 @@ def get_messages(conversation_id):
     participant_entry = get_or_create_participant_entry(conversation, user, role)
     old_last_read_at = participant_entry.last_read_at
     participant_entry.last_read_at = datetime.now(timezone.utc)
+
+    # Automatically mark associated in-app notifications as read for this conversation
+    try:
+        if role == 'superadmin':
+            Notification.query.filter(
+                Notification.super_admin_id == user.id,
+                Notification.is_read == False,
+                Notification.target_link.like(f"%conversation={conversation_id}%")
+            ).update({'is_read': True}, synchronize_session=False)
+        else:
+            Notification.query.filter(
+                Notification.staff_id == user.id,
+                Notification.is_read == False,
+                Notification.target_link.like(f"%conversation={conversation_id}%")
+            ).update({'is_read': True}, synchronize_session=False)
+    except Exception as notif_e:
+        print("Failed to auto-mark notifications read on conversation view:", notif_e)
+
     db.session.commit()
 
     messages = conversation.messages.all()

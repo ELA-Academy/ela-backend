@@ -130,25 +130,16 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
 
         answers_table = "".join(rows_html)
 
-        email_html = f"""
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 650px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
-            <div style="background-color: #673de6; padding: 24px; text-align: center; color: #ffffff;">
-                <h2 style="margin: 0; font-size: 20px; font-weight: 700;">📋 Form Response: {form.name}</h2>
-                <p style="margin: 6px 0 0 0; font-size: 13px; opacity: 0.9;">Submitted by {sub_name}{sub_email_str}</p>
-            </div>
-            <div style="padding: 24px;">
-                <p style="font-size: 14px; color: #475569; margin-top: 0;">Below are the submitted responses for <strong>{form.name}</strong>:</p>
-                <table style="width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px;">
-                    {answers_table}
-                </table>
-                <div style="margin-top: 24px; padding: 12px 16px; background-color: #f8fafc; border-radius: 6px; border-left: 4px solid #673de6;">
-                    <p style="margin: 0; font-size: 12px; color: #64748b;">
-                        Task created automatically: <strong>{task.title}</strong>
-                    </p>
-                </div>
-            </div>
-        </div>
-        """
+        from app.utils.ms_graph_email import (
+            is_ms_graph_configured,
+            send_email_via_graph_background,
+            get_department_sender_email,
+            format_submitter_confirmation_email,
+            format_department_notification_email
+        )
+
+        email_html_submitter = format_submitter_confirmation_email(form.name, sub_name, answers_table)
+        email_html_internal = format_department_notification_email(form.name, sub_name, submitter_email, task.title, answers_table)
 
         internal_recipients = set()
         submitter_recipients = set()
@@ -182,23 +173,29 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
                 if m.email:
                     internal_recipients.add(m.email)
 
-        # Dispatch emails
+        # Dispatch emails using department email sender
         subject_internal = f"[Form Response] {form.name} — {sub_name}"
         subject_submitter = f"Confirmation: Your submission for '{form.name}'"
 
-        from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background
+        sender_dept_email = None
+        if dept and getattr(dept, 'email', None):
+            sender_dept_email = dept.email
+        elif form.creator_staff_id:
+            c_staff = Staff.query.get(form.creator_staff_id)
+            if c_staff:
+                sender_dept_email = get_department_sender_email(c_staff)
 
         if internal_recipients:
             if is_ms_graph_configured():
-                send_email_via_graph_background(subject_internal, list(internal_recipients), email_html)
+                send_email_via_graph_background(subject_internal, list(internal_recipients), email_html_internal, sender_email=sender_dept_email)
             else:
-                send_email_in_background(subject_internal, list(internal_recipients), {"html_content": email_html})
+                send_email_in_background(subject_internal, list(internal_recipients), {"html_content": email_html_internal, "message": email_html_internal}, sender_email=sender_dept_email)
 
         if submitter_recipients:
             if is_ms_graph_configured():
-                send_email_via_graph_background(subject_submitter, list(submitter_recipients), email_html)
+                send_email_via_graph_background(subject_submitter, list(submitter_recipients), email_html_submitter, sender_email=sender_dept_email)
             else:
-                send_email_in_background(subject_submitter, list(submitter_recipients), {"html_content": email_html})
+                send_email_in_background(subject_submitter, list(submitter_recipients), {"html_content": email_html_submitter, "message": email_html_submitter}, sender_email=sender_dept_email)
     except Exception as e:
         print("Failed to dispatch form response emails:", e)
 
