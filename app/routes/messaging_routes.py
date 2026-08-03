@@ -43,11 +43,12 @@ def get_current_user():
 
 
 def participant_filters_for_user(conversation_id, user, role):
-    return {
-        'conversation_id': conversation_id,
-        'staff_id': user.id if role == 'staff' else None,
-        'super_admin_id': user.id if role == 'superadmin' else None,
-    }
+    filters = {'conversation_id': conversation_id}
+    if role == 'superadmin':
+        filters['super_admin_id'] = user.id
+    else:
+        filters['staff_id'] = user.id
+    return filters
 
 
 def get_participant_entry(conversation_id, user, role):
@@ -143,8 +144,13 @@ def can_access_conversation(user, role, conversation):
     if role == 'superadmin':
         return True
 
-    if conversation.conversation_type in ('channel', 'department'):
+    if conversation.conversation_type == 'channel':
         return True
+
+    if conversation.conversation_type == 'department':
+        if not conversation.department_id:
+            return True
+        return any(dept.id == conversation.department_id for dept in user.departments)
 
     if conversation.conversation_type == 'private_channel':
         return part is not None
@@ -457,6 +463,73 @@ def create_channel():
 
     db.session.add(channel)
     db.session.commit()
+
+    # If it is a private channel, automatically notify all invited participants via in-app notification and email
+    if conversation_type == 'private_channel':
+        from app.utils.notifications import enqueue_user_notification
+        for p in channel.participants:
+            # Skip creator
+            if role == 'superadmin' and p.super_admin_id == user.id:
+                continue
+            if role == 'staff' and p.staff_id == user.id:
+                continue
+
+            p_obj = None
+            p_role = None
+            if p.staff_id:
+                p_obj = p.staff
+                p_role = 'staff'
+            elif p.super_admin_id:
+                p_obj = p.super_admin
+                p_role = 'superadmin'
+
+            if p_obj:
+                try:
+                    enqueue_user_notification(
+                        user_id=p_obj.id,
+                        user_role=p_role,
+                        message=f"You have been added to the private channel '{channel.name}'.",
+                        category='channel_invite',
+                        target_type="Conversation",
+                        target_id=channel.id,
+                        target_link=f"/admin/messaging?conversation={channel.id}"
+                    )
+
+                    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+                    action_link = f"{frontend_url}/admin/messaging?conversation={channel.id}"
+                    email_data = {
+                        'message': f"You have been added to a new private channel '{channel.name}' by {user.name}.",
+                        'action_link': action_link
+                    }
+                    send_email_in_background(
+                        subject=f"Added to private channel '{channel.name}'",
+                        recipients=[p_obj.email],
+                        template_data=email_data
+                    )
+
+                    push_payload = {
+                        "title": f"Added to private channel '{channel.name}'",
+                        "body": f"You were added to a new private channel '{channel.name}' by {user.name}.",
+                        "url": f"/admin/messaging?conversation={channel.id}"
+                    }
+                    send_push_notification(p_obj, push_payload)
+                except Exception as e:
+                    current_app.logger.error(f"Error notifying participant {p_role}_{p_obj.id}: {e}")
+
+        # Broadcast conversation_updated socket events so everyone added sees the new channel instantly!
+        from app import socketio
+        for p in channel.participants:
+            p_id = p.staff_id or p.super_admin_id
+            p_role = 'staff' if p.staff_id else 'superadmin'
+            if p_id:
+                try:
+                    socketio.emit('conversation_updated', {
+                        'conversation_id': channel.id,
+                        'recipient_id': p_id,
+                        'recipient_role': p_role
+                    })
+                except Exception as e:
+                    current_app.logger.error(f"Error emitting conversation_updated for {p_role}_{p_id}: {e}")
 
     return jsonify({
         "id": channel.id,
