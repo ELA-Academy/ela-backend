@@ -146,6 +146,9 @@ def can_access_conversation(user, role, conversation):
     if conversation.conversation_type in ('channel', 'department'):
         return True
 
+    if conversation.conversation_type == 'private_channel':
+        return part is not None
+
     return any(item.id == conversation.id for item in user.conversations)
 
 
@@ -158,7 +161,7 @@ def get_accessible_conversations(user, role):
             part = get_participant_entry(conversation.id, user, role)
             if part and not part.is_following:
                 continue
-            if conversation.conversation_type != 'direct' or part:
+            if conversation.conversation_type not in ('direct', 'private_channel') or part:
                 filtered.append(conversation)
         return filtered
     return [conversation for conversation in conversations if can_access_conversation(user, role, conversation)]
@@ -214,10 +217,19 @@ def recipients_for_conversation(conversation, sender, sender_role):
             if f"staff_{staff_member.id}" != sender_key:
                 recipients.append((staff_member, 'staff'))
 
-    for participant in conversation.participants:
-        admin = participant.super_admin
-        if admin and f"superadmin_{admin.id}" != sender_key:
-            recipients.append((admin, 'superadmin'))
+    if conversation.conversation_type == 'private_channel':
+        for participant in conversation.participants:
+            recipient = participant.staff or participant.super_admin
+            if not recipient:
+                continue
+            recipient_role = 'staff' if participant.staff_id else 'superadmin'
+            if f"{recipient_role}_{recipient.id}" != sender_key:
+                recipients.append((recipient, recipient_role))
+    else:
+        for participant in conversation.participants:
+            admin = participant.super_admin
+            if admin and f"superadmin_{admin.id}" != sender_key:
+                recipients.append((admin, 'superadmin'))
 
     unique_recipients = {}
     for recipient, recipient_role in recipients:
@@ -381,8 +393,9 @@ def create_channel():
     name = (data.get('name') or '').strip()
     conversation_type = data.get('conversation_type', 'channel')
     department_id = data.get('department_id')
+    participant_ids = data.get('participant_ids', [])
 
-    if conversation_type not in {'channel', 'department'}:
+    if conversation_type not in {'channel', 'private_channel', 'department'}:
         return jsonify({"error": "Invalid conversation type."}), 400
 
     if not name:
@@ -411,6 +424,37 @@ def create_channel():
         name=name,
         department_id=department_id
     )
+
+    # If it is a private channel, add participants
+    if conversation_type == 'private_channel':
+        # Add creator
+        if role == 'superadmin':
+            channel.participants.append(ConversationParticipant(super_admin=user))
+        else:
+            channel.participants.append(ConversationParticipant(staff=user))
+            
+        # Add selected participants
+        added_keys = {f"{role}_{user.id}"}
+        for participant_token in participant_ids:
+            if participant_token in added_keys:
+                continue
+            added_keys.add(participant_token)
+            
+            try:
+                participant_role, participant_id_str = participant_token.split('_', 1)
+                participant_id = int(participant_id_str)
+                
+                if participant_role == 'staff':
+                    p_obj = Staff.query.get(participant_id)
+                    if p_obj:
+                        channel.participants.append(ConversationParticipant(staff=p_obj))
+                elif participant_role == 'superadmin':
+                    p_obj = SuperAdmin.query.get(participant_id)
+                    if p_obj:
+                        channel.participants.append(ConversationParticipant(super_admin=p_obj))
+            except Exception:
+                pass
+
     db.session.add(channel)
     db.session.commit()
 
@@ -424,7 +468,7 @@ def create_channel():
         "conversation_type": channel.conversation_type,
         "department_id": channel.department_id,
         "department_name": department.name if department else None,
-        "is_restricted": channel.conversation_type == 'department'
+        "is_restricted": channel.conversation_type in ('department', 'private_channel')
     }), 201
 
 
@@ -439,7 +483,7 @@ def rename_channel(channel_id):
         return jsonify({"error": "Unauthorized"}), 401
     
     conversation = Conversation.query.get_or_404(channel_id)
-    if conversation.conversation_type not in ('channel', 'department'):
+    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
         return jsonify({"error": "Can only rename channels or department threads"}), 400
 
     data = request.get_json() or {}
@@ -478,7 +522,7 @@ def delete_channel(channel_id):
         return jsonify({"error": "Unauthorized"}), 401
 
     conversation = Conversation.query.get_or_404(channel_id)
-    if conversation.conversation_type not in ('channel', 'department'):
+    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
         return jsonify({"error": "Can only delete channels or department threads"}), 400
 
     # Delete all associated message logs, messages, reactions & participants
@@ -515,7 +559,7 @@ def unfollow_conversation(conversation_id):
         return jsonify({"error": "User not found"}), 404
 
     conversation = Conversation.query.get_or_404(conversation_id)
-    if conversation.conversation_type not in ('channel', 'department'):
+    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
         return jsonify({"error": "You can only unfollow channels."}), 400
 
     participant = get_participant_entry(conversation_id, user, role)

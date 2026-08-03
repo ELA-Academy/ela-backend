@@ -199,8 +199,13 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
     if target_obj:
         if target_obj.__class__.__name__ == 'Lead':
             resolved_link = f"/admin/admissions/leads/{target_obj.secure_token}"
-        elif target_obj.__class__.__name__ == 'Task' and hasattr(target_obj, 'lead'):
-            resolved_link = f"/admin/admissions/leads/{target_obj.lead.secure_token}"
+        elif target_obj.__class__.__name__ in ['BoardTask', 'Task']:
+            if hasattr(target_obj, 'group') and target_obj.group:
+                resolved_link = f"/admin/boards/{target_obj.group.board_id}?task={target_obj.id}"
+            elif hasattr(target_obj, 'lead') and target_obj.lead:
+                resolved_link = f"/admin/admissions/leads/{target_obj.lead.secure_token}"
+            else:
+                resolved_link = f"/admin/tasks?task={target_obj.id}"
 
     # Insert non-blocking request to the queue
     from app.models.notification_request_model import NotificationRequest

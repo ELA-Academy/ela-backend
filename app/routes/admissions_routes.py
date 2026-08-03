@@ -11,9 +11,46 @@ from datetime import datetime
 
 admissions_bp = Blueprint('admissions', __name__)
 
+@admissions_bp.route('/captcha-challenge', methods=['GET'])
+def get_captcha_challenge():
+    import random
+    from itsdangerous import URLSafeSerializer
+    from flask import current_app
+    
+    a = random.randint(1, 10)
+    b = random.randint(1, 10)
+    ans = a + b
+    
+    serializer = URLSafeSerializer(current_app.config['SECRET_KEY'], salt='captcha-salt')
+    token = serializer.dumps({"ans": ans})
+    
+    return jsonify({
+        "question": f"Please solve: {a} + {b} = ?",
+        "token": token
+    }), 200
+
+
 @admissions_bp.route('/leads', methods=['POST'])
 def create_lead():
-    data = request.get_json()
+    data = request.get_json() or {}
+    
+    # Stateless Captcha Verification
+    captcha_token = data.get('captcha_token')
+    captcha_answer = data.get('captcha_answer')
+    if not captcha_token or not captcha_answer:
+        return jsonify({"error": "Captcha verification is required."}), 400
+        
+    from itsdangerous import URLSafeSerializer
+    from flask import current_app
+    try:
+        serializer = URLSafeSerializer(current_app.config['SECRET_KEY'], salt='captcha-salt')
+        decrypted = serializer.loads(captcha_token)
+        expected = decrypted.get('ans')
+        if int(captcha_answer) != int(expected):
+            return jsonify({"error": "Incorrect captcha solution. Please try again."}), 400
+    except Exception:
+        return jsonify({"error": "Invalid or expired captcha token. Please refresh the page."}), 400
+
     students_data = data.get('students', [])
     parents_data = data.get('parents', [])
     if not students_data or not parents_data:
@@ -48,17 +85,156 @@ def create_lead():
     log_activity(None, "Submitted a new admission application", new_lead)
 
     admissions_dept = Department.query.filter_by(name="Admission Department").first()
+    recipients = []
     if admissions_dept and admissions_dept.staff_members:
+        recipients = admissions_dept.staff_members
+    else:
+        from app.models.super_admin_model import SuperAdmin
+        recipients = SuperAdmin.query.all()
+
+    if recipients:
         student_name = f"{students_data[0]['first_name']} {students_data[0]['last_name']}"
         message = f"A new admission application has been submitted for {student_name}."
         create_notifications_and_send_emails(
-            recipients=admissions_dept.staff_members,
+            recipients=recipients,
             message=message,
             target_obj=new_lead
         )
 
     db.session.commit()
     return jsonify(new_lead.to_dict()), 201
+
+
+@admissions_bp.route('/live-look-in', methods=['POST'])
+def create_live_look_in():
+    import json
+    from app.models.board_model import Board, BoardGroup, BoardTask
+    from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+    
+    data = request.get_json() or {}
+    
+    # Stateless Captcha Verification
+    captcha_token = data.get('captcha_token')
+    captcha_answer = data.get('captcha_answer')
+    if not captcha_token or not captcha_answer:
+        return jsonify({"error": "Captcha verification is required."}), 400
+        
+    from itsdangerous import URLSafeSerializer
+    from flask import current_app
+    try:
+        serializer = URLSafeSerializer(current_app.config['SECRET_KEY'], salt='captcha-salt')
+        decrypted = serializer.loads(captcha_token)
+        expected = decrypted.get('ans')
+        if int(captcha_answer) != int(expected):
+            return jsonify({"error": "Incorrect captcha solution. Please try again."}), 400
+    except Exception:
+        return jsonify({"error": "Invalid or expired captcha token. Please refresh the page."}), 400
+
+    name = data.get('name')
+    email = data.get('email')
+    phone = data.get('phone')
+    grade = data.get('grade')
+    message = data.get('message')
+    
+    if not name or not email:
+        return jsonify({"error": "Name and Email are required."}), 400
+        
+    # Dynamic board mapping: Query param board_id, space, or body board_id
+    board_id_val = request.args.get('board_id') or request.args.get('space') or data.get('board_id')
+    board = None
+    if board_id_val:
+        try:
+            board = Board.query.get(int(board_id_val))
+        except Exception:
+            pass
+            
+    if not board:
+        # Find board/space named "Live Look-in" (case-insensitive)
+        board = Board.query.filter(Board.name.ilike('%Live Look-in%')).first()
+        
+    if not board:
+        # Fallback: use first available board
+        board = Board.query.first()
+        
+    if not board:
+        return jsonify({"error": "No workspace space found to receive submissions. Please create a space in the workspace first."}), 400
+        
+    # Get or create the first group
+    group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
+    if not group:
+        group = BoardGroup(board_id=board.id, name="Submissions", color="#fdab3d", position=0)
+        db.session.add(group)
+        db.session.flush()
+        
+    # Ensure custom fields exist: "Phone Number" (phone), "Grade" (text)
+    phone_field = BoardCustomField.query.filter_by(board_id=board.id, name="Phone Number").first()
+    if not phone_field:
+        phone_field = BoardCustomField(board_id=board.id, name="Phone Number", type="phone")
+        db.session.add(phone_field)
+        db.session.flush()
+        
+    grade_field = BoardCustomField.query.filter_by(board_id=board.id, name="Grade").first()
+    if not grade_field:
+        grade_field = BoardCustomField(board_id=board.id, name="Grade", type="text")
+        db.session.add(grade_field)
+        db.session.flush()
+
+    email_field = BoardCustomField.query.filter_by(board_id=board.id, name="Email").first()
+    if not email_field:
+        email_field = BoardCustomField(board_id=board.id, name="Email", type="email")
+        db.session.add(email_field)
+        db.session.flush()
+        
+    # Create the task
+    task_notes = f"""<h3>📋 Live Look-in Schedule Request</h3>
+<ul>
+  <li><strong>Name:</strong> {name}</li>
+  <li><strong>Email:</strong> {email}</li>
+  <li><strong>Phone Number:</strong> {phone or '-'}</li>
+  <li><strong>Grade:</strong> {grade or '-'}</li>
+  <li><strong>Message:</strong> {message or '-'}</li>
+</ul>"""
+
+    task = BoardTask(
+        group_id=group.id,
+        title=f"Live Look-in Request: {name}",
+        status="Not Started",
+        priority="Normal",
+        notes=task_notes,
+        submitter_email=email
+    )
+    db.session.add(task)
+    db.session.flush()
+    
+    # Save custom field values
+    if phone:
+        db.session.add(TaskCustomFieldValue(task_id=task.id, field_id=phone_field.id, value_json=json.dumps(phone)))
+    if grade:
+        db.session.add(TaskCustomFieldValue(task_id=task.id, field_id=grade_field.id, value_json=json.dumps(grade)))
+    if email:
+        db.session.add(TaskCustomFieldValue(task_id=task.id, field_id=email_field.id, value_json=json.dumps(email)))
+        
+    log_activity(None, f"Submitted a new Live Look-in request (Task: {task.title})", task)
+    
+    # Notify admissions department staff (and fallback to super admins)
+    recipients = []
+    admissions_dept = Department.query.filter_by(name="Admission Department").first()
+    if admissions_dept and admissions_dept.staff_members:
+        recipients = admissions_dept.staff_members
+    else:
+        from app.models.super_admin_model import SuperAdmin
+        recipients = SuperAdmin.query.all()
+        
+    if recipients:
+        notif_msg = f"📋 New Live Look-in request submitted by {name} ({email}) for Grade {grade or '-'}."
+        create_notifications_and_send_emails(
+            recipients=recipients,
+            message=notif_msg,
+            target_obj=task
+        )
+        
+    db.session.commit()
+    return jsonify({"success": True, "task_id": task.id}), 201
 
 @admissions_bp.route('/leads', methods=['GET'])
 @jwt_required()
