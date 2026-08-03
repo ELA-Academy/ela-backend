@@ -24,11 +24,30 @@ def convert_lead_to_student(lead_id):
 @student_bp.route('/', methods=['GET'])
 @jwt_required()
 def get_all_students():
-    students = Student.query.filter_by(status='Active').order_by(Student.last_name, Student.first_name).all()
+    students = Student.query.order_by(Student.last_name, Student.first_name).all()
     return jsonify([s.to_dict() for s in students]), 200
 
 @student_bp.route('/<int:student_id>', methods=['GET'])
 @jwt_required()
 def get_student_by_id(student_id):
     student = Student.query.get_or_404(student_id)
-    return jsonify(student.to_dict()), 200
+    
+    from app.models.activity_log_model import ActivityLog
+    from app.models.task_model import Task
+    
+    # Query logs targeting this student or their associated lead
+    logs = ActivityLog.query.filter(
+        ((ActivityLog.target_type == 'Student') & (ActivityLog.target_id == student.id)) |
+        ((ActivityLog.target_type == 'Lead') & (ActivityLog.target_id == student.lead_id))
+    ).order_by(ActivityLog.created_at.desc()).all()
+    
+    # Query tasks associated with their lead
+    tasks = []
+    if student.lead_id:
+        tasks = Task.query.filter_by(lead_id=student.lead_id).order_by(Task.created_at.desc()).all()
+        
+    student_dict = student.to_dict()
+    student_dict['activity_logs'] = [log.to_dict() for log in logs]
+    student_dict['tasks'] = [task.to_dict() for task in tasks]
+    
+    return jsonify(student_dict), 200
