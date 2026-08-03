@@ -144,10 +144,7 @@ def create_live_look_in():
     board = None
     if board_id_val:
         try:
-            b_temp = Board.query.get(int(board_id_val))
-            # Security check: only allow if board name contains "live look-in"
-            if b_temp and "live look-in" in b_temp.name.lower():
-                board = b_temp
+            board = Board.query.get(int(board_id_val))
         except Exception:
             pass
             
@@ -156,7 +153,11 @@ def create_live_look_in():
         board = Board.query.filter(Board.name.ilike('%Live Look-in%')).first()
         
     if not board:
-        return jsonify({"error": "No designated space named 'Live Look-in' was found. Please create a workspace space with 'Live Look-in' in its name first."}), 400
+        # Fallback: use first available board
+        board = Board.query.first()
+        
+    if not board:
+        return jsonify({"error": "No workspace space found to receive submissions. Please create a space in the workspace first."}), 400
         
     # Get or create the first group
     group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
