@@ -38,7 +38,8 @@ class Student(db.Model):
             'status': self.status,
             'enrollment_date': self.enrollment_date.isoformat() if self.enrollment_date else None,
             'grade_level': self.grade_level,
-            'parent_names': [f"{p.first_name} {p.last_name}" for p in self.parents]
+            'parent_names': [f"{p.first_name} {p.last_name}" for p in self.parents],
+            'parents': [p.to_dict() for p in self.parents]
         }
 
 class Parent(db.Model):

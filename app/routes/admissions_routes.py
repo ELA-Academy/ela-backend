@@ -78,6 +78,9 @@ def update_lead_details(token):
     current_user_email = get_jwt_identity()
     actor = Staff.query.filter_by(email=current_user_email).first()
     if not actor:
+        from app.models.super_admin_model import SuperAdmin
+        actor = SuperAdmin.query.filter_by(email=current_user_email).first()
+    if not actor:
         return jsonify({"error": "Unauthorized actor"}), 401
 
     lead = Lead.query.filter_by(secure_token=token).first_or_404()
@@ -138,6 +141,9 @@ def update_lead(token):
     current_user_email = get_jwt_identity()
     actor = Staff.query.filter_by(email=current_user_email).first()
     if not actor:
+        from app.models.super_admin_model import SuperAdmin
+        actor = SuperAdmin.query.filter_by(email=current_user_email).first()
+    if not actor:
         return jsonify({"error": "Unauthorized actor"}), 401
         
     lead = Lead.query.filter_by(secure_token=token).first_or_404()
@@ -152,7 +158,16 @@ def update_lead(token):
     log_activity(actor, log_message, lead)
 
     if 'status' in data:
-        lead.status = data['status']
+        new_status = data['status']
+        lead.status = new_status
+        if new_status in ['Admitted', 'Enrolled']:
+            from app.models.student_model import Student
+            existing_student = Student.query.filter_by(lead_id=lead.id).first()
+            if not existing_student:
+                from app.routes.enrollment_routes import _perform_lead_conversion
+                _perform_lead_conversion(lead)
+                # Preserve selected status if Admitted
+                lead.status = new_status
     if 'internal_notes' in data:
         lead.internal_notes = data['internal_notes']
         
