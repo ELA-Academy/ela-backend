@@ -406,11 +406,71 @@ def import_board_tasks(board_id):
                     existing.config_json = json.dumps(cf_config)
                 created_fields_map[cf_name.lower()] = existing.id
 
+    # Load board's allowed statuses for mapping imported statuses
+    allowed_statuses = []
+    if board.custom_statuses:
+        try:
+            custom_statuses_list = json.loads(board.custom_statuses)
+            if isinstance(custom_statuses_list, list):
+                for s in custom_statuses_list:
+                    if isinstance(s, dict) and 'id' in s:
+                        allowed_statuses.append({
+                            "id": s['id'],
+                            "label": s.get('label') or s['id']
+                        })
+        except Exception:
+            pass
+
+    if not allowed_statuses:
+        allowed_statuses = [
+            {"id": "Not Started", "label": "To do"},
+            {"id": "In Progress", "label": "In progress"},
+            {"id": "Done", "label": "Complete"}
+        ]
+
     # Create tasks
     created_tasks = []
     for idx, tdata in enumerate(tasks_data):
         title = tdata.get('title') or tdata.get('Name') or f"Task {idx + 1}"
-        status = tdata.get('status') or "Not Started"
+        
+        # Resolve status string to one of the allowed statuses case-insensitively
+        status_input = tdata.get('status')
+        status = None
+        if status_input:
+            imported_status_clean = str(status_input).strip().lower()
+            # 1. Try case-insensitive match on ID
+            for s in allowed_statuses:
+                if str(s['id']).lower() == imported_status_clean:
+                    status = s['id']
+                    break
+            # 2. Try case-insensitive match on Label
+            if not status:
+                for s in allowed_statuses:
+                    if str(s['label']).lower() == imported_status_clean:
+                        status = s['id']
+                        break
+            # 3. Handle common aliases: "to do", "todo" -> "Not Started" / "TO DO"
+            if not status:
+                if imported_status_clean in ["to do", "todo", "not started"]:
+                    for s in allowed_statuses:
+                        if str(s['id']).lower() in ["not started", "to do", "todo"] or str(s['label']).lower() in ["to do", "todo", "not started"]:
+                            status = s['id']
+                            break
+                elif imported_status_clean in ["in progress", "doing", "active"]:
+                    for s in allowed_statuses:
+                        if str(s['id']).lower() in ["in progress", "doing", "active"] or str(s['label']).lower() in ["in progress", "doing", "active"]:
+                            status = s['id']
+                            break
+                elif imported_status_clean in ["done", "complete", "completed", "closed"]:
+                    for s in allowed_statuses:
+                        if str(s['id']).lower() in ["done", "complete", "completed", "closed"] or str(s['label']).lower() in ["done", "complete", "completed", "closed"]:
+                            status = s['id']
+                            break
+
+        if not status:
+            # Fallback to the first status in the list
+            status = allowed_statuses[0]['id']
+
         priority = tdata.get('priority') or "Normal"
         notes = tdata.get('notes') or ""
         due_date_str = tdata.get('due_date')
