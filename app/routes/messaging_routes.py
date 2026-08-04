@@ -144,8 +144,14 @@ def can_access_conversation(user, role, conversation):
     if role == 'superadmin':
         return True
 
-    if conversation.conversation_type in ('channel', 'department'):
+    if conversation.conversation_type in ('channel', 'department_public'):
         return True
+
+    if conversation.conversation_type == 'department':
+        if not conversation.department_id:
+            return True
+        user_dept_ids = [d.id for d in user.departments]
+        return conversation.department_id in user_dept_ids
 
     if conversation.conversation_type == 'private_channel':
         return part is not None
@@ -208,7 +214,7 @@ def recipients_for_conversation(conversation, sender, sender_role):
             recipients.append((recipient, recipient_role))
         return recipients
 
-    if conversation.conversation_type == 'department' and conversation.department:
+    if conversation.conversation_type in ('department', 'department_public') and conversation.department:
         for staff_member in conversation.department.staff_members:
             if f"staff_{staff_member.id}" != sender_key:
                 recipients.append((staff_member, 'staff'))
@@ -264,7 +270,7 @@ def serialize_conversation_summary(conversation, user, role, audit=False):
         'conversation_type': conversation.conversation_type,
         'department_id': conversation.department_id,
         'department_name': conversation.department.name if conversation.department else None,
-        'is_restricted': conversation.conversation_type == 'department',
+        'is_restricted': conversation.conversation_type in ('department', 'private_channel'),
         'audit_only': audit,
         'participant_keys': participant_keys
     }
@@ -396,13 +402,13 @@ def create_channel():
     department_id = data.get('department_id')
     participant_ids = data.get('participant_ids', [])
 
-    if conversation_type not in {'channel', 'private_channel', 'department'}:
+    if conversation_type not in {'channel', 'private_channel', 'department', 'department_public'}:
         return jsonify({"error": "Invalid conversation type."}), 400
 
     if not name:
         return jsonify({"error": "Channel name is required."}), 400
 
-    if conversation_type == 'department':
+    if conversation_type in ('department', 'department_public'):
         if not department_id:
             return jsonify({"error": "Department is required for department threads."}), 400
         department = Department.query.get(department_id)
@@ -551,7 +557,7 @@ def rename_channel(channel_id):
         return jsonify({"error": "Unauthorized"}), 401
     
     conversation = Conversation.query.get_or_404(channel_id)
-    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
+    if conversation.conversation_type not in ('channel', 'department', 'department_public', 'private_channel'):
         return jsonify({"error": "Can only rename channels or department threads"}), 400
 
     data = request.get_json() or {}
@@ -590,7 +596,7 @@ def delete_channel(channel_id):
         return jsonify({"error": "Unauthorized"}), 401
 
     conversation = Conversation.query.get_or_404(channel_id)
-    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
+    if conversation.conversation_type not in ('channel', 'department', 'department_public', 'private_channel'):
         return jsonify({"error": "Can only delete channels or department threads"}), 400
 
     # Delete all associated message logs, messages, reactions & participants
@@ -627,7 +633,7 @@ def unfollow_conversation(conversation_id):
         return jsonify({"error": "User not found"}), 404
 
     conversation = Conversation.query.get_or_404(conversation_id)
-    if conversation.conversation_type not in ('channel', 'department', 'private_channel'):
+    if conversation.conversation_type not in ('channel', 'department', 'department_public', 'private_channel'):
         return jsonify({"error": "You can only unfollow channels."}), 400
 
     participant = get_participant_entry(conversation_id, user, role)
