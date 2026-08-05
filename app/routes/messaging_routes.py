@@ -1033,6 +1033,33 @@ def create_announcement():
         )
         db.session.add(announcement)
         db.session.commit()
+
+        # Send notifications to all Staff and SuperAdmins
+        try:
+            from app.models.staff_model import Staff
+            from app.models.super_admin_model import SuperAdmin
+            from app.utils.notifications import enqueue_notification
+            import hashlib
+
+            staff_members = Staff.query.all()
+            superadmins = SuperAdmin.query.all()
+            recipients = list(staff_members) + list(superadmins)
+
+            for r in recipients:
+                r_role = 'staff' if r.__class__.__name__ == 'Staff' else 'superadmin'
+                raw_key = f"announcement:{announcement.id}:{r_role}:{r.id}"
+                idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+                
+                enqueue_notification(
+                    recipient=r,
+                    message=f"📢 New Announcement: {title}",
+                    idempotency_key=idempotency_key,
+                    category='announcement',
+                    target_link="/admin/messaging"
+                )
+        except Exception as notif_err:
+            print(f"Error enqueuing announcement notifications: {notif_err}")
+
         return jsonify(announcement.to_dict()), 201
     except Exception as e:
         db.session.rollback()
