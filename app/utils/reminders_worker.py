@@ -116,3 +116,165 @@ def start_reminders_scheduler(app):
     # Spawn thread in daemon mode so it exits with the main process
     t = threading.Thread(target=run_scheduler, daemon=True)
     t.start()
+
+
+def start_notification_processor(app):
+    """Starts a background thread that processes pending NotificationRequest queue items."""
+    def run_processor():
+        with app.app_context():
+            from app.models.notification_request_model import NotificationRequest
+            from app.models.notification_model import Notification
+            from app.models.staff_model import Staff
+            from app.models.super_admin_model import SuperAdmin
+            from app.utils.notifications import send_push_notification
+            from app.scheduled_tasks import send_batch_digests, check_due_date_reminders
+            from app import socketio
+            from datetime import datetime, timedelta
+            import time
+
+            print("=== Notification Queue Processor Thread Started ===")
+            
+            # Clean up stale pending notifications on startup to prevent flooding
+            try:
+                one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+                stale_requests = NotificationRequest.query.filter(
+                    NotificationRequest.status == 'PENDING',
+                    NotificationRequest.created_at < one_hour_ago
+                ).all()
+                if stale_requests:
+                    for r in stale_requests:
+                        r.status = 'SKIPPED'
+                        r.error_message = "Skipped to prevent startup backlog flood."
+                    db.session.commit()
+                    print(f"=== [Queue Processor Startup] Cleared {len(stale_requests)} stale backlog notifications ===")
+            except Exception as clean_err:
+                db.session.rollback()
+                print(f"[Queue Processor Startup] Failed to clear backlog: {clean_err}")
+
+            MAX_NOTIFICATIONS_PER_MINUTE = 5
+            last_checked_reminders = None
+
+            while True:
+                try:
+                    # Run due date reminders check every 10 minutes (600s)
+                    now_time = datetime.utcnow()
+                    if last_checked_reminders is None or (now_time - last_checked_reminders).total_seconds() > 600:
+                        last_checked_reminders = now_time
+                        try:
+                            check_due_date_reminders()
+                        except Exception as ex_rem:
+                            db.session.rollback()
+                            print(f"[Queue Processor] Error checking due date reminders: {ex_rem}")
+
+                    # 1. Fetch a batch of pending requests
+                    query = NotificationRequest.query.filter(
+                        NotificationRequest.status == 'PENDING',
+                        NotificationRequest.retry_count < 3,
+                        NotificationRequest.created_at <= datetime.utcnow()
+                    ).order_by(NotificationRequest.created_at.asc()).limit(50)
+                    
+                    batch = query.all()
+                    if batch:
+                        # Mark claimed items as PROCESSING immediately
+                        for req in batch:
+                            req.status = 'PROCESSING'
+                        try:
+                            db.session.commit()
+                        except Exception as e:
+                            db.session.rollback()
+                            time.sleep(3)
+                            continue
+
+                        one_minute_ago = datetime.utcnow() - timedelta(seconds=60)
+                        for req in batch:
+                            recipient = None
+                            try:
+                                if req.recipient_role == 'staff':
+                                    recipient = Staff.query.get(req.recipient_id)
+                                else:
+                                    recipient = SuperAdmin.query.get(req.recipient_id)
+                                    
+                                if not recipient:
+                                    raise ValueError(f"Recipient not found (id: {req.recipient_id}, role: {req.recipient_role})")
+
+                                # Check Rate Limit
+                                count = Notification.query.filter(
+                                    (Notification.staff_id == req.recipient_id) if req.recipient_role == 'staff' else (Notification.super_admin_id == req.recipient_id),
+                                    Notification.created_at >= one_minute_ago
+                                ).count()
+
+                                if count >= MAX_NOTIFICATIONS_PER_MINUTE:
+                                    req.status = 'PENDING'
+                                    req.created_at = datetime.utcnow() + timedelta(seconds=30)
+                                    db.session.commit()
+                                    continue
+
+                                channels = req.channels.split(',')
+
+                                # A. Deliver In-App
+                                if 'in_app' in channels:
+                                    in_app_notif = Notification(
+                                        staff_id=req.recipient_id if req.recipient_role == 'staff' else None,
+                                        super_admin_id=req.recipient_id if req.recipient_role != 'staff' else None,
+                                        message=req.message,
+                                        category=req.category,
+                                        target_type=req.target_type,
+                                        target_id=req.target_id,
+                                        target_link=req.target_link,
+                                        created_at=datetime.utcnow()
+                                    )
+                                    db.session.add(in_app_notif)
+                                    db.session.flush()
+
+                                    # Real-time socket broadcast
+                                    try:
+                                        user_room = f"user_{req.recipient_role}_{req.recipient_id}"
+                                        socketio.emit('new_inapp_notification', in_app_notif.to_dict(), room=user_room)
+                                    except Exception as ex:
+                                        print(f"[Queue Processor] Broadcast failed: {ex}")
+
+                                # B. Deliver Email
+                                if 'email' in channels:
+                                    from app.models.notification_model import PendingEmailNotification
+                                    pending_email = PendingEmailNotification(
+                                        recipient_id=req.recipient_id,
+                                        recipient_role=req.recipient_role,
+                                        message=req.message,
+                                        target_link=req.target_link
+                                    )
+                                    db.session.add(pending_email)
+
+                                # C. Deliver Push
+                                if 'push' in channels:
+                                    push_payload = {
+                                        "title": "ELA Academy Notification",
+                                        "body": req.message,
+                                        "url": req.target_link or '/'
+                                    }
+                                    send_push_notification(recipient, push_payload)
+
+                                req.status = 'COMPLETED'
+                            except Exception as e:
+                                req.retry_count += 1
+                                req.error_message = str(e)
+                                if req.retry_count >= 3:
+                                    req.status = 'FAILED'
+                                else:
+                                    req.status = 'PENDING'
+                            db.session.commit()
+
+                    # Send batched digests
+                    try:
+                        send_batch_digests()
+                    except Exception as e:
+                        db.session.rollback()
+                        print(f"[Queue Processor] Digest error: {e}")
+
+                except Exception as loop_err:
+                    db.session.rollback()
+                    print(f"[Queue Processor Loop Error] {loop_err}")
+                
+                time.sleep(3)
+
+    t = threading.Thread(target=run_processor, daemon=True)
+    t.start()
