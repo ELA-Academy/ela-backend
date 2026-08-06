@@ -71,9 +71,10 @@ def create_app():
     init_db(app)
     Migrate(app, db)
     
-    # Start background reminders scheduler
-    from app.utils.reminders_worker import start_reminders_scheduler
+    # Start background reminders scheduler and notification processor
+    from app.utils.reminders_worker import start_reminders_scheduler, start_notification_processor
     start_reminders_scheduler(app)
+    start_notification_processor(app)
     
     # ... (rest of your app setup) ...
     @jwt.expired_token_loader
