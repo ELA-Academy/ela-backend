@@ -79,10 +79,11 @@ class Payment(db.Model):
     amount = db.Column(db.Float, nullable=False)
     method = db.Column(db.String(50), nullable=False)
     notes = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(50), default='Success', nullable=False) # Success, Failed, In Process
     transaction_date = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
-        return { 'id': self.id, 'amount': self.amount, 'method': self.method, 'notes': self.notes, 'transaction_date': self.transaction_date.isoformat() + 'Z' }
+        return { 'id': self.id, 'amount': self.amount, 'method': self.method, 'notes': self.notes, 'status': self.status, 'transaction_date': self.transaction_date.isoformat() + 'Z' }
 
 class Credit(db.Model):
     __tablename__ = 'credits'
@@ -136,3 +137,32 @@ class Subscription(db.Model):
             'next_invoice_date': self.next_invoice_date.isoformat(),
             'total_amount': sum(float(item.get('amount') or 0) for item in self.items_json)
         }
+
+class FinancialAuditLog(db.Model):
+    __tablename__ = 'financial_audit_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('student_financial_accounts.id'), nullable=False)
+    transaction_type = db.Column(db.String(50), nullable=False) # Invoice, Payment, Credit, Refund
+    transaction_id = db.Column(db.String(50), nullable=True) # ID or reference
+    action = db.Column(db.String(50), nullable=False) # Create, Update, Void, Refund, Send, Receive
+    amount = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(50), nullable=False) # Success, Failed, Pending, Voided
+    actor_name = db.Column(db.String(100), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    account = db.relationship('StudentFinancialAccount', backref=db.backref('audit_logs', lazy='dynamic'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'account_id': self.account_id,
+            'transaction_type': self.transaction_type,
+            'transaction_id': self.transaction_id,
+            'action': self.action,
+            'amount': self.amount,
+            'status': self.status,
+            'actor_name': self.actor_name,
+            'description': self.description,
+            'created_at': self.created_at.isoformat() + 'Z'
+        }

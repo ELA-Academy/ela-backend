@@ -45,3 +45,5 @@ yarl==1.22.0
 flask-socketio==5.4.0
 simple-websocket==1.1.0
 redis>=5.0.1
+reportlab>=4.1.0
+

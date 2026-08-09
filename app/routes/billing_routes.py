@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 from flask_jwt_extended import jwt_required, get_jwt
 from app.models import db
 from app.models.staff_model import Staff
@@ -196,6 +196,24 @@ def create_subscriptions():
     return jsonify({"message": "Recurring plans created successfully."}), 201
 
 
+def log_financial_event(account_id, transaction_type, transaction_id, action, amount, status, actor_name, description):
+    try:
+        from app.models.financial_model import FinancialAuditLog
+        log = FinancialAuditLog(
+            account_id=account_id,
+            transaction_type=transaction_type,
+            transaction_id=str(transaction_id) if transaction_id else None,
+            action=action,
+            amount=float(amount),
+            status=status,
+            actor_name=actor_name,
+            description=description
+        )
+        db.session.add(log)
+    except Exception as e:
+        print(f"[FinancialAuditLog] Error logging event: {e}")
+
+
 @billing_bp.route('/accounts/<int:student_id>/invoices', methods=['POST'])
 @jwt_required()
 def create_invoice(student_id):
@@ -236,6 +254,12 @@ def create_invoice(student_id):
     
     db.session.add(new_invoice)
     log_activity(actor, f"Created invoice for {student.first_name} {student.last_name}", new_invoice)
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Invoice', new_invoice.id, 'Create', new_invoice.total_amount, 
+        'Success' if new_invoice.status == 'Sent' else 'Pending', actor_name, 
+        f"Invoice created with status {new_invoice.status}"
+    )
     db.session.commit()
     return jsonify(new_invoice.to_dict()), 201
 
@@ -261,6 +285,11 @@ def receive_payment(student_id):
                 invoice.status = 'Paid'
 
     log_activity(actor, f"Recorded payment of ${amount} for {student.first_name} {student.last_name}", new_payment)
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Payment', new_payment.id, 'Receive', new_payment.amount, 
+        new_payment.status, actor_name, f"Payment recorded via {new_payment.method}"
+    )
     db.session.commit()
     return jsonify(new_payment.to_dict()), 201
 
@@ -279,6 +308,11 @@ def add_credit(student_id):
     new_credit = Credit(account_id=account.id, amount=float(amount), reason=reason)
     db.session.add(new_credit)
     log_activity(actor, f"Added credit of ${amount} for {student.first_name} {student.last_name}", new_credit)
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Credit', new_credit.id, 'Create', new_credit.amount, 
+        'Success', actor_name, f"Credit added: {new_credit.reason}"
+    )
     db.session.commit()
     return jsonify(new_credit.to_dict()), 201
 
@@ -337,9 +371,39 @@ def get_student_ledger(student_id):
 
     for tx_item in all_tx:
         obj = tx_item['obj']
-        if tx_item['type'] == 'Invoice': transactions.append({'type': 'Invoice', 'date': obj.created_at.isoformat() + 'Z', 'description': ", ".join([i.description for i in obj.items]), 'amount': obj.total_amount, 'status': obj.status, 'balance': tx_item['balance']})
-        elif tx_item['type'] == 'Payment': transactions.append({'type': 'Payment', 'date': obj.transaction_date.isoformat() + 'Z', 'description': f"Payment via {obj.method}", 'amount': -obj.amount, 'status': 'Success', 'balance': tx_item['balance']})
-        elif tx_item['type'] == 'Credit': transactions.append({'type': 'Credit', 'date': obj.created_at.isoformat() + 'Z', 'description': obj.reason, 'amount': -obj.amount, 'status': 'Applied', 'balance': tx_item['balance']})
+        if tx_item['type'] == 'Invoice': 
+            transactions.append({
+                'id': obj.id,
+                'type': 'Invoice', 
+                'date': obj.created_at.isoformat() + 'Z', 
+                'due_date': obj.due_date.isoformat() if obj.due_date else None,
+                'description': ", ".join([i.description for i in obj.items]), 
+                'amount': obj.total_amount, 
+                'status': obj.status, 
+                'balance': tx_item['balance']
+            })
+        elif tx_item['type'] == 'Payment': 
+            transactions.append({
+                'id': obj.id,
+                'type': 'Payment', 
+                'date': obj.transaction_date.isoformat() + 'Z', 
+                'description': f"Payment via {obj.method}" + (f" - {obj.notes}" if obj.notes else ""), 
+                'amount': -obj.amount, 
+                'status': obj.status, 
+                'method': obj.method,
+                'notes': obj.notes,
+                'balance': tx_item['balance']
+            })
+        elif tx_item['type'] == 'Credit': 
+            transactions.append({
+                'id': obj.id,
+                'type': 'Credit', 
+                'date': obj.created_at.isoformat() + 'Z', 
+                'description': obj.reason, 
+                'amount': -obj.amount, 
+                'status': 'Applied', 
+                'balance': tx_item['balance']
+            })
 
     total_invoiced = sum(inv.total_amount for inv in invoices)
     total_paid = sum(p.amount for p in payments)
@@ -347,4 +411,482 @@ def get_student_ledger(student_id):
     final_balance = total_invoiced - (total_paid + total_credited)
 
     summary = {"paid": total_paid, "credited": total_credited, "unpaid": final_balance}
-    return jsonify({"transactions": transactions, "summary": summary, "student_name": f"{student.first_name} {student.last_name}"}), 200
+    return jsonify({
+        "transactions": transactions,
+        "summary": summary,
+        "student_name": f"{student.first_name} {student.last_name}",
+        "parent_names": [f"{p.first_name} {p.last_name}" for p in student.parents],
+        "parents": [p.to_dict() for p in student.parents],
+        "grade_level": student.grade_level,
+        "home_room": student.home_room if hasattr(student, 'home_room') else f"Home Room {student.grade_level}"
+    }), 200
+
+@billing_bp.route('/accounts/<int:student_id>/statement', methods=['GET'])
+@jwt_required()
+def get_student_statement(student_id):
+    student = Student.query.get_or_404(student_id)
+    account = student.financial_account
+    if not account:
+        return jsonify({"error": "No financial account found."}), 404
+        
+    start_str = request.args.get('start_date')
+    end_str = request.args.get('end_date')
+    
+    if not start_str or not end_str:
+        return jsonify({"error": "start_date and end_date are required parameters."}), 400
+        
+    try:
+        start_date = datetime.strptime(start_str, '%Y-%m-%d')
+        end_date = datetime.strptime(end_str, '%Y-%m-%d')
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+        
+    invoices = Invoice.query.filter_by(account_id=account.id).all()
+    payments = Payment.query.filter_by(account_id=account.id).all()
+    credits = Credit.query.filter_by(account_id=account.id).all()
+    
+    all_tx = []
+    for inv in invoices:
+        all_tx.append({'type': 'Invoice', 'date': inv.created_at, 'amount': inv.total_amount, 'description': ", ".join([i.description for i in inv.items])})
+    for p in payments:
+        all_tx.append({'type': 'Payment', 'date': p.transaction_date, 'amount': -p.amount, 'description': f"Payment via {p.method}" + (f" - {p.notes}" if p.notes else "")})
+    for c in credits:
+        all_tx.append({'type': 'Credit', 'date': c.created_at, 'amount': -c.amount, 'description': c.reason})
+        
+    all_tx.sort(key=lambda x: x['date'])
+    
+    starting_balance = 0.0
+    filtered_tx = []
+    summary = {"invoiced": 0.0, "paid": 0.0, "credited": 0.0}
+    
+    for tx in all_tx:
+        tx_date = tx['date']
+        if tx_date.date() < start_date.date():
+            starting_balance += tx['amount']
+        elif start_date.date() <= tx_date.date() <= end_date.date():
+            filtered_tx.append({
+                'type': tx['type'],
+                'date': tx_date.isoformat() + 'Z',
+                'description': tx['description'],
+                'amount': tx['amount']
+            })
+            if tx['type'] == 'Invoice':
+                summary['invoiced'] += tx['amount']
+            elif tx['type'] == 'Payment':
+                summary['paid'] += abs(tx['amount'])
+            elif tx['type'] == 'Credit':
+                summary['credited'] += abs(tx['amount'])
+                
+    filtered_tx.sort(key=lambda x: x['date'], reverse=True)
+    
+    from app.utils.statement_generator import generate_statement_pdf
+    pdf_buffer = generate_statement_pdf(student, filtered_tx, start_date, end_date, starting_balance, summary)
+    
+    filename = f"statement_{student.last_name}_{student.first_name}.pdf"
+    return send_file(
+        pdf_buffer,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/pdf'
+    )
+
+@billing_bp.route('/accounts/<int:student_id>/payments/<int:payment_id>/receipt', methods=['GET'])
+@jwt_required()
+def get_payment_receipt(student_id, payment_id):
+    student = Student.query.get_or_404(student_id)
+    account = student.financial_account
+    if not account:
+        return jsonify({"error": "No financial account found."}), 404
+        
+    payment = Payment.query.filter_by(id=payment_id, account_id=account.id).first_or_404()
+    
+    from app.utils.statement_generator import generate_receipt_pdf
+    pdf_buffer = generate_receipt_pdf(student, payment)
+    
+    filename = f"receipt_{payment_id}.pdf"
+    return send_file(
+        pdf_buffer,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/pdf'
+    )
+
+@billing_bp.route('/accounts/<int:student_id>/payments/<int:payment_id>/refund', methods=['POST'])
+@jwt_required()
+def refund_payment(student_id, payment_id):
+    actor = get_actor()
+    student = Student.query.get_or_404(student_id)
+    account = student.financial_account
+    if not account:
+        return jsonify({"error": "Financial account not found."}), 404
+        
+    payment = Payment.query.filter_by(id=payment_id, account_id=account.id).first_or_404()
+    
+    data = request.get_json()
+    amount = data.get('amount')
+    description = data.get('description', '')
+    staff_note = data.get('staff_note', '')
+    
+    if not amount or float(amount) <= 0:
+        return jsonify({"error": "Invalid refund amount."}), 400
+        
+    refund_amount = float(amount)
+    
+    # Calculate previously refunded amount
+    refunds = Payment.query.filter_by(account_id=account.id, invoice_id=payment.invoice_id, method='Refund').all()
+    total_refunded = sum(abs(r.amount) for r in refunds if r.notes and f"Refund for Payment #{payment.id}" in r.notes)
+    
+    max_refund = payment.amount - total_refunded
+    if refund_amount > max_refund:
+        return jsonify({"error": f"Refund amount exceeds the maximum refundable amount of ${max_refund:.2f}."}), 400
+        
+    refund_payment = Payment(
+        account_id=account.id,
+        invoice_id=payment.invoice_id,
+        amount=-refund_amount, # Negative amount adds to balance
+        method='Refund',
+        notes=f"Refund for Payment #{payment.id}. Note: {description}" + (f" | Staff Note: {staff_note}" if staff_note else ""),
+        status='Success',
+        transaction_date=datetime.utcnow()
+    )
+    
+    if payment.invoice_id:
+        invoice = Invoice.query.get(payment.invoice_id)
+        if invoice and invoice.status == 'Paid':
+            invoice.status = 'Sent'
+            
+    db.session.add(refund_payment)
+    log_activity(actor, f"Issued refund of ${refund_amount} for payment #{payment.id} for {student.first_name} {student.last_name}", refund_payment)
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Refund', refund_payment.id, 'Refund', refund_payment.amount, 
+        'Success', actor_name, f"Refund issued for payment #{payment.id}. Note: {description}"
+    )
+    db.session.commit()
+    return jsonify(refund_payment.to_dict()), 201
+
+@billing_bp.route('/invoices/<int:invoice_id>', methods=['PUT'])
+@jwt_required()
+def edit_invoice(invoice_id):
+    actor = get_actor()
+    invoice = Invoice.query.get_or_404(invoice_id)
+    account = invoice.account
+    if not account:
+        return jsonify({"error": "Invoice financial account not found."}), 404
+        
+    student = account.student
+    data = request.get_json()
+    
+    # Update due date
+    due_date_str = data.get('due_date')
+    if due_date_str:
+        invoice.due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
+        
+    # Update items list
+    items_data = data.get('items', [])
+    if items_data:
+        # Delete old items
+        for item in invoice.items:
+            db.session.delete(item)
+        invoice.items = []
+        
+        # Delete old subsidy transactions for this student invoice to prevent duplicates
+        old_subsidy_txs = SubsidyTransaction.query.filter(
+            SubsidyTransaction.transaction_type == 'Invoice',
+            SubsidyTransaction.notes.like(f"%Applied to invoice for {student.first_name} {student.last_name}%")
+        ).all()
+        for s_tx in old_subsidy_txs:
+            db.session.delete(s_tx)
+            
+        # Add new items
+        for item in items_data:
+            new_item = InvoiceItem(
+                description=item['description'],
+                amount=item['amount'],
+                subsidy_id=item.get('subsidy_id')
+            )
+            if item.get('subsidy_id'):
+                subsidy_invoice_transaction = SubsidyTransaction(
+                    subsidy_id=item.get('subsidy_id'),
+                    transaction_type='Invoice',
+                    amount=-item.get('amount'),
+                    transaction_date=invoice.due_date or date.today(),
+                    notes=f"Applied to invoice for {student.first_name} {student.last_name}"
+                )
+                db.session.add(subsidy_invoice_transaction)
+            invoice.items.append(new_item)
+            
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Invoice', invoice.id, 'Update', invoice.total_amount, 
+        'Success' if invoice.status == 'Sent' else 'Pending', actor_name, 
+        f"Invoice updated. New Total: ${invoice.total_amount:.2f}"
+    )
+    db.session.commit()
+    return jsonify(invoice.to_dict()), 200
+
+@billing_bp.route('/invoices/<int:invoice_id>/cancel', methods=['POST'])
+@jwt_required()
+def cancel_invoice(invoice_id):
+    actor = get_actor()
+    invoice = Invoice.query.get_or_404(invoice_id)
+    account = invoice.account
+    if not account:
+        return jsonify({"error": "Invoice financial account not found."}), 404
+        
+    invoice.status = 'Void'
+    
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Invoice', invoice.id, 'Void', invoice.total_amount, 
+        'Voided', actor_name, "Invoice canceled/voided."
+    )
+    db.session.commit()
+    return jsonify(invoice.to_dict()), 200
+
+@billing_bp.route('/invoices/<int:invoice_id>/send', methods=['POST'])
+@jwt_required()
+def send_invoice(invoice_id):
+    actor = get_actor()
+    invoice = Invoice.query.get_or_404(invoice_id)
+    account = invoice.account
+    if not account:
+        return jsonify({"error": "Invoice financial account not found."}), 404
+        
+    if invoice.status == 'Draft':
+        invoice.status = 'Sent'
+        
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    log_financial_event(
+        account.id, 'Invoice', invoice.id, 'Send', invoice.total_amount, 
+        'Success', actor_name, "Invoice sent to parent."
+    )
+    db.session.commit()
+    return jsonify(invoice.to_dict()), 200
+
+@billing_bp.route('/accounts/<int:student_id>/audit-logs', methods=['GET'])
+@jwt_required()
+def get_financial_audit_logs(student_id):
+    student = Student.query.get_or_404(student_id)
+    account = student.financial_account
+    if not account:
+        return jsonify([]), 200
+        
+    logs = account.audit_logs.order_by(FinancialAuditLog.created_at.desc()).all()
+    return jsonify([l.to_dict() for l in logs]), 200
+
+
+@billing_bp.route('/transactions', methods=['GET'])
+@jwt_required()
+def get_all_transactions():
+    try:
+        search = request.args.get('search', '').strip().lower()
+        enrollment_status = request.args.get('enrollment_status', '').strip().lower()
+        transaction_type = request.args.get('transaction_type', '').strip().lower()
+        payment_mode = request.args.get('payment_mode', '').strip().lower()
+        payment_status = request.args.get('payment_status', '').strip().lower()
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 30))
+        
+        # Calculate summary metrics (always calculated across the whole database)
+        total_paid_metric = db.session.query(func.sum(Payment.amount)).filter(Payment.status == 'Success').scalar() or 0
+        total_in_process_metric = db.session.query(func.sum(Payment.amount)).filter(Payment.status == 'In Process').scalar() or 0
+        
+        # Calculate total unpaid (open balance of all students)
+        total_unpaid_metric = 0
+        all_accounts = StudentFinancialAccount.query.all()
+        for acc in all_accounts:
+            total_invoiced = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(Invoice.account_id == acc.id).scalar() or 0
+            total_p = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == acc.id).scalar() or 0
+            total_c = db.session.query(func.sum(Credit.amount)).filter(Credit.account_id == acc.id).scalar() or 0
+            bal = total_invoiced - (total_p + total_c)
+            if bal > 0:
+                total_unpaid_metric += bal
+
+        # Fetch and unify transactions
+        invoices = Invoice.query.all()
+        payments = Payment.query.all()
+        credits = Credit.query.all()
+        
+        all_tx = []
+        
+        for inv in invoices:
+            student = inv.account.student if inv.account else None
+            if not student: continue
+            
+            student_name = f"{student.first_name} {student.last_name}"
+            grade = student.grade_level
+            
+            if search and search not in student_name.lower():
+                continue
+                
+            if enrollment_status and enrollment_status != 'all' and enrollment_status != 'all status':
+                mapped_status = student.status.lower()
+                if enrollment_status == 'graduate' and mapped_status == 'graduated':
+                    pass
+                elif enrollment_status == 'in active' and mapped_status == 'inactive':
+                    pass
+                else:
+                    if mapped_status != enrollment_status:
+                        continue
+            
+            if transaction_type and transaction_type != 'all transaction types' and transaction_type != 'invoice':
+                continue
+                
+            if payment_mode and payment_mode != 'all payment modes':
+                continue
+                
+            if payment_status:
+                mapped_invoice_status = 'in process'
+                if inv.status.lower() == 'paid':
+                    mapped_invoice_status = 'successful'
+                elif inv.status.lower() == 'overdue' or inv.status.lower() == 'void':
+                    mapped_invoice_status = 'failed'
+                if payment_status != mapped_invoice_status:
+                    continue
+            
+            all_tx.append({
+                'id': f"invoice_{inv.id}",
+                'type': 'Invoice',
+                'raw_type': 'invoice',
+                'date': inv.created_at.isoformat() + 'Z',
+                'student_id': student.id,
+                'student_name': student_name,
+                'student_status': student.status,
+                'grade': grade,
+                'description': f"Invoice - Due {inv.due_date.isoformat() if inv.due_date else 'N/A'}" if len(inv.items) == 0 else f"{', '.join([i.description for i in inv.items])}",
+                'status': inv.status,
+                'amount': inv.total_amount,
+                'method': None,
+                'payment_status': None
+            })
+            
+        for p in payments:
+            student = p.account.student if p.account else None
+            if not student: continue
+            
+            student_name = f"{student.first_name} {student.last_name}"
+            grade = student.grade_level
+            
+            if search and search not in student_name.lower():
+                continue
+                
+            if enrollment_status and enrollment_status != 'all' and enrollment_status != 'all status':
+                mapped_status = student.status.lower()
+                if enrollment_status == 'graduate' and mapped_status == 'graduated':
+                    pass
+                elif enrollment_status == 'in active' and mapped_status == 'inactive':
+                    pass
+                else:
+                    if mapped_status != enrollment_status:
+                        continue
+            
+            if transaction_type and transaction_type != 'all transaction types' and transaction_type != 'payment':
+                continue
+                
+            if payment_mode and payment_mode != 'all payment modes':
+                method_lower = p.method.lower()
+                is_card = 'card' in method_lower or 'debit' in method_lower or 'credit' in method_lower
+                is_bank = 'ach' in method_lower or 'bank' in method_lower or 'transfer' in method_lower
+                if payment_mode == 'cards' and not is_card:
+                    continue
+                elif payment_mode == 'bank / ach transfer' and not is_bank:
+                    continue
+                elif payment_mode == 'oother' and (is_card or is_bank):
+                    continue
+            
+            if payment_status:
+                mapped_status = p.status.lower()
+                if payment_status == 'successful' and mapped_status == 'success':
+                    pass
+                elif payment_status == 'in process' and mapped_status == 'in process':
+                    pass
+                elif payment_status == 'failed' and mapped_status == 'failed':
+                    pass
+                else:
+                    continue
+                    
+            all_tx.append({
+                'id': f"payment_{p.id}",
+                'type': 'Payment',
+                'raw_type': 'payment',
+                'date': p.transaction_date.isoformat() + 'Z',
+                'student_id': student.id,
+                'student_name': student_name,
+                'student_status': student.status,
+                'grade': grade,
+                'description': f"Payment via {p.method}" if not p.notes else f"Payment via {p.method} - {p.notes}",
+                'status': 'Success' if p.status == 'Success' else ('Failed' if p.status == 'Failed' else 'In Process'),
+                'amount': -p.amount,
+                'method': p.method,
+                'payment_status': p.status
+            })
+            
+        for c in credits:
+            student = c.account.student if c.account else None
+            if not student: continue
+            
+            student_name = f"{student.first_name} {student.last_name}"
+            grade = student.grade_level
+            
+            if search and search not in student_name.lower():
+                continue
+                
+            if enrollment_status and enrollment_status != 'all' and enrollment_status != 'all status':
+                mapped_status = student.status.lower()
+                if enrollment_status == 'graduate' and mapped_status == 'graduated':
+                    pass
+                elif enrollment_status == 'in active' and mapped_status == 'inactive':
+                    pass
+                else:
+                    if mapped_status != enrollment_status:
+                        continue
+            
+            if transaction_type and transaction_type != 'all transaction types' and transaction_type != 'credit':
+                continue
+                
+            if payment_mode and payment_mode != 'all payment modes':
+                if payment_mode != 'oother':
+                    continue
+                    
+            if payment_status:
+                if payment_status != 'successful':
+                    continue
+                    
+            all_tx.append({
+                'id': f"credit_{c.id}",
+                'type': 'Credit',
+                'raw_type': 'credit',
+                'date': c.created_at.isoformat() + 'Z',
+                'student_id': student.id,
+                'student_name': student_name,
+                'student_status': student.status,
+                'grade': grade,
+                'description': c.reason,
+                'status': 'Applied',
+                'amount': -c.amount,
+                'method': 'Credit',
+                'payment_status': 'Success'
+            })
+            
+        all_tx.sort(key=lambda x: x['date'], reverse=True)
+        
+        total_results = len(all_tx)
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        paginated_tx = all_tx[start_idx:end_idx]
+        
+        return jsonify({
+            'transactions': paginated_tx,
+            'total_results': total_results,
+            'page': page,
+            'limit': limit,
+            'metrics': {
+                'total_paid': total_paid_metric,
+                'total_in_process': total_in_process_metric,
+                'total_unpaid': total_unpaid_metric
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

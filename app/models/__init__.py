@@ -128,7 +128,7 @@ def init_db(app):
         from app.models.financial_model import (
             StudentFinancialAccount, PresetChargeItem, Invoice, 
             InvoiceItem, Payment, Credit, BillingPlan, Subscription,
-            PresetDiscount
+            PresetDiscount, FinancialAuditLog
         )
         from app.models.subsidy_model import Subsidy
         from app.models.message_log_model import MessageLog
