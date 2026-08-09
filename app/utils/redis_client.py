@@ -14,9 +14,16 @@ class MemoryMockRedis:
     """Fallback in-memory mock for environments without a running Redis server."""
     def __init__(self):
         self._data = {}
+        self._expiry = {}
         logger.info("Initializing in-memory fallback cache (Redis not installed).")
 
     def get(self, key):
+        import time
+        if key in self._expiry and time.time() > self._expiry[key]:
+            if key in self._data:
+                del self._data[key]
+            del self._expiry[key]
+            return None
         # Return string if value exists
         val = self._data.get(key)
         if val is not None:
@@ -24,14 +31,40 @@ class MemoryMockRedis:
         return None
 
     def set(self, key, value, ex=None):
+        import time
         self._data[key] = str(value)
+        if ex is not None:
+            self._expiry[key] = time.time() + ex
+        elif key in self._expiry:
+            del self._expiry[key]
         return True
 
     def delete(self, key):
         if key in self._data:
             del self._data[key]
-            return 1
-        return 0
+        if key in self._expiry:
+            del self._expiry[key]
+        return 1
+
+    def incr(self, key):
+        self.get(key)  # Check expiration first
+        val = self._data.get(key)
+        if val is None:
+            new_val = 1
+        else:
+            try:
+                new_val = int(val) + 1
+            except ValueError:
+                new_val = 1
+        self._data[key] = str(new_val)
+        return new_val
+
+    def expire(self, key, seconds):
+        import time
+        if key in self._data:
+            self._expiry[key] = time.time() + seconds
+            return True
+        return False
 
     def publish(self, channel, message):
         logger.debug(f"[Mock Pub/Sub] Publish to {channel}: {message}")
