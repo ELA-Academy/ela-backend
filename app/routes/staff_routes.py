@@ -37,7 +37,8 @@ def create_staff():
     if not actor:
         return jsonify({"error": "Unauthorized actor"}), 401
 
-    data = request.get_json(silent=True)
+    from app.utils.sanitizer import sanitize_dict
+    data = sanitize_dict(request.get_json(silent=True) or {})
     if not data:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
         
@@ -123,14 +124,18 @@ def update_staff(id):
         return jsonify({"error": "Unauthorized actor"}), 401
 
     staff = Staff.query.get_or_404(id)
-    data = request.get_json()
+    from app.utils.sanitizer import sanitize_dict
+    data = sanitize_dict(request.get_json() or {})
+
+    old_depts = [d.name for d in staff.departments]
 
     # Log before changes
     log_activity(actor, f"Updated staff member details for '{staff.name}'", staff)
 
     staff.name = data.get('name', staff.name)
     staff.email = data.get('email', staff.email)
-    staff.is_active = data.get('is_active', staff.is_active)
+    if 'is_active' in data:
+        staff.is_active = bool(data['is_active'])
 
     if 'department_ids' in data:
         staff.departments.clear()
@@ -140,6 +145,9 @@ def update_staff(id):
                 staff.departments.append(dept)
             else:
                 return jsonify({"error": f"Department with id {dept_id} not found"}), 404
+        new_depts = [d.name for d in staff.departments]
+        if old_depts != new_depts:
+            log_activity(actor, f"Changed permissions/departments for '{staff.name}' from {old_depts} to {new_depts}", staff)
 
     if data.get('password'):
         staff.set_password(data['password'])

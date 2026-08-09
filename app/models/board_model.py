@@ -175,7 +175,18 @@ class BoardTask(db.Model):
     history_logs = db.relationship('BoardTaskHistory', backref='task', cascade='all, delete-orphan', order_by='BoardTaskHistory.created_at.desc()', lazy=True)
     time_entries = db.relationship('TaskTimeEntry', backref='task', cascade='all, delete-orphan', lazy=True)
 
-    def to_dict(self):
+    def to_dict(self, visited=None):
+        if visited is None:
+            visited = set()
+        if self.id in visited:
+            return {
+                'id': self.id,
+                'title': self.title,
+                'status': self.status,
+                'priority': self.priority
+            }
+        visited.add(self.id)
+
         assignee_items = [assignee.to_dict() for assignee in self.assignees]
         if not assignee_items:
             if self.responsible_super_admin:
@@ -238,14 +249,7 @@ class BoardTask(db.Model):
             'checklist': [item.to_dict() for item in self.checklist_items],
             'watchers': [watcher.to_dict() for watcher in self.watchers],
             'attachments': [attachment.to_dict() for attachment in self.attachments],
-            'subtasks': [{
-                'id': sub.id,
-                'title': sub.title,
-                'status': sub.status,
-                'priority': sub.priority,
-                'due_date': sub.due_date.isoformat() if sub.due_date else None,
-                'assignees': [assignee.to_dict() for assignee in sub.assignees]
-            } for sub in self.subtasks],
+            'subtasks': [sub.to_dict(visited) for sub in self.subtasks],
             'custom_field_values': custom_field_values_val,
             'created_at': self.created_at.isoformat() + 'Z'
         }

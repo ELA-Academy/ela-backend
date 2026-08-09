@@ -11,6 +11,7 @@ from app.models.department_model import Department
 from app.models.super_admin_model import SuperAdmin
 from app.models.login_otp_model import LoginOTP
 from app.utils.email_otp import generate_otp, send_otp_email
+from app.utils.sanitizer import sanitize_dict
 
 
 registration_requests = {}
@@ -80,7 +81,7 @@ def register_super_admin_request():
         current_app.logger.error("SUPER_ADMIN_EMAIL is not set in the environment.")
         return jsonify({"error": "Server configuration error: Super Admin email not defined."}), 500
 
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
     name = data.get('name')
     email = data.get('email')
     password = data.get('password')
@@ -109,7 +110,7 @@ def verify_and_create_super_admin():
     if SuperAdmin.query.first():
         return jsonify({"error": "Initial Super Admin setup has already been completed."}), 409
 
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
     email = data.get('email')
     otp_received = data.get('otp')
 
@@ -145,19 +146,41 @@ from app.routes.auth_routes import check_remembered_device, register_remembered_
 
 @super_admin_bp.route('/login', methods=['POST'])
 def login_super_admin():
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
     email = (data.get('email') or '').strip()
     password = data.get('password') or ''
     device_id = data.get('device_id')
 
+    from app.utils.redis_client import get_redis_client
+    redis_client = get_redis_client()
+    if email:
+        lock_key = f"login_lock:{email.lower()}"
+        if redis_client.get(lock_key):
+            return jsonify({"msg": "Too many failed login attempts. Account is temporarily locked for 15 minutes."}), 429
+
     admin = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
     if not admin or not admin.is_active or not admin.check_password(password):
+        if email:
+            attempts_key = f"login_attempts:{email.lower()}"
+            attempts = redis_client.get(attempts_key)
+            attempts_val = int(attempts) if attempts else 0
+            attempts_val += 1
+            redis_client.set(attempts_key, str(attempts_val), ex=300)
+            if attempts_val >= 10:
+                redis_client.set(f"login_lock:{email.lower()}", "locked", ex=900)
+                redis_client.delete(attempts_key)
         return jsonify({"msg": "Invalid email or password."}), 401
+
+    if email:
+        redis_client.delete(f"login_attempts:{email.lower()}")
+        redis_client.delete(f"login_lock:{email.lower()}")
 
     # Check 30-day Remembered Device
     if device_id and check_remembered_device(email, device_id):
         print(f"=== [DEVICE LOG] SuperAdmin '{email}' device remembered. Bypassing OTP. ===")
         access_token = build_access_token(admin)
+        log_activity(admin, "logged in (remembered device)")
+        db.session.commit()
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         ip_address = request.remote_addr or '127.0.0.1'
         device_str = request.user_agent.string or 'Unknown device'
@@ -190,7 +213,7 @@ def login_super_admin():
 
 @super_admin_bp.route('/verify-login-otp', methods=['POST'])
 def verify_login_otp():
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
     email = (data.get('email') or '').strip()
     otp_received = (data.get('otp') or '').strip()
     device_id = data.get('device_id')
@@ -224,6 +247,8 @@ def verify_login_otp():
     db.session.delete(pending)
     db.session.commit()
     access_token = build_access_token(admin)
+    log_activity(admin, "logged in")
+    db.session.commit()
 
     if remember_device and device_id:
         register_remembered_device(email, device_id, request)
@@ -264,7 +289,7 @@ def create_super_admin():
     if not actor:
         return jsonify({"error": "Unauthorized actor"}), 401
 
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
     name = data.get('name')
     email = data.get('email')
     password = data.get('password')
@@ -325,7 +350,7 @@ def update_super_admin(admin_id):
         return jsonify({"error": "Unauthorized actor"}), 401
 
     admin = SuperAdmin.query.get_or_404(admin_id)
-    data = request.get_json() or {}
+    data = sanitize_dict(request.get_json() or {})
 
     new_email = data.get('email', admin.email)
     if new_email != admin.email and SuperAdmin.query.filter_by(email=new_email).first():
