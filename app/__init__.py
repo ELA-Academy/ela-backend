@@ -17,7 +17,7 @@ elif os.getenv('FLASK_ENV') == 'staging':
 else:
     load_dotenv()
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_mail import Mail
@@ -84,6 +84,33 @@ def create_app():
     @jwt.unauthorized_loader
     def missing_token_callback(error): return jsonify({"message": "Request does not contain an access token", "error": "authorization_required"}), 401
 
+    @jwt.token_in_blocklist_loader
+    def check_if_token_revoked(jwt_header, jwt_payload):
+        identity = jwt_payload.get('sub')
+        role = jwt_payload.get('role')
+        if not identity or not role:
+            return True
+            
+        from app.models.super_admin_model import SuperAdmin
+        from app.models.staff_model import Staff
+        
+        if role == 'superadmin':
+            user = SuperAdmin.query.filter_by(email=identity).first()
+            if not user or not getattr(user, 'is_active', True):
+                return True
+        elif role == 'staff':
+            user = Staff.query.filter_by(email=identity).first()
+            if not user or not getattr(user, 'is_active', True):
+                return True
+        else:
+            return True
+            
+        return False
+
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header, jwt_payload):
+        return jsonify({"message": "Token has been revoked or is invalid for this role", "error": "token_revoked"}), 401
+
     from app.routes import register_blueprints
     register_blueprints(app)
 
@@ -94,5 +121,18 @@ def create_app():
     @app.route('/api/static/<path:filename>')
     def serve_static_fallback(filename):
         return send_from_directory(app.static_folder, filename)
+
+    @app.before_request
+    def sanitize_all_json_inputs():
+        if request.is_json:
+            try:
+                from app.utils.sanitizer import sanitize_dict
+                data = request.get_json(silent=True)
+                if data is not None:
+                    sanitized = sanitize_dict(data)
+                    # Override Flask's internal cached JSON parsing representation
+                    request._cached_json = (sanitized, sanitized)
+            except Exception as e:
+                app.logger.warning(f"Global JSON sanitization warning: {e}")
 
     return app
