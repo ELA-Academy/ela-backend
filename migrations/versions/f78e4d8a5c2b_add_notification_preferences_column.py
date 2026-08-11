@@ -1,4 +1,4 @@
-"""add notification_preferences column
+"""add notification_preferences and payment status columns
 
 Revision ID: f78e4d8a5c2b
 Revises: e91d8f5c3b2a
@@ -32,6 +32,12 @@ def upgrade():
         op.add_column('staff', sa.Column('notification_preferences', sa.Text(), nullable=True))
         print("Successfully added notification_preferences column to staff")
 
+    # Check payments table
+    columns_payments = [col['name'] for col in inspector.get_columns('payments')]
+    if 'status' not in columns_payments:
+        op.add_column('payments', sa.Column('status', sa.String(length=50), server_default='Success', nullable=False))
+        print("Successfully added status column to payments")
+
 
 def downgrade():
     bind = op.get_bind()
@@ -46,3 +52,8 @@ def downgrade():
     columns_staff = [col['name'] for col in inspector.get_columns('staff')]
     if 'notification_preferences' in columns_staff:
         op.drop_column('staff', 'notification_preferences')
+
+    # payments table
+    columns_payments = [col['name'] for col in inspector.get_columns('payments')]
+    if 'status' in columns_payments:
+        op.drop_column('payments', 'status')
