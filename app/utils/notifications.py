@@ -129,37 +129,60 @@ def get_user_allowed_channels(user_id, user_role, category='general'):
         
     if prefs is None:
         # Load from DB
-        from app.models.notification_request_model import UserNotificationPreference
+        from app.models.staff_model import Staff
+        from app.models.super_admin_model import SuperAdmin
         try:
-            db_prefs = UserNotificationPreference.query.filter_by(user_id=user_id, user_role=user_role).all()
-            prefs = {}
-            for p in db_prefs:
-                key = f"{p.category}:{p.channel}"
-                prefs[key] = p.enabled
+            if user_role == 'staff':
+                user = Staff.query.get(user_id)
+            else:
+                user = SuperAdmin.query.get(user_id)
+                
+            if user and user.notification_preferences:
+                prefs = json.loads(user.notification_preferences)
+            else:
+                prefs = {
+                    'email_alerts': True,
+                    'in_app_alerts': True,
+                    'task_assignment': True,
+                    'mentions': True,
+                    'doc_comments': True,
+                    'reminders': True
+                }
             # Cache in Redis with 1 hour expiration
             try:
                 redis_client.set(cache_key, json.dumps(prefs), ex=3600)
             except Exception:
                 pass
         except Exception:
-            prefs = {}
+            prefs = {
+                'email_alerts': True,
+                'in_app_alerts': True,
+                'task_assignment': True,
+                'mentions': True,
+                'doc_comments': True,
+                'reminders': True
+            }
             
+    # Check category activity triggers
+    if category == 'assignment' and not prefs.get('task_assignment', True):
+        return []
+    if category == 'mention' and not prefs.get('mentions', True):
+        return []
+    if category == 'comment' and not prefs.get('doc_comments', True):
+        return []
+    if category == 'reminder' and not prefs.get('reminders', True):
+        return []
+        
     # Resolve allowed channels
     allowed = []
-    for channel in ['in_app', 'email', 'push']:
-        specific_key = f"{category}:{channel}"
-        global_key = f"all:{channel}"
-        
-        enabled = True
-        if specific_key in prefs:
-            enabled = prefs[specific_key]
-        elif global_key in prefs:
-            enabled = prefs[global_key]
-            
-        if enabled:
-            allowed.append(channel)
+    if prefs.get('in_app_alerts', True):
+        allowed.append('in_app')
+        allowed.append('push')
+    if prefs.get('email_alerts', True):
+        allowed.append('email')
             
     return allowed
+
 
 def enqueue_notification(recipient, message, idempotency_key=None, category='general', target_obj=None, target_link=None):
     """
@@ -186,10 +209,7 @@ def enqueue_notification(recipient, message, idempotency_key=None, category='gen
     recipient_id = recipient.id
 
     # Check user opt-out preferences (cached in Redis if available)
-    if category == 'mention':
-        allowed_channels = ['in_app', 'email', 'push']
-    else:
-        allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
+    allowed_channels = get_user_allowed_channels(recipient_id, recipient_role, category=category)
     if not allowed_channels:
         _safe_log('info', f"User {recipient_role} {recipient_id} has opted out of all notifications for category {category}.")
         return None
