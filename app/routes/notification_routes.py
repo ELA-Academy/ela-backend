@@ -124,12 +124,22 @@ def update_notification_preferences():
     data = request.get_json() or {}
     prefs_str = json.dumps(data)
     
+    from app.utils.redis_client import get_redis_client
+    redis_client = get_redis_client()
+    
     if role == 'superadmin':
         admin = SuperAdmin.query.filter_by(email=current_user_email).first()
         if not admin:
             return jsonify({"error": "Super Admin not found"}), 404
         admin.notification_preferences = prefs_str
         db.session.commit()
+        
+        # Invalidate Redis cache for immediate response
+        try:
+            redis_client.delete(f"user_prefs:{role}:{admin.id}")
+        except Exception:
+            pass
+            
         return jsonify(admin.to_dict()), 200
     elif role == 'staff':
         staff = Staff.query.filter_by(email=current_user_email).first()
@@ -137,6 +147,13 @@ def update_notification_preferences():
             return jsonify({"error": "Staff member not found"}), 404
         staff.notification_preferences = prefs_str
         db.session.commit()
+        
+        # Invalidate Redis cache for immediate response
+        try:
+            redis_client.delete(f"user_prefs:{role}:{staff.id}")
+        except Exception:
+            pass
+            
         return jsonify(staff.to_dict()), 200
     else:
         return jsonify({"error": "Unauthorized"}), 401
