@@ -52,3 +52,5 @@ def register_blueprints(app):
     app.register_blueprint(billing_bp, url_prefix="/api/billing")
     from .subsidy_routes import subsidy_bp
     app.register_blueprint(subsidy_bp, url_prefix="/api/subsidies")
+    from .report_routes import report_bp
+    app.register_blueprint(report_bp)

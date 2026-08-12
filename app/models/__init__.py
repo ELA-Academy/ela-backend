@@ -145,6 +145,8 @@ def init_db(app):
         )
         from app.models.notification_request_model import NotificationRequest, UserNotificationPreference
         from app.models.overview_card_model import OverviewCard, SpaceBookmark
+        from app.models.generated_report_model import GeneratedReport
+        from app.models.student_document_model import StudentDocument
         
         db.create_all()
         ensure_runtime_schema_updates()
