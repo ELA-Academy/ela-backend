@@ -108,7 +108,20 @@ def submit_public_form(token):
         submission.status = 'Completed'
 
     # --- AUTOMATIC CONVERSION ---
-    _perform_lead_conversion(submission.lead)
+    new_student = _perform_lead_conversion(submission.lead)
+    if new_student:
+        from app.models.student_document_model import StudentDocument
+        doc_name = f"{new_student.first_name} {new_student.last_name} {submission.form.name}"
+        # Point to the read-only submission viewer page on the frontend
+        file_url = f"/enrollment/view/{submission.secure_token}"
+        doc = StudentDocument(
+            student_id=new_student.id,
+            name=doc_name,
+            file_path=file_url,
+            document_type="Document",
+            status="UPLOADED"
+        )
+        db.session.add(doc)
     # --- END AUTOMATIC CONVERSION ---
 
     accounting_dept = Department.query.filter_by(name="Accounting Department").first()
@@ -120,6 +133,20 @@ def submit_public_form(token):
     log_activity(None, f"Parent submitted enrollment for {student_name}", submission.lead)
     db.session.commit()
     return jsonify({"message": "Your submission was successful!"}), 200
+
+
+@enrollment_bp.route('/public/submission/<string:token>/view', methods=['GET'])
+def get_public_submission_view(token):
+    submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
+    return jsonify({
+        "id": submission.id,
+        "form_name": submission.form.name,
+        "form_structure": submission.form.form_structure_json,
+        "responses": submission.responses_json,
+        "status": submission.status,
+        "submitted_at": submission.submitted_at.isoformat() if submission.submitted_at else None,
+        "student_name": f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}" if submission.lead.students else "N/A"
+    }), 200
 
 
 # --- ADMIN ROUTES (AUTH REQUIRED) ---
@@ -197,7 +224,7 @@ def update_form(form_id):
 def create_form():
     actor = get_actor()
     if not actor: return jsonify({"error": "Unauthorized actor"}), 401
-    default_structure = {"title": "Untitled Enrollment Form","sections": [{"id": "student_info", "title": "Student Info", "visible": True, "fields": []},{"id": "parent_info", "title": "Parent Info", "visible": True, "fields": []},{"id": "pickup_info", "title": "Authorized Pickup Info", "visible": True, "fields": []},{"id": "policy_waiver", "title": "Policy & Waiver", "visible": True, "fields": []}]}
+    default_structure = {"title": "Untitled Enrollment Form","sections": [{"id": "student_info", "title": "Student Info", "visible": True, "fields": []},{"id": "parent_info", "title": "Parent Info", "visible": True, "fields": []},{"id": "policy_waiver", "title": "Policy & Waiver", "visible": True, "fields": []}]}
     new_form = EnrollmentForm(name="Untitled Enrollment Form", form_structure_json=default_structure)
     db.session.add(new_form)
     log_activity(actor, f"Created new enrollment form: '{new_form.name}'", new_form)
