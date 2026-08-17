@@ -333,35 +333,54 @@ def setup_password():
 
 @auth_bp.route('/forgot-password', methods=['POST'])
 def forgot_password():
-    data = request.get_json() or {}
-    email = data.get('email')
-    if not email:
-        return jsonify({"error": "Email is required"}), 400
+    try:
+        data = request.get_json() or {}
+        email = (data.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
 
-    user = Staff.query.filter_by(email=email).first()
-    role = 'staff'
-    if not user:
-        user = SuperAdmin.query.filter_by(email=email).first()
-        role = 'superadmin'
+        # Query case-insensitively to match login behavior
+        user = Staff.query.filter(Staff.email.ilike(email)).first()
+        role = 'staff'
+        if not user:
+            user = SuperAdmin.query.filter(SuperAdmin.email.ilike(email)).first()
+            role = 'superadmin'
 
-    if not user:
-        # Avoid user enumeration for security, return 200
-        return jsonify({"message": "If the email is registered, a password reset link has been sent."}), 200
+        current_app.logger.info(f"[FORGOT PASSWORD] email: '{email}', found: {user.email if user else 'None'}")
 
-    expires = timedelta(hours=1)
-    reset_token = create_access_token(
-        identity=email,
-        expires_delta=expires,
-        additional_claims={'purpose': 'reset-password', 'role': role, 'name': user.name}
-    )
+        if not user:
+            # Avoid user enumeration for security, return 200
+            return jsonify({"message": "If the email is registered, a password reset link has been sent."}), 200
 
-    frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
-    frontend_url = os.getenv('FRONTEND_URL', frontend_url)
+        expires = timedelta(hours=1)
+        reset_token = create_access_token(
+            identity=user.email,  # Use exact email from DB
+            expires_delta=expires,
+            additional_claims={'purpose': 'reset-password', 'role': role, 'name': user.name}
+        )
 
-    reset_link = f"{frontend_url}/setup-password?token={reset_token}"
+        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+        frontend_url = os.getenv('FRONTEND_URL', frontend_url)
 
-    send_password_reset_email(mail, email, user.name, reset_link)
-    
-    print(f"=== [PASSWORD RESET LOG] User '{email}' reset link: {reset_link} ===")
+        # Remove surrounding single/double quotes if loaded from env configuration
+        if frontend_url.startswith("'") and frontend_url.endswith("'"):
+            frontend_url = frontend_url[1:-1]
+        if frontend_url.startswith('"') and frontend_url.endswith('"'):
+            frontend_url = frontend_url[1:-1]
 
-    return jsonify({"message": "Password reset link has been sent to your email."}), 200
+        reset_link = f"{frontend_url}/setup-password?token={reset_token}"
+
+        # Attempt to send password reset email
+        sent_success = send_password_reset_email(mail, user.email, user.name, reset_link)
+        
+        print(f"=== [PASSWORD RESET LOG] User '{user.email}' reset link: {reset_link} (Sent status: {sent_success}) ===")
+
+        if not sent_success:
+            return jsonify({"error": "Failed to send password reset email. Please check mail configuration or contact support."}), 500
+
+        return jsonify({"message": "Password reset link has been sent to your email."}), 200
+
+    except Exception as e:
+        import traceback
+        current_app.logger.error(f"Forgot password error: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "An internal server error occurred while requesting password reset."}), 500
