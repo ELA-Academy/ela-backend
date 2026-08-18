@@ -388,11 +388,16 @@ def create_board():
     description = data.get('description')
     is_private = data.get('is_private', False)
     access_members = data.get('access_members', [])
-    parent_id = data.get('parent_id')
+    parent_id_val = data.get('parent_id')
     is_folder = data.get('is_folder', False)
 
     if not name:
         return jsonify({"error": "Board name is required"}), 400
+
+    parent_id = None
+    if parent_id_val:
+        parent_board = Board.get_by_id_or_public_id(parent_id_val)
+        parent_id = parent_board.id if parent_board else None
 
     new_board = Board(
         name=name,
@@ -438,7 +443,12 @@ def update_board(board_id):
     board.description = data.get('description', board.description)
     board.is_private = data.get('is_private', board.is_private)
     if 'parent_id' in data:
-        board.parent_id = data.get('parent_id')
+        p_id = data.get('parent_id')
+        if p_id:
+            parent_board = Board.get_by_id_or_public_id(p_id)
+            board.parent_id = parent_board.id if parent_board else None
+        else:
+            board.parent_id = None
     if 'is_folder' in data:
         board.is_folder = bool(data.get('is_folder'))
     if 'custom_statuses' in data:
@@ -1551,11 +1561,15 @@ def get_calendar_events():
 
     start = request.args.get('start')
     end = request.args.get('end')
-    board_id = request.args.get('board_id', type=int)
+    board_id = request.args.get('board_id')
 
     query = CalendarEvent.query
     if board_id:
-        query = query.filter_by(board_id=board_id)
+        board_record = Board.get_by_id_or_public_id(board_id)
+        if board_record:
+            query = query.filter_by(board_id=board_record.id)
+        else:
+            query = query.filter(CalendarEvent.id == -1)
     if start:
         query = query.filter(CalendarEvent.start_datetime >= start)
     if end:
@@ -1576,8 +1590,14 @@ def create_calendar_event():
     if not data or not data.get('title') or not data.get('start_datetime'):
         return jsonify({'error': 'Title and start_datetime are required'}), 400
 
+    board_id_val = data.get('board_id')
+    board_id_resolved = None
+    if board_id_val:
+        board_rec = Board.get_by_id_or_public_id(board_id_val)
+        board_id_resolved = board_rec.id if board_rec else None
+
     event = CalendarEvent(
-        board_id=data.get('board_id'),
+        board_id=board_id_resolved,
         title=data['title'],
         description=data.get('description', ''),
         start_datetime=datetime.fromisoformat(data['start_datetime'].replace('Z', '+00:00')),
@@ -1653,13 +1673,17 @@ def get_calendar_tasks():
     if not actor:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    board_id = request.args.get('board_id', type=int)
+    board_id = request.args.get('board_id')
     start = request.args.get('start')
     end = request.args.get('end')
 
     query = BoardTask.query.join(BoardGroup)
     if board_id:
-        query = query.filter(BoardGroup.board_id == board_id)
+        board_record = Board.get_by_id_or_public_id(board_id)
+        if board_record:
+            query = query.filter(BoardGroup.board_id == board_record.id)
+        else:
+            query = query.filter(BoardTask.id == -1)
 
     # Tasks that have either a due_date or start_date within the range
     from sqlalchemy import or_
