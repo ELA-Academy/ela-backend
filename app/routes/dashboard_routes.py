@@ -117,8 +117,12 @@ def run_report():
     if end_date:
         board_query = board_query.filter(BoardTask.created_at <= end_date)
     if board_id:
-        from app.models.board_model import BoardGroup
-        board_query = board_query.join(BoardGroup).filter(BoardGroup.board_id == int(board_id))
+        from app.models.board_model import Board, BoardGroup
+        board_record = Board.get_by_id_or_public_id(board_id)
+        if board_record:
+            board_query = board_query.join(BoardGroup).filter(BoardGroup.board_id == board_record.id)
+        else:
+            board_query = board_query.filter(BoardTask.id == -1)
         
     board_tasks = board_query.all()
     for bt in board_tasks:

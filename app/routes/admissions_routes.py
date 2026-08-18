@@ -144,7 +144,7 @@ def create_live_look_in():
     board = None
     if board_id_val:
         try:
-            board = Board.query.get(int(board_id_val))
+            board = Board.get_by_id_or_public_id(board_id_val)
         except Exception:
             pass
             

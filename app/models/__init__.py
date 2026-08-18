@@ -46,6 +46,7 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('conversations', 'department_id', 'INTEGER NULL')
 
     if inspector.has_table('boards'):
+        add_column_if_missing('boards', 'public_id', 'VARCHAR(50) NULL')
         add_column_if_missing('boards', 'is_private', 'BOOLEAN NOT NULL DEFAULT FALSE')
         add_column_if_missing('boards', 'custom_statuses', 'TEXT NULL')
         add_column_if_missing('boards', 'color', 'VARCHAR(50) NULL')
