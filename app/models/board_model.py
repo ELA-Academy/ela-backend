@@ -1,4 +1,5 @@
 import json
+import secrets
 from app.models import db
 from datetime import datetime
 
@@ -28,12 +29,29 @@ class Board(db.Model):
     is_personal = db.Column(db.Boolean, default=False, nullable=False)
     owner_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
     owner_super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
+    public_id = db.Column(db.String(50), default=lambda: secrets.token_hex(16), nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     groups = db.relationship('BoardGroup', backref='board', cascade='all, delete-orphan', lazy=True)
     access_members = db.relationship('BoardAccessMember', backref='board', cascade='all, delete-orphan', lazy=True)
     milestones = db.relationship('BoardMilestone', backref='board', cascade='all, delete-orphan', lazy=True)
+
+    @classmethod
+    def get_by_id_or_public_id(cls, identifier):
+        if not identifier:
+            return None
+        if isinstance(identifier, int) or str(identifier).isdigit():
+            return cls.query.get(int(identifier))
+        return cls.query.filter_by(public_id=identifier).first()
+
+    @classmethod
+    def get_by_id_or_public_id_or_404(cls, identifier):
+        record = cls.get_by_id_or_public_id(identifier)
+        if not record:
+            from flask import abort
+            abort(404)
+        return record
 
     def to_dict(self):
         custom_statuses_val = None
@@ -51,8 +69,13 @@ class Board(db.Model):
         except Exception:
             pass
 
+        if not self.public_id:
+            self.public_id = secrets.token_hex(16)
+            db.session.commit()
+
         return {
-            'id': self.id,
+            'id': self.public_id,
+            'internal_id': self.id,
             'name': self.name,
             'description': self.description,
             'is_private': self.is_private,
