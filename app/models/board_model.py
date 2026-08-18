@@ -73,6 +73,11 @@ class Board(db.Model):
             self.public_id = secrets.token_hex(16)
             db.session.commit()
 
+        parent_uuid = None
+        if self.parent_id:
+            parent_board = Board.query.get(self.parent_id)
+            parent_uuid = parent_board.public_id if parent_board else self.parent_id
+
         return {
             'id': self.public_id,
             'internal_id': self.id,
@@ -80,7 +85,7 @@ class Board(db.Model):
             'description': self.description,
             'is_private': self.is_private,
             'custom_statuses': custom_statuses_val,
-            'parent_id': self.parent_id,
+            'parent_id': parent_uuid,
             'is_folder': self.is_folder,
             'color': self.color,
             'icon': self.icon,
