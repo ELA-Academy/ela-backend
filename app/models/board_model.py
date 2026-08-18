@@ -147,9 +147,10 @@ class BoardGroup(db.Model):
     tasks = db.relationship('BoardTask', backref='group', cascade='all, delete-orphan', lazy=True)
 
     def to_dict(self):
+        board_uuid = self.board.public_id if self.board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'name': self.name,
             'color': self.color,
             'position': self.position
@@ -453,9 +454,10 @@ class CalendarEvent(db.Model):
     linked_task = db.relationship('BoardTask')
 
     def to_dict(self):
+        board_uuid = self.board.public_id if self.board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'title': self.title,
             'description': self.description,
             'start_datetime': self.start_datetime.isoformat() + 'Z' if self.start_datetime else None,
@@ -533,9 +535,10 @@ class WorkspaceDoc(db.Model):
         except:
             depts_list = []
 
+        board_uuid = self.board.public_id if self.board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'title': self.title,
             'content_html': self.content_html,
             'created_by_name': self.created_by_name,
@@ -585,9 +588,10 @@ class BoardMilestone(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
+        board_uuid = self.board.public_id if self.board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'title': self.title,
             'description': self.description,
             'due_date': self.due_date.isoformat() if self.due_date else None,

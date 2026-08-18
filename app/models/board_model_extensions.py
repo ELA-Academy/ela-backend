@@ -25,9 +25,12 @@ class BoardCustomField(db.Model):
                 config_val = json.loads(self.config_json)
             except:
                 config_val = self.config_json
+        from app.models.board_model import Board
+        board = Board.query.get(self.board_id)
+        board_uuid = board.public_id if board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'name': self.name,
             'type': self.type,
             'config': config_val,
@@ -87,9 +90,12 @@ class BoardFormConfig(db.Model):
                 struct = json.loads(self.form_structure_json)
             except:
                 pass
+        from app.models.board_model import Board
+        board = Board.query.get(self.board_id)
+        board_uuid = board.public_id if board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'name': self.name,
             'description': self.description,
             'form_structure': struct,
@@ -147,9 +153,12 @@ class WorkspaceDocumentFolder(db.Model):
     files = db.relationship('WorkspaceDocumentFile', backref='folder', cascade='all, delete-orphan')
 
     def to_dict(self):
+        from app.models.board_model import Board
+        board = Board.query.get(self.board_id)
+        board_uuid = board.public_id if board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'name': self.name,
             'parent_id': self.parent_id,
             'created_at': self.created_at.isoformat() + 'Z'
@@ -179,9 +188,12 @@ class WorkspaceDocumentFile(db.Model):
                 perms = json.loads(self.permissions_json)
             except:
                 pass
+        from app.models.board_model import Board
+        board = Board.query.get(self.board_id)
+        board_uuid = board.public_id if board else self.board_id
         return {
             'id': self.id,
-            'board_id': self.board_id,
+            'board_id': board_uuid,
             'folder_id': self.folder_id,
             'filename': self.filename,
             'file_path': self.file_path,
