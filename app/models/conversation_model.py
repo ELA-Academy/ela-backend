@@ -61,6 +61,7 @@ class Message(db.Model):
     file_path = db.Column(db.String(500), nullable=True)
     filename = db.Column(db.String(255), nullable=True)
     reply_to_message_id = db.Column(db.Integer, db.ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
+    is_edited = db.Column(db.Boolean, default=False, nullable=True)
 
     reply_to_message = db.relationship('Message', remote_side=[id], lazy='joined')
 
@@ -112,7 +113,8 @@ class Message(db.Model):
             'filename': self.filename,
             'reply_to_message_id': self.reply_to_message_id,
             'reply_to_details': reply_to_details,
-            'reactions': [r.to_dict() for r in self.reactions]
+            'reactions': [r.to_dict() for r in self.reactions],
+            'is_edited': getattr(self, 'is_edited', False) or False
         }
 
 class MessageReaction(db.Model):

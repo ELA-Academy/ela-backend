@@ -1123,6 +1123,42 @@ def toggle_message_reaction(message_id):
     }), 200
 
 
+@messaging_bp.route('/messages/<int:message_id>', methods=['PUT', 'OPTIONS'])
+@jwt_required()
+def edit_message(message_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    user, role = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    message = Message.query.get_or_404(message_id)
+
+    # Verify that the sender matches the logged-in user
+    if message.sender_type != role or message.sender_id != user.id:
+        return jsonify({"error": "Forbidden - You can only edit your own messages"}), 403
+
+    data = request.get_json() or {}
+    new_content = (data.get('content') or '').strip()
+
+    if not new_content:
+        return jsonify({"error": "Message content cannot be empty"}), 400
+
+    message.content = new_content
+    message.is_edited = True
+    db.session.commit()
+
+    # Emit socket event to notify other clients in the conversation room
+    try:
+        from app import socketio
+        socketio.emit('message_edited', message.to_dict(), room=f"conversation_{message.conversation_id}")
+    except Exception as e:
+        print("Socket emit failed on edit_message:", e)
+
+    return jsonify(message.to_dict()), 200
+
+
 # Socket.IO Event Handlers
 from flask_socketio import join_room, leave_room
 from app import socketio
