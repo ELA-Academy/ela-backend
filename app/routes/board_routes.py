@@ -259,7 +259,10 @@ def serialize_board_with_groups(board):
 
 
 def get_board_or_404_with_access(board_id, actor, role):
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id(board_id)
+    if not board:
+        from flask import abort
+        abort(404)
     if not ensure_board_access(board, actor, role):
         return None
     return board
@@ -411,7 +414,7 @@ def create_board():
     return jsonify(new_board.to_dict()), 201
 
 
-@board_bp.route('/<int:board_id>', methods=['GET'])
+@board_bp.route('/<string:board_id>', methods=['GET'])
 @jwt_required()
 def get_board(board_id):
     actor, role = get_actor()
@@ -421,7 +424,7 @@ def get_board(board_id):
     return jsonify(serialize_board_with_groups(board)), 200
 
 
-@board_bp.route('/<int:board_id>', methods=['PUT'])
+@board_bp.route('/<string:board_id>', methods=['PUT'])
 @jwt_required()
 def update_board(board_id):
     import json
@@ -467,7 +470,7 @@ def update_board(board_id):
     return jsonify(board.to_dict()), 200
 
 
-@board_bp.route('/<int:board_id>', methods=['DELETE'])
+@board_bp.route('/<string:board_id>', methods=['DELETE'])
 @jwt_required()
 def delete_board(board_id):
     actor, role = get_actor()
@@ -479,7 +482,7 @@ def delete_board(board_id):
     return jsonify({"message": "Board deleted successfully"}), 200
 
 
-@board_bp.route('/<int:board_id>/groups', methods=['POST'])
+@board_bp.route('/<string:board_id>/groups', methods=['POST'])
 @jwt_required()
 def create_group(board_id):
     actor, role = get_actor()
@@ -1785,32 +1788,32 @@ def update_task_time_estimate(task_id):
 
 # ─── Workspace Documents (Wiki) ──────────────────────────────────────
 
-@board_bp.route('/<int:board_id>/docs', methods=['GET'])
+@board_bp.route('/<string:board_id>/docs', methods=['GET'])
 @jwt_required()
 def get_workspace_docs(board_id):
     actor, role = get_actor()
     if not actor:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    board = Board.query.get(board_id)
+    board = Board.get_by_id_or_public_id(board_id)
     if not board:
         return jsonify({'error': 'Space not found'}), 404
 
     if not board_is_accessible(board, actor, role):
         return jsonify({'error': 'Forbidden'}), 403
 
-    docs = WorkspaceDoc.query.filter_by(board_id=board_id).order_by(WorkspaceDoc.position.asc()).all()
+    docs = WorkspaceDoc.query.filter_by(board_id=board.id).order_by(WorkspaceDoc.position.asc()).all()
     return jsonify([d.to_dict() for d in docs]), 200
 
 
-@board_bp.route('/<int:board_id>/docs', methods=['POST'])
+@board_bp.route('/<string:board_id>/docs', methods=['POST'])
 @jwt_required()
 def create_workspace_doc(board_id):
     actor, role = get_actor()
     if not actor:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    board = Board.query.get(board_id)
+    board = Board.get_by_id_or_public_id(board_id)
     if not board:
         return jsonify({'error': 'Space not found'}), 404
 
@@ -1823,7 +1826,7 @@ def create_workspace_doc(board_id):
         return jsonify({'error': 'Title is required'}), 400
 
     doc = WorkspaceDoc(
-        board_id=board_id,
+        board_id=board.id,
         title=title,
         content_html=data.get('content_html', ''),
         created_by_name=actor.name,
@@ -2067,7 +2070,7 @@ def get_board_templates():
     visible_templates = [t.to_dict() for t in templates if board_is_accessible(t, actor, role)]
     return jsonify(visible_templates), 200
 
-@board_bp.route('/<int:board_id>/save-as-template', methods=['POST'])
+@board_bp.route('/<string:board_id>/save-as-template', methods=['POST'])
 @jwt_required()
 def save_board_as_template(board_id):
     actor, role = get_actor()
@@ -2219,7 +2222,7 @@ def create_board_from_template(template_id):
 
 # ─── Soft-Archiving Endpoints ─────────────────────────────────────────
 
-@board_bp.route('/<int:board_id>/archive', methods=['PUT'])
+@board_bp.route('/<string:board_id>/archive', methods=['PUT'])
 @jwt_required()
 def archive_board(board_id):
     actor, role = get_actor()
@@ -2230,7 +2233,7 @@ def archive_board(board_id):
     db.session.commit()
     return jsonify(board.to_dict()), 200
 
-@board_bp.route('/<int:board_id>/unarchive', methods=['PUT'])
+@board_bp.route('/<string:board_id>/unarchive', methods=['PUT'])
 @jwt_required()
 def unarchive_board(board_id):
     actor, role = get_actor()
@@ -2244,7 +2247,7 @@ def unarchive_board(board_id):
 
 # ─── Milestones Endpoints ─────────────────────────────────────────────
 
-@board_bp.route('/<int:board_id>/milestones', methods=['GET'])
+@board_bp.route('/<string:board_id>/milestones', methods=['GET'])
 @jwt_required()
 def get_board_milestones(board_id):
     actor, role = get_actor()
@@ -2252,10 +2255,10 @@ def get_board_milestones(board_id):
     if not board:
         return jsonify({"error": "Forbidden"}), 403
         
-    milestones = BoardMilestone.query.filter_by(board_id=board_id).order_by(BoardMilestone.due_date.asc()).all()
+    milestones = BoardMilestone.query.filter_by(board_id=board.id).order_by(BoardMilestone.due_date.asc()).all()
     return jsonify([m.to_dict() for m in milestones]), 200
 
-@board_bp.route('/<int:board_id>/milestones', methods=['POST'])
+@board_bp.route('/<string:board_id>/milestones', methods=['POST'])
 @jwt_required()
 def create_board_milestone(board_id):
     actor, role = get_actor()
@@ -2276,7 +2279,7 @@ def create_board_milestone(board_id):
         return jsonify({"error": "Invalid date format. Expected YYYY-MM-DD"}), 400
         
     milestone = BoardMilestone(
-        board_id=board_id,
+        board_id=board.id,
         title=title,
         description=data.get('description'),
         due_date=due_date,
@@ -2357,4 +2360,190 @@ def bulk_move_tasks():
 
     db.session.commit()
     return jsonify({"message": f"Successfully moved {len(tasks)} task(s)"}), 200
+
+
+@board_bp.route('/integrations/jotform', methods=['POST', 'OPTIONS'])
+def jotform_webhook():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    import json
+    import re
+    import os
+    from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskHistory
+    from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+
+    # 1. Retrieve configuration from query params
+    board_id = request.args.get('board_id')
+    group_id = request.args.get('group_id', type=int)
+    token = request.args.get('token')
+
+    # Optional security validation token
+    expected_token = os.getenv('JOTFORM_WEBHOOK_TOKEN')
+    if expected_token and token != expected_token:
+        return jsonify({"error": "Unauthorized webhook token"}), 401
+
+    # 2. Resolve Board
+    if not board_id:
+        board = Board.query.filter_by(is_folder=False).first()
+        if not board:
+            return jsonify({"error": "No board found in system"}), 404
+        board_id = board.id
+    else:
+        board = Board.get_by_id_or_public_id(board_id)
+        if not board:
+            return jsonify({"error": "Board not found"}), 404
+        board_id = board.id
+
+    # 3. Resolve Status Group (Defaults to the first group/Todo column on the board)
+    if not group_id:
+        group = BoardGroup.query.filter_by(board_id=board_id).order_by(BoardGroup.position.asc()).first()
+        if not group:
+            return jsonify({"error": "No status group found on this board"}), 404
+        group_id = group.id
+    else:
+        group = BoardGroup.query.get(group_id)
+        if not group or group.board_id != board_id:
+            return jsonify({"error": "Group not found or not on this board"}), 404
+
+    # 3. Parse Jotform POST data
+    raw_request_str = request.form.get('rawRequest')
+    raw_data = {}
+    if raw_request_str:
+        try:
+            raw_data = json.loads(raw_request_str)
+        except Exception as e:
+            current_app.logger.error(f"Jotform failed to parse rawRequest: {e}")
+
+    # Merge top-level form fields with rawRequest details
+    form_data = {k: v for k, v in request.form.items()}
+    if raw_data:
+        form_data.update(raw_data)
+
+    submission_id = request.form.get('submissionID')
+    form_title = request.form.get('formTitle', 'Jotform Submission')
+
+    # Helper function to clean keys into labels
+    def clean_key_name(key_str):
+        # Remove q123_ prefixes
+        clean_key = re.sub(r'^q\d+_', '', key_str)
+        # Split camelCase and snake_case
+        words = re.findall(r'[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z][a-z0-9]|\b)', clean_key)
+        if not words:
+            words = clean_key.split('_')
+        return " ".join(w.capitalize() for w in words if w)
+
+    # 4. Extract default task fields from form data
+    task_title = None
+    submitter_email = None
+    notes_list = []
+
+    # Metadata fields to exclude from notes and custom fields
+    metadata_fields = {
+        'formID', 'submissionID', 'webhookURL', 'ip', 'formTitle', 
+        'event_id', 'rawRequest', 'slug', 'submit'
+    }
+
+    # Flatten dictionaries (like full name/address fields in Jotform)
+    def flatten_value(val):
+        if isinstance(val, dict):
+            # Check for name fields (first, last)
+            if 'first' in val or 'last' in val:
+                return f"{val.get('first', '')} {val.get('last', '')}".strip()
+            # General dict values joining
+            return ", ".join(f"{k}: {v}" for k, v in val.items() if v)
+        return val
+
+    for raw_k, raw_v in form_data.items():
+        if raw_k in metadata_fields:
+            continue
+
+        flat_val = flatten_value(raw_v)
+        if not flat_val:
+            continue
+
+        cleaned_k = clean_key_name(raw_k)
+        notes_list.append(f"**{cleaned_k}**: {flat_val}")
+
+        # Check for email field
+        k_lower = cleaned_k.lower()
+        if 'email' in k_lower and not submitter_email:
+            submitter_email = str(flat_val).strip()
+
+        # Check for title/subject field
+        if ('title' in k_lower or 'subject' in k_lower or 'topic' in k_lower) and not task_title:
+            task_title = str(flat_val).strip()
+
+    # Fallback title if none matched
+    if not task_title:
+        # Try to find a student name, parent name, or any general name field
+        student_name = None
+        parent_name = None
+        general_name = None
+        for raw_k, raw_v in form_data.items():
+            cleaned_k = clean_key_name(raw_k).lower()
+            if 'student' in cleaned_k and 'name' in cleaned_k:
+                student_name = flatten_value(raw_v)
+            elif 'parent' in cleaned_k and 'name' in cleaned_k:
+                parent_name = flatten_value(raw_v)
+            elif 'name' in cleaned_k and raw_k not in metadata_fields:
+                general_name = flatten_value(raw_v)
+        
+        if student_name:
+            task_title = f"{student_name} - {form_title}"
+        elif parent_name:
+            task_title = f"{parent_name} - {form_title}"
+        elif general_name:
+            task_title = f"{general_name} - {form_title}"
+        else:
+            task_title = f"{form_title} #{submission_id or ''}"
+
+    # Compile notes dump
+    notes_content = f"### Jotform Submission Details\n"
+    notes_content += f"- **Form Name**: {form_title}\n"
+    notes_content += f"- **Submission ID**: {submission_id or 'N/A'}\n\n"
+    notes_content += "\n".join(f"- {item}" for item in notes_list)
+
+    # 5. Create the BoardTask
+    last_task = BoardTask.query.filter_by(group_id=group_id).order_by(BoardTask.position.desc()).first()
+    position = (last_task.position + 1) if last_task else 0
+
+    new_task = BoardTask(
+        group_id=group_id,
+        title=task_title,
+        notes=notes_content,
+        submitter_email=submitter_email,
+        position=position
+    )
+    db.session.add(new_task)
+    db.session.flush()
+
+    # 6. Log in task history
+    db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name="Jotform Integration", action="Created task via Webhook"))
+
+    # 7. Create custom fields dynamically
+    for raw_k, raw_v in form_data.items():
+        if raw_k in metadata_fields:
+            continue
+
+        flat_val = flatten_value(raw_v)
+        if not flat_val:
+            continue
+
+        cleaned_k = clean_key_name(raw_k)
+        
+        # Check if BoardCustomField exists, if not create it
+        custom_field = BoardCustomField.query.filter_by(board_id=board_id, name=cleaned_k).first()
+        if not custom_field:
+            custom_field = BoardCustomField(board_id=board_id, name=cleaned_k, type='text')
+            db.session.add(custom_field)
+            db.session.flush()
+
+        # Insert value
+        value_json_str = json.dumps(flat_val)
+        field_val = TaskCustomFieldValue(task_id=new_task.id, field_id=custom_field.id, value_json=value_json_str)
+        db.session.add(field_val)
+
+    db.session.commit()
+    return jsonify(new_task.to_dict()), 201
 

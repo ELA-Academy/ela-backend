@@ -229,22 +229,22 @@ def get_workspace_custom_fields():
             
     return jsonify(unique_fields), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/custom-fields', methods=['GET'])
+@board_extensions_bp.route('/boards/<string:board_id>/custom-fields', methods=['GET'])
 @jwt_required()
 def get_board_custom_fields(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
     
-    fields = BoardCustomField.query.filter_by(board_id=board_id).all()
+    fields = BoardCustomField.query.filter_by(board_id=board.id).all()
     return jsonify([f.to_dict() for f in fields]), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/custom-fields', methods=['POST'])
+@board_extensions_bp.route('/boards/<string:board_id>/custom-fields', methods=['POST'])
 @jwt_required()
 def create_board_custom_field(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -259,7 +259,7 @@ def create_board_custom_field(board_id):
     config_str = json.dumps(config) if config else None
 
     field = BoardCustomField(
-        board_id=board_id,
+        board_id=board.id,
         name=name,
         type=field_type,
         config_json=config_str
@@ -355,11 +355,11 @@ def update_board_custom_field(field_id):
     log_activity(actor, f"Updated custom field: '{field.name}' (type: {field.type}) in board '{board.name}'")
     return jsonify(field.to_dict()), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/import-tasks', methods=['POST'])
+@board_extensions_bp.route('/boards/<string:board_id>/import-tasks', methods=['POST'])
 @jwt_required()
 def import_board_tasks(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -374,11 +374,11 @@ def import_board_tasks(board_id):
     # Ensure group exists
     target_group = None
     if group_id:
-        target_group = BoardGroup.query.filter_by(id=group_id, board_id=board_id).first()
+        target_group = BoardGroup.query.filter_by(id=group_id, board_id=board.id).first()
     if not target_group:
-        target_group = BoardGroup.query.filter_by(board_id=board_id).order_by(BoardGroup.position.asc()).first()
+        target_group = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).first()
     if not target_group:
-        target_group = BoardGroup(board_id=board_id, name="Imported Tasks", color="#673de6", position=0)
+        target_group = BoardGroup(board_id=board.id, name="Imported Tasks", color="#673de6", position=0)
         db.session.add(target_group)
         db.session.flush()
 
@@ -389,10 +389,10 @@ def import_board_tasks(board_id):
         cf_type = cf.get('type', 'text')
         cf_config = cf.get('config')
         if cf_name:
-            existing = BoardCustomField.query.filter_by(board_id=board_id, name=cf_name).first()
+            existing = BoardCustomField.query.filter_by(board_id=board.id, name=cf_name).first()
             if not existing:
                 new_field = BoardCustomField(
-                    board_id=board_id,
+                    board_id=board.id,
                     name=cf_name,
                     type=cf_type,
                     config_json=json.dumps(cf_config) if cf_config else None
@@ -577,22 +577,22 @@ def update_task_custom_field_values(task_id):
 # 2. Workspace Forms APIs
 # ==========================================
 
-@board_extensions_bp.route('/boards/<int:board_id>/forms', methods=['GET'])
+@board_extensions_bp.route('/boards/<string:board_id>/forms', methods=['GET'])
 @jwt_required()
 def get_board_forms(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
     
-    forms = BoardFormConfig.query.filter_by(board_id=board_id).all()
+    forms = BoardFormConfig.query.filter_by(board_id=board.id).all()
     return jsonify([f.to_dict() for f in forms]), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/forms', methods=['POST'])
+@board_extensions_bp.route('/boards/<string:board_id>/forms', methods=['POST'])
 @jwt_required()
 def create_board_form(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -606,7 +606,7 @@ def create_board_form(board_id):
         return jsonify({"error": "Name and form structure are required"}), 400
 
     form = BoardFormConfig(
-        board_id=board_id,
+        board_id=board.id,
         name=name,
         description=description,
         form_structure_json=json.dumps(form_structure),
@@ -1264,27 +1264,27 @@ def get_form_responses(form_id):
 # 3. Document Management APIs
 # ==========================================
 
-@board_extensions_bp.route('/boards/<int:board_id>/files', methods=['GET'])
+@board_extensions_bp.route('/boards/<string:board_id>/files', methods=['GET'])
 @jwt_required()
 def get_board_documents(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
-    folders = WorkspaceDocumentFolder.query.filter_by(board_id=board_id).all()
-    files = WorkspaceDocumentFile.query.filter_by(board_id=board_id).all()
+    folders = WorkspaceDocumentFolder.query.filter_by(board_id=board.id).all()
+    files = WorkspaceDocumentFile.query.filter_by(board_id=board.id).all()
 
     return jsonify({
         "folders": [f.to_dict() for f in folders],
         "files": [f.to_dict() for f in files]
     }), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/folders', methods=['POST'])
+@board_extensions_bp.route('/boards/<string:board_id>/folders', methods=['POST'])
 @jwt_required()
 def create_document_folder(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -1296,7 +1296,7 @@ def create_document_folder(board_id):
         return jsonify({"error": "Folder name is required"}), 400
 
     folder = WorkspaceDocumentFolder(
-        board_id=board_id,
+        board_id=board.id,
         name=name,
         parent_id=parent_id
     )
@@ -1305,11 +1305,11 @@ def create_document_folder(board_id):
     log_activity(actor, f"Created folder '{name}' in document center of board '{board.name}'")
     return jsonify(folder.to_dict()), 201
 
-@board_extensions_bp.route('/boards/<int:board_id>/files/upload', methods=['POST'])
+@board_extensions_bp.route('/boards/<string:board_id>/files/upload', methods=['POST'])
 @jwt_required()
 def upload_document_file(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -1351,7 +1351,7 @@ def upload_document_file(board_id):
         ftype = 'other'
 
     doc_file = WorkspaceDocumentFile(
-        board_id=board_id,
+        board_id=board.id,
         folder_id=folder_id if folder_id else None,
         filename=filename,
         file_path=relative_path,
@@ -1466,16 +1466,16 @@ def download_document_file(file_id):
 # 4. Reporting & Analytics API
 # ==========================================
 
-@board_extensions_bp.route('/boards/<int:board_id>/reports', methods=['GET'])
+@board_extensions_bp.route('/boards/<string:board_id>/reports', methods=['GET'])
 @jwt_required()
 def get_workspace_reports(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
     # Tasks stats
-    groups = BoardGroup.query.filter_by(board_id=board_id).all()
+    groups = BoardGroup.query.filter_by(board_id=board.id).all()
     group_ids = [g.id for g in groups]
     tasks = BoardTask.query.filter(BoardTask.group_id.in_(group_ids)).all()
 
@@ -1517,15 +1517,15 @@ def get_workspace_reports(board_id):
         }
     }), 200
 
-@board_extensions_bp.route('/boards/<int:board_id>/time-entries', methods=['GET'])
+@board_extensions_bp.route('/boards/<string:board_id>/time-entries', methods=['GET'])
 @jwt_required()
 def get_board_time_entries(board_id):
     actor, role = get_actor()
-    board = Board.query.get_or_404(board_id)
+    board = Board.get_by_id_or_public_id_or_404(board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
-    groups = BoardGroup.query.filter_by(board_id=board_id).all()
+    groups = BoardGroup.query.filter_by(board_id=board.id).all()
     group_ids = [g.id for g in groups]
     tasks = BoardTask.query.filter(BoardTask.group_id.in_(group_ids)).all()
     task_map = {t.id: t.title for t in tasks}
