@@ -2464,9 +2464,45 @@ def jotform_webhook():
 
     # Metadata fields to exclude from notes and custom fields
     metadata_fields = {
-        'formID', 'submissionID', 'webhookURL', 'ip', 'formTitle', 
-        'event_id', 'rawRequest', 'slug', 'submit'
+        # Core Jotform submission metadata
+        'formID', 'submissionID', 'webhookURL', 'ip', 'formTitle',
+        'event_id', 'rawRequest', 'slug', 'submit',
+        # Jotform internal tracking
+        'username', 'type', 'pretty', 'path',
+        'jsExecutionTracker', 'js_execution_tracker',
+        'submitSource', 'submit_source',
+        'submitDate', 'submit_date',
+        'buildDate', 'build_date',
+        'uploadServerUrl', 'upload_server_url',
+        'eventObserver', 'event_observer',
+        'timeToSubmit', 'time_to_submit',
+        # Payment internals
+        'paymentVersion', 'payment_version',
+        'paymentTotalChecksum', 'payment_total_checksum',
+        'paymentDiscountValue', 'payment_discount_value',
+        # Validation internals
+        'validatedNewRequiredFieldIds', 'validated_new_required_field_ids',
     }
+
+    # Pattern-based exclusion for dynamic Jotform internal keys
+    def is_jotform_internal(key):
+        """Returns True if the key looks like a Jotform internal/system field."""
+        if key in metadata_fields:
+            return True
+        k_lower = key.lower().replace('_', '').replace('-', '')
+        internal_patterns = [
+            'jsexecution', 'executiontracker', 'submitsource', 'submitdate',
+            'builddate', 'uploadserver', 'eventobserver', 'timetosubmit',
+            'paymentversion', 'paymenttotal', 'paymentchecksum', 'paymentdiscount',
+            'validatednew', 'requiredfieldid', 'webhookurl',
+        ]
+        for pattern in internal_patterns:
+            if pattern in k_lower:
+                return True
+        # Jotform payment widget fields (e.g. q5_payment3)
+        if re.match(r'^q\d+_payment\d*$', key, re.IGNORECASE):
+            return True
+        return False
 
     # Flatten dictionaries (like full name/address fields in Jotform)
     def flatten_value(val):
@@ -2474,12 +2510,31 @@ def jotform_webhook():
             # Check for name fields (first, last)
             if 'first' in val or 'last' in val:
                 return f"{val.get('first', '')} {val.get('last', '')}".strip()
-            # General dict values joining
-            return ", ".join(f"{k}: {v}" for k, v in val.items() if v)
+            # Address fields
+            if 'addr_line1' in val or 'city' in val or 'state' in val:
+                parts = [val.get('addr_line1', ''), val.get('addr_line2', ''),
+                         val.get('city', ''), val.get('state', ''), val.get('postal', '')]
+                return ", ".join(p for p in parts if p)
+            # Skip dicts that look like Jotform internal structures (special_*, item_*)
+            if any(k.startswith('special_') or k.startswith('item_') for k in val.keys()):
+                return None
+            # Skip deeply nested dicts (validation internals, etc.)
+            if any(isinstance(v, dict) for v in val.values()):
+                return None
+            # General dict - join only meaningful values
+            meaningful = {k: v for k, v in val.items() if v and str(v).strip()}
+            if not meaningful:
+                return None
+            return ", ".join(f"{k}: {v}" for k, v in meaningful.items())
+        if isinstance(val, str):
+            # Skip values that look like stringified JSON internals
+            stripped = val.strip()
+            if stripped.startswith('{') and ('special_' in stripped or 'item_' in stripped):
+                return None
         return val
 
     for raw_k, raw_v in form_data.items():
-        if raw_k in metadata_fields:
+        if is_jotform_internal(raw_k):
             continue
 
         flat_val = flatten_value(raw_v)
@@ -2510,7 +2565,7 @@ def jotform_webhook():
                 student_name = flatten_value(raw_v)
             elif 'parent' in cleaned_k and 'name' in cleaned_k:
                 parent_name = flatten_value(raw_v)
-            elif 'name' in cleaned_k and raw_k not in metadata_fields:
+            elif 'name' in cleaned_k and not is_jotform_internal(raw_k):
                 general_name = flatten_value(raw_v)
         
         if student_name:
@@ -2545,9 +2600,9 @@ def jotform_webhook():
     # 6. Log in task history
     db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name="Jotform Integration", action="Created task via Webhook"))
 
-    # 7. Create custom fields dynamically
+    # 7. Create custom fields dynamically (only real form answers)
     for raw_k, raw_v in form_data.items():
-        if raw_k in metadata_fields:
+        if is_jotform_internal(raw_k):
             continue
 
         flat_val = flatten_value(raw_v)
