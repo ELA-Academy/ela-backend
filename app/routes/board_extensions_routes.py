@@ -34,11 +34,48 @@ def get_actor():
     return actor, 'staff'
 
 def ensure_board_access(board, actor, role):
+    if not board or not actor:
+        return False
     if role == 'superadmin':
+        if getattr(board, 'is_personal', False):
+            return board.owner_super_admin_id == actor.id
         return True
-    if not board.is_private:
-        return True
-    return any(member.staff_id == actor.id for member in board.access_members)
+
+    if getattr(board, 'is_personal', False):
+        return board.owner_staff_id == actor.id
+
+    def check_direct_access(b):
+        if not b.is_private:
+            return True
+        for member in b.access_members:
+            if member.staff_id and member.staff_id == actor.id:
+                return True
+            if member.super_admin_id and role == 'superadmin' and member.super_admin_id == actor.id:
+                return True
+        if getattr(b, 'owner_staff_id', None) == actor.id:
+            return True
+        return False
+
+    if not check_direct_access(board):
+        return False
+
+    curr = board
+    visited = {curr.id}
+    while curr.parent_id:
+        if curr.parent_id in visited:
+            break
+        visited.add(curr.parent_id)
+        from app.models.board_model import Board
+        parent = Board.query.get(curr.parent_id)
+        if not parent:
+            break
+        if getattr(parent, 'is_personal', False) and parent.owner_staff_id != actor.id:
+            return False
+        if not check_direct_access(parent):
+            return False
+        curr = parent
+
+    return True
 
 def format_ans_html(ans, label="", qtype=""):
     if ans is None or ans == "":

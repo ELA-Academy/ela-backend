@@ -33,19 +33,49 @@ def board_is_accessible(board, actor, role):
     if not board or not actor:
         return False
 
-    if getattr(board, 'is_personal', False):
-        if role == 'superadmin':
-            return board.owner_super_admin_id == actor.id
-        else:
-            return board.owner_staff_id == actor.id
-
     if role == 'superadmin':
+        if getattr(board, 'is_personal', False):
+            return board.owner_super_admin_id == actor.id
         return True
 
-    if not board.is_private:
-        return True
+    # 1. Personal board check for staff
+    if getattr(board, 'is_personal', False):
+        return board.owner_staff_id == actor.id
 
-    return any(member.staff_id == actor.id for member in board.access_members)
+    # Helper to check direct access on a specific board record
+    def check_direct_access(b):
+        if not b.is_private:
+            return True
+        for member in b.access_members:
+            if member.staff_id and member.staff_id == actor.id:
+                return True
+            if member.super_admin_id and role == 'superadmin' and member.super_admin_id == actor.id:
+                return True
+        if getattr(b, 'owner_staff_id', None) == actor.id:
+            return True
+        return False
+
+    # 2. Check direct access on the board itself
+    if not check_direct_access(board):
+        return False
+
+    # 3. Check ancestor hierarchy (Folders and Spaces above this board)
+    curr = board
+    visited = {curr.id}
+    while curr.parent_id:
+        if curr.parent_id in visited:
+            break  # Prevent infinite loop on circular references
+        visited.add(curr.parent_id)
+        parent = Board.query.get(curr.parent_id)
+        if not parent:
+            break
+        if getattr(parent, 'is_personal', False) and parent.owner_staff_id != actor.id:
+            return False
+        if not check_direct_access(parent):
+            return False
+        curr = parent
+
+    return True
 
 
 def merge_task_into_target_board(task, target_group_id, new_status=None):
