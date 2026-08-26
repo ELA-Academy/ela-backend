@@ -314,11 +314,11 @@ def setup_password():
             return jsonify({"error": "Invalid token purpose"}), 400
         
         email = decoded.get('sub')
-        staff_member = Staff.query.filter_by(email=email).first()
+        staff_member = Staff.query.filter(db.func.lower(Staff.email) == db.func.lower(email)).first()
         if staff_member:
             staff_member.set_password(password)
         else:
-            admin_member = SuperAdmin.query.filter_by(email=email).first()
+            admin_member = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
             if admin_member:
                 admin_member.set_password(password)
             else:
