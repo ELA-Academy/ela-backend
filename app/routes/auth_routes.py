@@ -295,17 +295,21 @@ def verify_login_otp():
 
     access_token = create_access_token(identity=email, additional_claims=claims)
 
-    from app.models.activity_log_model import log_activity
-    actor = None
-    if role == 'superadmin':
-        actor = SuperAdmin.query.filter_by(email=email).first()
-    elif role == 'staff':
-        actor = Staff.query.filter_by(email=email).first()
-    elif role == 'parent':
-        actor = Parent.query.filter_by(email=email).first()
-    if actor:
-        log_activity(actor, "logged in")
-        db.session.commit()
+    try:
+        from app.models.activity_log_model import log_activity
+        actor = None
+        if role == 'superadmin':
+            actor = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
+        elif role == 'staff':
+            actor = Staff.query.filter(db.func.lower(Staff.email) == db.func.lower(email)).first()
+        elif role == 'parent':
+            actor = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(email)).first()
+        if actor:
+            log_activity(actor, "logged in")
+            db.session.commit()
+    except Exception as e:
+        print(f"[AUTH LOG ERROR] Non-fatal error logging login activity: {e}")
+        db.session.rollback()
 
     if remember_device and device_id:
         register_remembered_device(email, device_id, request)
