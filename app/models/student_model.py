@@ -71,6 +71,10 @@ class Parent(db.Model):
             return False
         return check_password_hash(self.password_hash, password)
 
+    @property
+    def name(self):
+        return f"{self.first_name} {self.last_name}"
+
     def to_dict(self):
         return {
             'id': self.id,
