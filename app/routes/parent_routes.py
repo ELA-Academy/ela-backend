@@ -579,13 +579,27 @@ def get_parent_family():
     if not parent:
         return jsonify({"error": "Unauthorized"}), 403
 
-    from app.models.authorized_pickup_model import AuthorizedPickup
+    try:
+        from app.models.authorized_pickup_model import AuthorizedPickup
+    except Exception:
+        AuthorizedPickup = None
 
     children_details = []
     for child in parent.children:
-        # Fetch authorized pickups for this student
-        pickups = AuthorizedPickup.query.filter_by(student_id=child.id).all() if hasattr(child, 'id') else []
-        
+        pickups_list = []
+        if AuthorizedPickup and hasattr(child, 'lead_id') and child.lead_id:
+            try:
+                raw_pickups = AuthorizedPickup.query.filter_by(lead_id=child.lead_id).all()
+                for p in raw_pickups:
+                    pickups_list.append({
+                        'id': p.id,
+                        'name': p.name,
+                        'relationship': p.relationship,
+                        'phone': getattr(p, 'contact_number', getattr(p, 'phone', 'N/A'))
+                    })
+            except Exception as e:
+                print(f"[FAMILY PICKUP ERROR] {e}")
+
         children_details.append({
             'id': child.id,
             'student_id_number': child.student_id_number,
@@ -595,7 +609,7 @@ def get_parent_family():
             'grade_level': child.grade_level,
             'status': child.status,
             'enrollment_date': child.enrollment_date.isoformat() if child.enrollment_date else None,
-            'authorized_pickups': [p.to_dict() for p in pickups] if pickups else []
+            'authorized_pickups': pickups_list
         })
 
     return jsonify({
