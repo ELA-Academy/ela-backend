@@ -34,6 +34,11 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('super_admins', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE')
         add_column_if_missing('super_admins', 'notification_preferences', 'TEXT NULL')
 
+    if inspector.has_table('parents'):
+        add_column_if_missing('parents', 'password_hash', 'VARCHAR(200) NULL')
+        add_column_if_missing('parents', 'is_active', 'BOOLEAN NOT NULL DEFAULT TRUE')
+        add_column_if_missing('parents', 'sign_in_pin', "VARCHAR(10) NULL DEFAULT '2963'")
+
     if inspector.has_table('departments'):
         add_column_if_missing('departments', 'email', 'VARCHAR(150) NULL')
 
@@ -120,7 +125,7 @@ def init_db(app):
         from app.models.staff_model import Staff
         from app.models.lead_model import Lead, LeadStudent, LeadParent
         from app.models.task_model import Task
-        from app.models.student_model import Student, Parent
+        from app.models.student_model import Student, Parent, ParentPaymentMethod
         from app.models.activity_log_model import ActivityLog
         from app.models.notification_model import Notification, PendingEmailNotification
         from app.models.conversation_model import Conversation, Message, ConversationParticipant, MessageReaction
