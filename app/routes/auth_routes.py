@@ -3,6 +3,7 @@ from flask_jwt_extended import create_access_token
 from app.models import db
 from app.models.staff_model import Staff
 from app.models.super_admin_model import SuperAdmin
+from app.models.student_model import Parent
 from app.models.login_otp_model import LoginOTP
 
 from app import mail
@@ -207,6 +208,57 @@ def login():
 
         return jsonify({"otp_required": True, "email": staff_member.email, "role": "staff"}), 200
 
+    # 3. Parent check
+    parent_member = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(email)).first()
+
+    if parent_member:
+        if hasattr(parent_member, 'is_active') and parent_member.is_active is False:
+            print(f"[LOGIN FAIL] Parent '{email}' account is inactive (is_active=False)")
+            return jsonify({"msg": "Account is inactive. Please contact support."}), 401
+
+        if not parent_member.password_hash or not parent_member.check_password(password):
+            print(f"[LOGIN FAIL] Password mismatch for Parent '{email}'")
+            record_failed_attempt(email)
+            return jsonify({"msg": "Invalid credentials"}), 401
+
+        clear_failed_attempts(email)
+        additional_claims = {
+            "id": parent_member.id,
+            "name": f"{parent_member.first_name} {parent_member.last_name}",
+            "role": "parent"
+        }
+
+        # Check 30-day Remembered Device
+        if device_id and check_remembered_device(email, device_id):
+            print(f"=== [DEVICE LOG] Parent '{email}' device remembered. Bypassing OTP. ===")
+            access_token = create_access_token(identity=parent_member.email, additional_claims=additional_claims)
+            from app.models.activity_log_model import log_activity
+            log_activity(parent_member, "logged in (remembered device)")
+            db.session.commit()
+            timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            ip_address = request.remote_addr or '127.0.0.1'
+            device_str = request.user_agent.string or 'Unknown device'
+            send_login_notice_email(mail, parent_member.email, timestamp_str, ip_address, device_str)
+            return jsonify(access_token=access_token), 200
+
+        # Generate OTP
+        otp = generate_otp()
+        LoginOTP.query.filter(db.func.lower(LoginOTP.email) == db.func.lower(email)).delete()
+        login_otp_record = LoginOTP(
+            email=parent_member.email,
+            otp=otp,
+            role="parent",
+            claims=additional_claims,
+            expiry=datetime.utcnow() + timedelta(minutes=10)
+        )
+        db.session.add(login_otp_record)
+        db.session.commit()
+
+        print(f"=== [OTP LOG] Parent '{parent_member.email}' OTP: {otp} ===")
+        send_otp_email(mail, parent_member.email, otp)
+
+        return jsonify({"otp_required": True, "email": parent_member.email, "role": "parent"}), 200
+
     print(f"[LOGIN FAIL] No user found with email '{email}'")
     record_failed_attempt(email)
     return jsonify({"msg": "Invalid credentials"}), 401
@@ -249,6 +301,8 @@ def verify_login_otp():
         actor = SuperAdmin.query.filter_by(email=email).first()
     elif role == 'staff':
         actor = Staff.query.filter_by(email=email).first()
+    elif role == 'parent':
+        actor = Parent.query.filter_by(email=email).first()
     if actor:
         log_activity(actor, "logged in")
         db.session.commit()
@@ -322,7 +376,11 @@ def setup_password():
             if admin_member:
                 admin_member.set_password(password)
             else:
-                return jsonify({"error": "Account not found"}), 404
+                parent_member = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(email)).first()
+                if parent_member:
+                    parent_member.set_password(password)
+                else:
+                    return jsonify({"error": "Account not found"}), 404
         
         if jti:
             db.session.add(UsedToken(token_jti=jti))
@@ -342,9 +400,15 @@ def forgot_password():
         # Query case-insensitively to match login behavior
         user = Staff.query.filter(Staff.email.ilike(email)).first()
         role = 'staff'
+        user_name = user.name if user else None
         if not user:
             user = SuperAdmin.query.filter(SuperAdmin.email.ilike(email)).first()
             role = 'superadmin'
+            user_name = user.name if user else None
+        if not user:
+            user = Parent.query.filter(Parent.email.ilike(email)).first()
+            role = 'parent'
+            user_name = f"{user.first_name} {user.last_name}" if user else None
 
         current_app.logger.info(f"[FORGOT PASSWORD] email: '{email}', found: {user.email if user else 'None'}")
 
@@ -356,7 +420,7 @@ def forgot_password():
         reset_token = create_access_token(
             identity=user.email,  # Use exact email from DB
             expires_delta=expires,
-            additional_claims={'purpose': 'reset-password', 'role': role, 'name': user.name}
+            additional_claims={'purpose': 'reset-password', 'role': role, 'name': user_name}
         )
 
         frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')

@@ -102,6 +102,11 @@ def create_app():
             user = Staff.query.filter_by(email=identity).first()
             if not user or not getattr(user, 'is_active', True):
                 return True
+        elif role == 'parent':
+            from app.models.student_model import Parent
+            user = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(identity)).first()
+            if not user or not getattr(user, 'is_active', True):
+                return True
         else:
             return True
             
