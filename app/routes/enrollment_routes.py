@@ -22,15 +22,32 @@ def _perform_lead_conversion(lead):
         return None # Already converted or invalid lead
 
     lead_student_info = lead.students[0]
-    lead_parent_info = lead.parents[0]
 
-    parent = Parent.query.filter_by(email=lead_parent_info.email).first()
-    if not parent:
-        parent = Parent(first_name=lead_parent_info.first_name, last_name=lead_parent_info.last_name, email=lead_parent_info.email, phone=lead_parent_info.phone)
-        db.session.add(parent)
+    parents_to_link = []
+    for lead_parent_info in lead.parents:
+        parent = Parent.query.filter(Parent.email.ilike(lead_parent_info.email.strip())).first()
+        if not parent:
+            parent = Parent(
+                first_name=lead_parent_info.first_name,
+                last_name=lead_parent_info.last_name,
+                email=lead_parent_info.email.strip().lower(),
+                phone=lead_parent_info.phone or "N/A",
+                is_active=True,
+                sign_in_pin="2963"
+            )
+            db.session.add(parent)
+        parents_to_link.append(parent)
 
-    new_student = Student(first_name=lead_student_info.first_name, last_name=lead_student_info.last_name, date_of_birth=lead_student_info.date_of_birth, grade_level=lead_student_info.grade_level, enrollment_date=date.today(), lead_id=lead.id)
-    new_student.parents.append(parent)
+    new_student = Student(
+        first_name=lead_student_info.first_name,
+        last_name=lead_student_info.last_name,
+        date_of_birth=lead_student_info.date_of_birth,
+        grade_level=lead_student_info.grade_level,
+        enrollment_date=date.today(),
+        lead_id=lead.id
+    )
+    for p in parents_to_link:
+        new_student.parents.append(p)
     db.session.add(new_student)
     
     financial_account = StudentFinancialAccount(student=new_student)

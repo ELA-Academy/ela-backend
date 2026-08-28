@@ -24,6 +24,7 @@ def convert_lead_to_student(lead_id):
     db.session.commit()
     return jsonify(new_student.to_dict()), 201
 
+@student_bp.route('', methods=['GET'])
 @student_bp.route('/', methods=['GET'])
 @jwt_required()
 def get_all_students():

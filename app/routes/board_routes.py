@@ -2633,11 +2633,19 @@ def jotform_webhook():
         else:
             task_title = f"{form_title} #{submission_id or ''}"
 
-    # Compile task notes
-    notes_content = f"### Jotform Submission Details\n"
-    notes_content += f"- **Form Name**: {form_title}\n"
-    notes_content += f"- **Submission ID**: {submission_id or 'N/A'}\n\n"
-    notes_content += "\n".join(f"- {item}" for item in notes_list)
+    # Compile task notes as clean HTML for proper rendering
+    notes_html = '<div style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">'
+    notes_html += f'<h5 style="font-weight:700;color:#0f172a;margin:0 0 10px 0;font-size:14px;border-bottom:1px solid #e2e8f0;padding-bottom:8px;">Jotform Submission Details</h5>'
+    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">Form Name</span><span style="color:#0f172a;">{form_title}</span></div>'
+    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">Submission ID</span><span style="color:#0f172a;">{submission_id or "N/A"}</span></div>'
+    notes_html += '<div style="height:8px;"></div>'
+
+    for label, val in entries:
+        escaped_label = str(label).replace('<', '&lt;').replace('>', '&gt;')
+        escaped_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
+        notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">{escaped_label}</span><span style="color:#0f172a;word-break:break-word;">{escaped_val}</span></div>'
+
+    notes_html += '</div>'
 
     # 5. Create the BoardTask
     last_task = BoardTask.query.filter_by(group_id=group_id).order_by(BoardTask.position.desc()).first()
@@ -2646,7 +2654,8 @@ def jotform_webhook():
     new_task = BoardTask(
         group_id=group_id,
         title=task_title,
-        notes=notes_content,
+        description_html=notes_html,
+        notes=notes_html,
         submitter_email=submitter_email,
         position=position
     )

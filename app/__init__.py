@@ -32,6 +32,7 @@ socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
+    app.url_map.strict_slashes = False
 
     if os.getenv('FLASK_ENV') == 'production':
         app.config.from_object(ProductionConfig)
@@ -100,6 +101,11 @@ def create_app():
                 return True
         elif role == 'staff':
             user = Staff.query.filter_by(email=identity).first()
+            if not user or not getattr(user, 'is_active', True):
+                return True
+        elif role == 'parent':
+            from app.models.student_model import Parent
+            user = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(identity)).first()
             if not user or not getattr(user, 'is_active', True):
                 return True
         else:
