@@ -211,4 +211,37 @@ def send_password_reset_email(mail, recipient_email, recipient_name, reset_link,
         return True
     except Exception as e:
         print(f"Failed to send password reset email to {recipient_email}: {e}")
-        return False
+        return False
+
+def send_parent_invite_email(mail, recipient_email, recipient_name, invite_link, sender_email=None):
+    """Sends an invite email to a parent to set up their Parent Portal account."""
+    subject = 'Welcome to ELA Academy Parent Portal - Set Up Your Account'
+    body_text = f"Hello {recipient_name},\n\nYour parent account for the ELA Academy Parent Portal has been created.\nPlease click the link below to set up your password:\n\n{invite_link}\n\nThis link will expire in 7 days.\n\nBest regards,\nELA Academy Team"
+    
+    html_content = _build_action_email_html(
+        title="Welcome to ELA Academy Parent Portal",
+        recipient_name=recipient_name,
+        message_lines=[
+            f"Hello <strong>{recipient_name}</strong>,",
+            "Your parent account for the <strong>ELA Academy Parent Portal</strong> has been created.",
+            "You can now manage tuition payments, view student invoices, check daily activity, and submit documents online.",
+            "Please click the button below to set up your password:"
+        ],
+        action_button_text="Set Up My Parent Account",
+        action_url=invite_link,
+        footer_note="This setup link is secure and will expire in 7 days."
+    )
+    
+    if is_ms_graph_configured():
+        return send_email_via_graph(subject, recipient_email, html_content, sender_email=sender_email)
+
+    try:
+        sender = current_app.config.get('MAIL_DEFAULT_SENDER') if has_app_context() else None
+        msg = Message(subject, sender=sender, recipients=[recipient_email], body=body_text, html=html_content)
+        if mail:
+            mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Failed to send parent invite email to {recipient_email}: {e}")
+        return False
+
