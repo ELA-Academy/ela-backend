@@ -32,6 +32,7 @@ socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
+    app.url_map.strict_slashes = False
 
     if os.getenv('FLASK_ENV') == 'production':
         app.config.from_object(ProductionConfig)
