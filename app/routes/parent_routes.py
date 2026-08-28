@@ -609,3 +609,196 @@ def get_parent_family():
         },
         'children': children_details
     }), 200
+
+# ==============================================================================
+# ADMINISTRATIVE PARENT MANAGEMENT (Super Admin, Administration & IT Dept)
+# ==============================================================================
+
+import re
+from flask_jwt_extended import create_access_token
+from datetime import timedelta
+from app import mail
+from app.utils.email_otp import send_parent_invite_email
+
+def get_admin_actor():
+    claims = get_jwt()
+    email = claims.get('sub')
+    role = claims.get('role')
+    
+    if role == 'superadmin':
+        from app.models.super_admin_model import SuperAdmin
+        return SuperAdmin.query.filter_by(email=email).first()
+        
+    if role == 'staff':
+        from app.models.staff_model import Staff
+        staff = Staff.query.filter_by(email=email).first()
+        if staff and getattr(staff, 'is_active', True):
+            for dept in staff.departments:
+                clean = dept.name.strip().lower()
+                if re.search(r'\b(it|information technology|info tech|tech|administration|admin)\b', clean):
+                    return staff
+    return None
+
+@parent_bp.route('/admin/all', methods=['GET'])
+@jwt_required()
+def admin_get_all_parents():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    parents = Parent.query.order_by(Parent.created_at.desc()).all()
+    results = []
+    for p in parents:
+        results.append({
+            'id': p.id,
+            'first_name': p.first_name,
+            'last_name': p.last_name,
+            'email': p.email,
+            'phone': p.phone,
+            'is_active': getattr(p, 'is_active', True),
+            'has_password': bool(p.password_hash),
+            'sign_in_pin': p.sign_in_pin or "2963",
+            'created_at': p.created_at.isoformat() + 'Z' if p.created_at else None,
+            'children': [{'id': c.id, 'name': f"{c.first_name} {c.last_name}", 'grade_level': c.grade_level, 'status': c.status} for c in p.children]
+        })
+
+    return jsonify(results), 200
+
+@parent_bp.route('/admin/create', methods=['POST'])
+@jwt_required()
+def admin_create_parent():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    from app.utils.sanitizer import sanitize_dict
+    data = sanitize_dict(request.get_json() or {})
+
+    first_name = (data.get('first_name') or '').strip()
+    last_name = (data.get('last_name') or '').strip()
+    email = (data.get('email') or '').strip().lower()
+    phone = (data.get('phone') or '').strip()
+    password = data.get('password')
+    student_ids = data.get('student_ids', [])
+    send_invite = data.get('send_invite', True)
+
+    if not first_name or not last_name or not email:
+        return jsonify({"error": "First name, last name, and email are required."}), 400
+
+    existing_parent = Parent.query.filter(db.func.lower(Parent.email) == email).first()
+    if existing_parent:
+        return jsonify({"error": f"A parent account with email '{email}' already exists."}), 409
+
+    new_parent = Parent(
+        first_name=first_name,
+        last_name=last_name,
+        email=email,
+        phone=phone or "N/A",
+        sign_in_pin=data.get('sign_in_pin') or "2963",
+        is_active=bool(data.get('is_active', True))
+    )
+
+    if password:
+        new_parent.set_password(password)
+
+    # Link selected students
+    for s_id in student_ids:
+        st = Student.query.get(s_id)
+        if st and st not in new_parent.children:
+            new_parent.children.append(st)
+
+    db.session.add(new_parent)
+    db.session.commit()
+
+    log_activity(actor, f"Created parent account: '{first_name} {last_name}' ({email})", new_parent)
+
+    # Send invitation setup email if no password was supplied or send_invite is true
+    if send_invite or not password:
+        setup_token = create_access_token(
+            identity=email,
+            additional_claims={"purpose": "setup-password", "name": f"{first_name} {last_name}", "role": "parent"},
+            expires_delta=timedelta(days=7)
+        )
+        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+        frontend_url = os.getenv('FRONTEND_URL', frontend_url)
+        invite_link = f"{frontend_url}/setup-password?token={setup_token}"
+
+        try:
+            send_parent_invite_email(mail, email, f"{first_name} {last_name}", invite_link)
+        except Exception as e:
+            print(f"[PARENT INVITE ERROR] Failed to send email to {email}: {e}")
+
+    return jsonify(new_parent.to_dict()), 201
+
+@parent_bp.route('/admin/<int:parent_id>', methods=['PUT'])
+@jwt_required()
+def admin_update_parent(parent_id):
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    parent = Parent.query.get_or_404(parent_id)
+    from app.utils.sanitizer import sanitize_dict
+    data = sanitize_dict(request.get_json() or {})
+
+    parent.first_name = data.get('first_name', parent.first_name)
+    parent.last_name = data.get('last_name', parent.last_name)
+    parent.phone = data.get('phone', parent.phone)
+    if 'is_active' in data:
+        parent.is_active = bool(data['is_active'])
+    if 'sign_in_pin' in data:
+        parent.sign_in_pin = data['sign_in_pin']
+    if data.get('password'):
+        parent.set_password(data['password'])
+
+    if 'student_ids' in data:
+        parent.children.clear()
+        for s_id in data['student_ids']:
+            st = Student.query.get(s_id)
+            if st:
+                parent.children.append(st)
+
+    log_activity(actor, f"Updated parent account '{parent.first_name} {parent.last_name}'", parent)
+    db.session.commit()
+
+    return jsonify(parent.to_dict()), 200
+
+@parent_bp.route('/admin/<int:parent_id>/resend-invite', methods=['POST'])
+@jwt_required()
+def admin_resend_parent_invite(parent_id):
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    parent = Parent.query.get_or_404(parent_id)
+
+    setup_token = create_access_token(
+        identity=parent.email,
+        additional_claims={"purpose": "setup-password", "name": f"{parent.first_name} {parent.last_name}", "role": "parent"},
+        expires_delta=timedelta(days=7)
+    )
+    frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+    frontend_url = os.getenv('FRONTEND_URL', frontend_url)
+    invite_link = f"{frontend_url}/setup-password?token={setup_token}"
+
+    try:
+        send_parent_invite_email(mail, parent.email, f"{parent.first_name} {parent.last_name}", invite_link)
+        log_activity(actor, f"Resent account setup invitation to parent '{parent.email}'", parent)
+        return jsonify({"message": f"Invitation link successfully sent to {parent.email}."}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to send invite email: {e}"}), 500
+
+@parent_bp.route('/admin/<int:parent_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_parent(parent_id):
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    parent = Parent.query.get_or_404(parent_id)
+    log_activity(actor, f"Deleted parent account '{parent.first_name} {parent.last_name}' ({parent.email})", parent)
+
+    db.session.delete(parent)
+    db.session.commit()
+    return jsonify({"message": "Parent account removed successfully."}), 200
+
