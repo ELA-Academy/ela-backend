@@ -293,6 +293,199 @@ def receive_payment(student_id):
     db.session.commit()
     return jsonify(new_payment.to_dict()), 201
 
+@billing_bp.route('/accounts/<int:student_id>/charge-saved-card', methods=['POST'])
+@jwt_required()
+def charge_saved_card(student_id):
+    """
+    Charges a student's parent's saved Stripe payment method off-session.
+    Explicitly handles 3DS authentication_required without silent failure.
+    """
+    import uuid
+    from app.services import stripe_service
+    from app.models.student_model import ParentPaymentMethod
+    from app.models.notification_model import Notification
+
+    actor = get_actor()
+    student = Student.query.get_or_404(student_id)
+    account = student.financial_account
+    if not account:
+        return jsonify({"error": "Financial account not found."}), 404
+
+    data = request.get_json() or {}
+    invoice_id = data.get('invoice_id')
+    payment_method_id = data.get('payment_method_id')
+    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or f"admin_charge_{student.id}_{uuid.uuid4()}"
+
+    # Verify Invoice
+    inv = None
+    if invoice_id:
+        inv = Invoice.query.filter_by(id=invoice_id, account_id=account.id).first()
+        if not inv:
+            return jsonify({"error": "Invoice not found."}), 404
+        total_paid_inv = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+        remaining_due = max(0.0, inv.total_amount - total_paid_inv)
+        if remaining_due <= 0:
+            return jsonify({"error": "Invoice is already paid in full."}), 400
+        charge_amount = remaining_due
+    else:
+        charge_amount = float(data.get('amount', 0))
+        if charge_amount <= 0:
+            return jsonify({"error": "Invalid charge amount."}), 400
+
+    # Resolve parent & payment method
+    parent = None
+    pm_record = None
+    if payment_method_id:
+        pm_record = ParentPaymentMethod.query.get(payment_method_id)
+        if pm_record:
+            parent = pm_record.parent
+    elif student.parents:
+        parent = student.parents[0]
+        pm_record = parent.payment_methods.filter_by(is_default=True).first() or parent.payment_methods.first()
+
+    if not parent or not pm_record or not pm_record.stripe_payment_method_id:
+        return jsonify({"error": "No saved Stripe payment method found on file for this student."}), 400
+
+    amount_cents = int(round(charge_amount * 100))
+    customer_id = stripe_service.get_or_create_stripe_customer(parent)
+
+    metadata = {
+        "student_id": str(student.id),
+        "invoice_id": str(invoice_id) if invoice_id else "",
+        "parent_id": str(parent.id),
+        "initiated_by_staff": str(actor.id if actor else "admin")
+    }
+
+    try:
+        intent = stripe_service.create_payment_intent(
+            amount_in_cents=amount_cents,
+            customer_id=customer_id,
+            payment_method_id=pm_record.stripe_payment_method_id,
+            description=f"Tuition charge for {student.first_name} {student.last_name}",
+            metadata=metadata,
+            idempotency_key=idempotency_key,
+            off_session=True,
+            confirm=True
+        )
+
+        # Handle CardError / authentication_required
+        if isinstance(intent, dict) and intent.get("error"):
+            if intent.get("code") == "authentication_required" or intent.get("decline_code") == "authentication_required":
+                if inv:
+                    inv.status = 'Action Required'
+                # Notify parent to complete 3DS
+                try:
+                    notif = Notification(
+                        recipient_role="parent",
+                        recipient_id=parent.id,
+                        title="Payment Action Required",
+                        message=f"A charge of ${charge_amount:.2f} for {student.first_name} requires your card confirmation. Please log into the Parent Portal to complete.",
+                        notification_type="payment_action_required"
+                    )
+                    db.session.add(notif)
+                except Exception as ne:
+                    print(f"Failed to create notification: {ne}")
+
+                db.session.commit()
+                return jsonify({
+                    "status": "requires_action",
+                    "error": "Card requires 3D Secure / customer authentication. Parent has been notified to complete payment in portal."
+                }), 402
+
+            return jsonify({"error": intent.get("message", "Charge declined by bank.")}), 400
+
+        if intent.status == 'succeeded':
+            new_payment = Payment(
+                account_id=account.id,
+                invoice_id=invoice_id,
+                amount=charge_amount,
+                method=f"Stripe Card (*{pm_record.last4})",
+                notes=f"Admin off-session charge (PaymentIntent {intent.id})",
+                status='Success',
+                stripe_payment_intent_id=intent.id,
+                idempotency_key=idempotency_key,
+                transaction_date=datetime.utcnow()
+            )
+            db.session.add(new_payment)
+
+            if inv and (total_paid_inv + charge_amount) >= inv.total_amount:
+                inv.status = 'Paid'
+
+            actor_name = f"{actor.first_name} {actor.last_name}" if actor else "Staff"
+            log_financial_event(
+                account.id, 'Payment', new_payment.id, 'Receive', charge_amount,
+                'Success', actor_name, f"Charged saved card (*{pm_record.last4}) via Stripe"
+            )
+            log_activity(actor, f"Charged parent card of ${charge_amount:.2f} for {student.first_name} {student.last_name}", new_payment)
+            db.session.commit()
+
+            return jsonify({
+                "message": "Payment charged successfully!",
+                "payment": new_payment.to_dict()
+            }), 201
+
+        return jsonify({"status": intent.status, "message": "Payment in progress."}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error charging saved card: {e}", exc_info=True)
+        return jsonify({"error": "Failed to process charge with Stripe."}), 500
+
+@billing_bp.route('/payments/<int:payment_id>/refund', methods=['POST'])
+@jwt_required()
+def refund_payment(payment_id):
+    """
+    Issues a refund on a Payment record via Stripe with idempotency.
+    Guards against double-refunds.
+    """
+    import uuid
+    from app.services import stripe_service
+
+    actor = get_actor()
+    payment = Payment.query.get_or_404(payment_id)
+
+    if payment.is_refunded or payment.status == 'Refunded':
+        return jsonify({"error": "This payment has already been refunded."}), 400
+
+    data = request.get_json() or {}
+    refund_amount = float(data.get('amount') or payment.amount)
+    reason = data.get('reason', 'requested_by_customer')
+    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or f"refund_{payment.id}_{uuid.uuid4()}"
+
+    if refund_amount <= 0 or refund_amount > payment.amount:
+        return jsonify({"error": f"Invalid refund amount. Maximum refundable is ${payment.amount:.2f}"}), 400
+
+    # If Stripe payment, execute refund with Stripe
+    if payment.stripe_payment_intent_id:
+        amount_cents = int(round(refund_amount * 100))
+        try:
+            stripe_service.create_refund(
+                charge_id_or_payment_intent_id=payment.stripe_payment_intent_id,
+                amount_in_cents=amount_cents,
+                reason=reason,
+                idempotency_key=idempotency_key
+            )
+        except Exception as e:
+            current_app.logger.error(f"Stripe Refund API error: {e}")
+            return jsonify({"error": "Stripe refund processing failed."}), 500
+
+    payment.is_refunded = True
+    payment.refund_amount = (payment.refund_amount or 0.0) + refund_amount
+    if payment.refund_amount >= payment.amount:
+        payment.status = 'Refunded'
+
+    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "Staff"
+    log_financial_event(
+        payment.account_id, 'Refund', payment.id, 'Refund', refund_amount,
+        'Success', actor_name, f"Refund of ${refund_amount:.2f} issued. Reason: {reason}"
+    )
+    log_activity(actor, f"Issued refund of ${refund_amount:.2f} for Payment #{payment.id}", payment)
+    db.session.commit()
+
+    return jsonify({
+        "message": f"Refund of ${refund_amount:.2f} processed successfully.",
+        "payment": payment.to_dict()
+    }), 200
+
 @billing_bp.route('/accounts/<int:student_id>/credits', methods=['POST'])
 @jwt_required()
 def add_credit(student_id):
