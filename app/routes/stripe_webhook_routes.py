@@ -1,6 +1,10 @@
 import os
 import logging
-import stripe
+try:
+    import stripe
+except ImportError:
+    stripe = None
+
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from sqlalchemy import func

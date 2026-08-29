@@ -6,12 +6,16 @@ db = SQLAlchemy()
 
 def ensure_runtime_schema_updates():
     def add_column_if_missing(table_name, column_name, sql_definition):
-        inspector = inspect(db.engine)
-        existing_columns = {column['name'] for column in inspector.get_columns(table_name)}
-        if column_name in existing_columns:
-            return
-        db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}"))
-        db.session.commit()
+        try:
+            inspector = inspect(db.engine)
+            existing_columns = {column['name'] for column in inspector.get_columns(table_name)}
+            if column_name in existing_columns:
+                return
+            db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}"))
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"[Schema] Could not add {table_name}.{column_name}: {e}")
 
     def alter_column_type_if_needed(table_name, column_name, target_type_keyword):
         """Alter a column's type if it doesn't match the target type (e.g. VARCHAR -> TEXT)."""
