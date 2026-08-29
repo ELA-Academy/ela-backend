@@ -432,7 +432,7 @@ def charge_saved_card(student_id):
 
 @billing_bp.route('/payments/<int:payment_id>/refund', methods=['POST'])
 @jwt_required()
-def refund_payment(payment_id):
+def refund_payment_direct(payment_id):
     """
     Issues a refund on a Payment record via Stripe with idempotency.
     Guards against double-refunds.
