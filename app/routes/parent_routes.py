@@ -270,7 +270,35 @@ def get_parent_payments_summary():
         'total_count': len(formatted_transactions)
     }), 200
 
-# === Payment Methods Endpoints ===
+# === Stripe Configuration & Payment Methods Endpoints ===
+
+@parent_bp.route('/stripe-config', methods=['GET'])
+@jwt_required()
+def get_stripe_config():
+    """Returns the Stripe Publishable Key securely from backend config."""
+    pub_key = current_app.config.get('STRIPE_PUBLISHABLE_KEY') or os.getenv('STRIPE_PUBLISHABLE_KEY')
+    return jsonify({
+        "publishable_key": pub_key or ""
+    }), 200
+
+@parent_bp.route('/create-setup-intent', methods=['POST'])
+@jwt_required()
+def create_parent_setup_intent():
+    """Creates a Stripe SetupIntent for adding a card/bank without sending raw PAN to server."""
+    parent = get_current_parent()
+    if not parent:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    from app.services import stripe_service
+    data = request.get_json() or {}
+    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or f"setup_{parent.id}_{uuid.uuid4()}"
+
+    try:
+        setup_data = stripe_service.create_setup_intent(parent, idempotency_key=idempotency_key)
+        return jsonify(setup_data), 200
+    except Exception as e:
+        current_app.logger.error(f"Error in create_parent_setup_intent: {e}", exc_info=True)
+        return jsonify({"error": "Failed to initialize secure payment setup."}), 500
 
 @parent_bp.route('/payment-methods', methods=['GET'])
 @jwt_required()
@@ -282,40 +310,56 @@ def get_payment_methods():
     methods = parent.payment_methods.order_by(ParentPaymentMethod.is_default.desc(), ParentPaymentMethod.created_at.desc()).all()
     return jsonify([m.to_dict() for m in methods]), 200
 
-@parent_bp.route('/payment-methods', methods=['POST'])
+@parent_bp.route('/payment-methods/save-stripe', methods=['POST'])
 @jwt_required()
-def add_payment_method():
+def save_stripe_payment_method():
+    """
+    Saves a verified Stripe PaymentMethod into the database.
+    Zero raw card data is accepted—only the tokenized payment_method_id.
+    """
     parent = get_current_parent()
     if not parent:
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json() or {}
-    method_type = data.get('method_type', 'card') # 'card' or 'bank_account'
-    last4 = (data.get('last4') or '').strip()
+    stripe_pm_id = data.get('payment_method_id')
     is_default = bool(data.get('is_default', False))
 
-    if not last4 or len(last4) < 4:
-        return jsonify({"error": "Valid 4-digit card or account number ending is required."}), 400
+    if not stripe_pm_id:
+        return jsonify({"error": "payment_method_id is required."}), 400
 
-    last4 = last4[-4:]
+    from app.services import stripe_service
+    try:
+        pm_details = stripe_service.retrieve_payment_method_details(stripe_pm_id)
+    except Exception as e:
+        current_app.logger.error(f"Failed to retrieve Stripe PaymentMethod {stripe_pm_id}: {e}")
+        return jsonify({"error": "Could not verify payment method with Stripe."}), 400
 
-    # Check if this is the first payment method; if so, make it default automatically
+    # If first method or explicitly set, make default
     existing_count = parent.payment_methods.count()
     if existing_count == 0 or is_default:
         is_default = True
         ParentPaymentMethod.query.filter_by(parent_id=parent.id).update({'is_default': False})
 
+    # Check if already exists in DB
+    existing_pm = ParentPaymentMethod.query.filter_by(stripe_payment_method_id=stripe_pm_id, parent_id=parent.id).first()
+    if existing_pm:
+        existing_pm.is_default = is_default
+        db.session.commit()
+        return jsonify(existing_pm.to_dict()), 200
+
     new_pm = ParentPaymentMethod(
         parent_id=parent.id,
-        method_type=method_type,
-        card_brand=data.get('card_brand') if method_type == 'card' else None,
-        last4=last4,
-        exp_month=int(data.get('exp_month')) if data.get('exp_month') else None,
-        exp_year=int(data.get('exp_year')) if data.get('exp_year') else None,
-        bank_name=data.get('bank_name', 'Verified Bank') if method_type == 'bank_account' else None,
-        account_type=data.get('account_type', 'checking') if method_type == 'bank_account' else None,
-        account_holder_name=data.get('account_holder_name', f"{parent.first_name} {parent.last_name}"),
-        is_default=is_default
+        method_type=pm_details["type"],
+        card_brand=pm_details["card_brand"],
+        last4=pm_details["last4"] or "0000",
+        exp_month=pm_details["exp_month"],
+        exp_year=pm_details["exp_year"],
+        bank_name=pm_details["bank_name"],
+        account_type="checking",
+        account_holder_name=pm_details["account_holder_name"] or f"{parent.first_name} {parent.last_name}",
+        is_default=is_default,
+        stripe_payment_method_id=stripe_pm_id
     )
     db.session.add(new_pm)
     db.session.commit()
@@ -346,6 +390,15 @@ def delete_payment_method(pm_id):
 
     pm = ParentPaymentMethod.query.filter_by(id=pm_id, parent_id=parent.id).first_or_404()
     was_default = pm.is_default
+
+    # Detach from Stripe
+    if pm.stripe_payment_method_id:
+        from app.services import stripe_service
+        try:
+            stripe_service.detach_payment_method(pm.stripe_payment_method_id)
+        except Exception as e:
+            current_app.logger.warning(f"Failed to detach payment method {pm.stripe_payment_method_id}: {e}")
+
     db.session.delete(pm)
     db.session.commit()
 
@@ -358,40 +411,36 @@ def delete_payment_method(pm_id):
 
     return jsonify({"message": "Payment method removed successfully."}), 200
 
-# === Submit Payment Endpoint ===
+# === Stripe Payment Intent & Execution Endpoints ===
 
-@parent_bp.route('/pay', methods=['POST'])
+@parent_bp.route('/create-payment-intent', methods=['POST'])
 @jwt_required()
-def submit_payment():
+def create_parent_payment_intent():
+    """
+    Creates a Stripe PaymentIntent with server-side amount calculation
+    and ownership verification. Never accepts arbitrary amounts blindly.
+    """
     parent = get_current_parent()
     if not parent:
         return jsonify({"error": "Unauthorized"}), 403
 
+    from app.services import stripe_service
     data = request.get_json() or {}
-    amount = data.get('amount')
-    try:
-        amount = float(amount)
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid payment amount."}), 400
-
-    if amount <= 0:
-        return jsonify({"error": "Payment amount must be greater than $0."}), 400
-
     student_id = data.get('student_id')
     invoice_id = data.get('invoice_id')
-    payment_method_id = data.get('payment_method_id')
-    custom_method_name = data.get('method_name')
+    saved_pm_id = data.get('payment_method_id')
+    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or f"pay_{parent.id}_{uuid.uuid4()}"
 
-    # Resolve target student
+    # 1. Resolve Target Student & Verify Ownership
     target_student = None
     if student_id:
         target_student = Student.query.get(student_id)
         if not target_student or parent not in target_student.parents:
-            return jsonify({"error": "Selected student is invalid."}), 400
+            return jsonify({"error": "Selected student is invalid or unauthorized."}), 403
     elif parent.children:
         target_student = parent.children[0]
     else:
-        return jsonify({"error": "No student associated with this parent account."}), 400
+        return jsonify({"error": "No student linked to this parent account."}), 400
 
     account = target_student.financial_account
     if not account:
@@ -399,46 +448,242 @@ def submit_payment():
         db.session.add(account)
         db.session.commit()
 
-    # Resolve payment method display label
-    method_label = "Online Payment"
-    if payment_method_id:
-        pm = ParentPaymentMethod.query.filter_by(id=payment_method_id, parent_id=parent.id).first()
-        if pm:
-            if pm.method_type == 'bank_account':
-                method_label = f"ACH Bank ({pm.bank_name or 'Bank'} - *{pm.last4})"
-            else:
-                method_label = f"Card ({pm.card_brand or 'Card'} - *{pm.last4})"
-    elif custom_method_name:
-        method_label = custom_method_name
+    # 2. Server-side amount computation (Never trust client amount)
+    charge_amount = 0.0
+    if invoice_id:
+        inv = Invoice.query.filter_by(id=invoice_id, account_id=account.id).first()
+        if not inv:
+            return jsonify({"error": "Invoice not found or unauthorized."}), 404
+        
+        total_paid_inv = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+        remaining_due = max(0.0, inv.total_amount - total_paid_inv)
+        if remaining_due <= 0.0:
+            return jsonify({"error": "This invoice is already paid in full."}), 400
+
+        # Check requested partial amount if provided
+        req_amount = data.get('requested_amount') or data.get('amount')
+        if req_amount:
+            try:
+                req_amount = float(req_amount)
+                if 0.0 < req_amount <= remaining_due:
+                    charge_amount = req_amount
+                else:
+                    charge_amount = remaining_due
+            except (ValueError, TypeError):
+                charge_amount = remaining_due
+        else:
+            charge_amount = remaining_due
     else:
-        default_pm = parent.payment_methods.filter_by(is_default=True).first()
-        if default_pm:
-            if default_pm.method_type == 'bank_account':
-                method_label = f"ACH Bank ({default_pm.bank_name or 'Bank'} - *{default_pm.last4})"
-            else:
-                method_label = f"Card ({default_pm.card_brand or 'Card'} - *{default_pm.last4})"
+        # Calculate current total balance from DB
+        total_invoiced = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(Invoice.account_id == account.id).scalar() or 0.0
+        total_paid = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == account.id, Payment.status == 'Success').scalar() or 0.0
+        total_credited = db.session.query(func.sum(Credit.amount)).filter(Credit.account_id == account.id).scalar() or 0.0
+        current_balance = max(0.0, total_invoiced - (total_paid + total_credited))
+
+        req_amount = data.get('requested_amount') or data.get('amount')
+        if req_amount:
+            try:
+                req_amount = float(req_amount)
+                if req_amount > 0:
+                    charge_amount = req_amount
+                else:
+                    charge_amount = current_balance
+            except (ValueError, TypeError):
+                charge_amount = current_balance
+        else:
+            charge_amount = current_balance
+
+    if charge_amount <= 0.0:
+        return jsonify({"error": "No outstanding balance due to charge."}), 400
+
+    amount_cents = int(round(charge_amount * 100))
+
+    # 3. Check for existing payment under this idempotency key
+    existing_payment = Payment.query.filter_by(idempotency_key=idempotency_key).first()
+    if existing_payment and existing_payment.status == 'Success':
+        return jsonify({
+            "message": "Payment already processed.",
+            "payment": existing_payment.to_dict(),
+            "status": "succeeded"
+        }), 200
+
+    # 4. Resolve Stripe Customer & Payment Method
+    customer_id = stripe_service.get_or_create_stripe_customer(parent)
+    stripe_pm_id = None
+    if saved_pm_id:
+        pm_record = ParentPaymentMethod.query.filter_by(id=saved_pm_id, parent_id=parent.id).first()
+        if pm_record:
+            stripe_pm_id = pm_record.stripe_payment_method_id
+
+    # 5. Create Stripe PaymentIntent
+    metadata = {
+        "parent_id": str(parent.id),
+        "student_id": str(target_student.id),
+        "invoice_id": str(invoice_id) if invoice_id else "",
+        "idempotency_key": idempotency_key
+    }
+
+    try:
+        intent = stripe_service.create_payment_intent(
+            amount_in_cents=amount_cents,
+            customer_id=customer_id,
+            payment_method_id=stripe_pm_id,
+            description=f"Payment for {target_student.first_name} {target_student.last_name}",
+            metadata=metadata,
+            idempotency_key=idempotency_key,
+            confirm=bool(stripe_pm_id)
+        )
+
+        if isinstance(intent, dict) and intent.get("error"):
+            return jsonify({
+                "error": intent.get("message", "Payment processing failed."),
+                "code": intent.get("code")
+            }), 400
+
+        # If payment succeeded immediately (e.g. saved card)
+        if intent.status == 'succeeded':
+            payment_record = Payment(
+                account_id=account.id,
+                invoice_id=invoice_id,
+                amount=charge_amount,
+                method=f"Stripe Card (*{pm_record.last4})" if pm_record else "Stripe Online Payment",
+                notes=f"Stripe PaymentIntent {intent.id}",
+                status='Success',
+                stripe_payment_intent_id=intent.id,
+                idempotency_key=idempotency_key,
+                transaction_date=datetime.utcnow()
+            )
+            db.session.add(payment_record)
+
+            if invoice_id:
+                inv = Invoice.query.get(invoice_id)
+                if inv:
+                    total_p = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+                    if (total_p + charge_amount) >= inv.total_amount:
+                        inv.status = 'Paid'
+
+            try:
+                log = FinancialAuditLog(
+                    account_id=account.id,
+                    transaction_type='Payment',
+                    transaction_id=str(intent.id),
+                    action='Receive',
+                    amount=charge_amount,
+                    status='Success',
+                    actor_name=f"{parent.first_name} {parent.last_name} (Parent)",
+                    description=f"Online payment of ${charge_amount:.2f} processed via Stripe"
+                )
+                db.session.add(log)
+            except Exception as e:
+                current_app.logger.warning(f"Financial audit log error: {e}")
+
+            db.session.commit()
+            return jsonify({
+                "status": "succeeded",
+                "payment_intent_id": intent.id,
+                "amount": charge_amount,
+                "message": "Payment succeeded!"
+            }), 200
+
+        # If requires client confirmation / 3D Secure / Elements
+        return jsonify({
+            "status": intent.status,
+            "client_secret": intent.client_secret,
+            "payment_intent_id": intent.id,
+            "amount": charge_amount
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"PaymentIntent creation failed: {e}", exc_info=True)
+        return jsonify({"error": "Unable to initialize Stripe payment. Please try again."}), 500
+
+@parent_bp.route('/pay', methods=['POST'])
+@jwt_required()
+def confirm_and_reconcile_payment():
+    """
+    Confirms a completed Stripe PaymentIntent, reconciles invoices,
+    and records the transaction in the ledger.
+    """
+    parent = get_current_parent()
+    if not parent:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    import stripe
+    from app.services import stripe_service
+    data = request.get_json() or {}
+    payment_intent_id = data.get('payment_intent_id')
+    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or payment_intent_id
+
+    if not payment_intent_id:
+        return jsonify({"error": "payment_intent_id is required."}), 400
+
+    # 1. Retrieve PaymentIntent from Stripe
+    stripe.api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+    try:
+        pi = stripe.PaymentIntent.retrieve(payment_intent_id)
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving PaymentIntent {payment_intent_id}: {e}")
+        return jsonify({"error": "Could not verify payment status with Stripe."}), 400
+
+    if pi.status != 'succeeded':
+        return jsonify({
+            "error": f"Payment is not confirmed. Status: {pi.status}",
+            "status": pi.status
+        }), 400
+
+    amount = float(pi.amount_received or pi.amount) / 100.0
+    metadata = pi.metadata or {}
+    invoice_id = metadata.get('invoice_id') or data.get('invoice_id')
+    student_id = metadata.get('student_id') or data.get('student_id')
+
+    # Resolve Student & Account
+    target_student = None
+    if student_id:
+        target_student = Student.query.get(student_id)
+    elif parent.children:
+        target_student = parent.children[0]
+
+    if not target_student:
+        return jsonify({"error": "Student account not found."}), 400
+
+    account = target_student.financial_account
+    if not account:
+        account = StudentFinancialAccount(student=target_student)
+        db.session.add(account)
+        db.session.commit()
+
+    # Check for existing Payment row to prevent duplicate insertion
+    existing_payment = Payment.query.filter_by(stripe_payment_intent_id=pi.id).first()
+    if existing_payment:
+        return jsonify({
+            "message": "Payment verified and recorded.",
+            "payment": existing_payment.to_dict(),
+            "status": "succeeded"
+        }), 200
 
     # Create Payment record
     new_payment = Payment(
         account_id=account.id,
-        invoice_id=invoice_id,
+        invoice_id=int(invoice_id) if invoice_id else None,
         amount=amount,
-        method=method_label,
-        notes=f"Paid by {parent.first_name} {parent.last_name} via Parent Portal",
+        method="Stripe Online Payment",
+        notes=f"Stripe PaymentIntent {pi.id}",
         status='Success',
+        stripe_payment_intent_id=pi.id,
+        idempotency_key=idempotency_key,
         transaction_date=datetime.utcnow()
     )
     db.session.add(new_payment)
 
-    # Check and update invoice status if invoice_id provided
+    # Reconcile Invoice status
     if invoice_id:
-        inv = Invoice.query.filter_by(id=invoice_id, account_id=account.id).first()
+        inv = Invoice.query.filter_by(id=int(invoice_id), account_id=account.id).first()
         if inv:
-            total_paid_inv = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id).scalar() or 0.0
-            if (total_paid_inv + amount) >= inv.total_amount:
+            total_paid = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+            if (total_paid + amount) >= inv.total_amount:
                 inv.status = 'Paid'
 
-    # Financial audit log
+    # Audit Log
     try:
         log = FinancialAuditLog(
             account_id=account.id,
@@ -448,17 +693,17 @@ def submit_payment():
             amount=amount,
             status='Success',
             actor_name=f"{parent.first_name} {parent.last_name} (Parent)",
-            description=f"Parent Portal payment of ${amount:.2f} processed via {method_label}"
+            description=f"Parent Portal payment of ${amount:.2f} confirmed via Stripe"
         )
         db.session.add(log)
     except Exception as e:
-        print(f"[FinancialAuditLog] Error logging parent payment: {e}")
+        current_app.logger.warning(f"Financial audit log error: {e}")
 
-    log_activity(parent, f"Submitted payment of ${amount:.2f} for {target_student.first_name} {target_student.last_name}", new_payment)
+    log_activity(parent, f"Paid ${amount:.2f} via Stripe for {target_student.first_name} {target_student.last_name}", new_payment)
     db.session.commit()
 
     return jsonify({
-        "message": "Payment submitted successfully!",
+        "message": "Payment confirmed and recorded successfully!",
         "payment": new_payment.to_dict()
     }), 201
 

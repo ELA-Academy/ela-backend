@@ -112,6 +112,19 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('board_task_assignees'):
         add_column_if_missing('board_task_assignees', 'department_id', 'INTEGER NULL')
 
+    if inspector.has_table('payments'):
+        add_column_if_missing('payments', 'stripe_payment_intent_id', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'stripe_charge_id', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'idempotency_key', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'is_refunded', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('payments', 'refund_amount', 'FLOAT NOT NULL DEFAULT 0.0')
+
+    if inspector.has_table('parent_payment_methods'):
+        add_column_if_missing('parent_payment_methods', 'stripe_payment_method_id', 'VARCHAR(100) NULL')
+
+    if inspector.has_table('parents'):
+        add_column_if_missing('parents', 'stripe_customer_id', 'VARCHAR(100) NULL')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
@@ -135,7 +148,7 @@ def init_db(app):
         from app.models.financial_model import (
             StudentFinancialAccount, PresetChargeItem, Invoice, 
             InvoiceItem, Payment, Credit, BillingPlan, Subscription,
-            PresetDiscount, FinancialAuditLog
+            PresetDiscount, FinancialAuditLog, ProcessedStripeEvent
         )
         from app.models.subsidy_model import Subsidy
         from app.models.message_log_model import MessageLog
