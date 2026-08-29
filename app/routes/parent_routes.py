@@ -608,104 +608,123 @@ def confirm_and_reconcile_payment():
     if not parent:
         return jsonify({"error": "Unauthorized"}), 403
 
-    import stripe
-    from app.services import stripe_service
-    data = request.get_json() or {}
-    payment_intent_id = data.get('payment_intent_id')
-    idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or payment_intent_id
-
-    if not payment_intent_id:
-        return jsonify({"error": "payment_intent_id is required."}), 400
-
-    # 1. Retrieve PaymentIntent from Stripe
-    stripe.api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
     try:
-        pi = stripe.PaymentIntent.retrieve(payment_intent_id)
-    except Exception as e:
-        current_app.logger.error(f"Error retrieving PaymentIntent {payment_intent_id}: {e}")
-        return jsonify({"error": "Could not verify payment status with Stripe."}), 400
+        import stripe
+        from app.services import stripe_service
+        data = request.get_json() or {}
+        payment_intent_id = data.get('payment_intent_id')
+        idempotency_key = request.headers.get('Idempotency-Key') or data.get('idempotency_key') or payment_intent_id
 
-    if pi.status != 'succeeded':
-        return jsonify({
-            "error": f"Payment is not confirmed. Status: {pi.status}",
-            "status": pi.status
-        }), 400
+        if not payment_intent_id:
+            return jsonify({"error": "payment_intent_id is required."}), 400
 
-    amount = float(pi.amount_received or pi.amount) / 100.0
-    metadata = pi.metadata or {}
-    invoice_id = metadata.get('invoice_id') or data.get('invoice_id')
-    student_id = metadata.get('student_id') or data.get('student_id')
+        # 1. Retrieve PaymentIntent from Stripe
+        stripe.api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+        try:
+            pi = stripe.PaymentIntent.retrieve(payment_intent_id)
+        except Exception as e:
+            current_app.logger.error(f"Error retrieving PaymentIntent {payment_intent_id}: {e}")
+            return jsonify({"error": "Could not verify payment status with Stripe."}), 400
 
-    # Resolve Student & Account
-    target_student = None
-    if student_id:
-        target_student = Student.query.get(student_id)
-    elif parent.children:
-        target_student = parent.children[0]
+        if pi.status != 'succeeded':
+            return jsonify({
+                "error": f"Payment is not confirmed. Status: {pi.status}",
+                "status": pi.status
+            }), 400
 
-    if not target_student:
-        return jsonify({"error": "Student account not found."}), 400
+        amount = float(pi.amount_received or pi.amount) / 100.0
+        metadata = pi.metadata or {}
+        raw_invoice_id = metadata.get('invoice_id') or data.get('invoice_id')
+        raw_student_id = metadata.get('student_id') or data.get('student_id')
 
-    account = target_student.financial_account
-    if not account:
-        account = StudentFinancialAccount(student=target_student)
-        db.session.add(account)
+        safe_invoice_id = None
+        if raw_invoice_id and str(raw_invoice_id).strip().isdigit():
+            safe_invoice_id = int(str(raw_invoice_id).strip())
+
+        safe_student_id = None
+        if raw_student_id and str(raw_student_id).strip().isdigit():
+            safe_student_id = int(str(raw_student_id).strip())
+
+        # Resolve Student & Account
+        target_student = None
+        if safe_student_id:
+            target_student = Student.query.get(safe_student_id)
+        elif parent.children:
+            target_student = parent.children[0]
+
+        if not target_student:
+            return jsonify({"error": "Student account not found."}), 400
+
+        account = target_student.financial_account
+        if not account:
+            account = StudentFinancialAccount(student=target_student)
+            db.session.add(account)
+            db.session.commit()
+
+        # Check for existing Payment row to prevent duplicate insertion
+        existing_payment = Payment.query.filter_by(stripe_payment_intent_id=pi.id).first()
+        if existing_payment:
+            return jsonify({
+                "message": "Payment verified and recorded.",
+                "payment": existing_payment.to_dict(),
+                "status": "succeeded"
+            }), 200
+
+        # Create Payment record
+        new_payment = Payment(
+            account_id=account.id,
+            invoice_id=safe_invoice_id,
+            amount=amount,
+            method="Stripe Online Payment",
+            notes=f"Stripe PaymentIntent {pi.id}",
+            status='Success',
+            stripe_payment_intent_id=pi.id,
+            idempotency_key=idempotency_key,
+            transaction_date=datetime.utcnow()
+        )
+        db.session.add(new_payment)
+
+        # Reconcile Invoice status
+        if safe_invoice_id:
+            inv = Invoice.query.filter_by(id=safe_invoice_id, account_id=account.id).first()
+            if inv:
+                total_paid = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+                if (total_paid + amount) >= inv.total_amount:
+                    inv.status = 'Paid'
+
+        # Financial Audit Log
+        try:
+            log = FinancialAuditLog(
+                account_id=account.id,
+                transaction_type='Payment',
+                transaction_id=str(pi.id),
+                action='Receive',
+                amount=amount,
+                status='Success',
+                actor_name=f"{parent.first_name} {parent.last_name} (Parent)",
+                description=f"Parent Portal payment of ${amount:.2f} confirmed via Stripe"
+            )
+            db.session.add(log)
+        except Exception as e:
+            current_app.logger.warning(f"Financial audit log error: {e}")
+
+        # Activity Log
+        try:
+            log_activity(parent, f"Paid ${amount:.2f} via Stripe for {target_student.first_name} {target_student.last_name}", new_payment)
+        except Exception as e:
+            current_app.logger.warning(f"log_activity error: {e}")
+
         db.session.commit()
 
-    # Check for existing Payment row to prevent duplicate insertion
-    existing_payment = Payment.query.filter_by(stripe_payment_intent_id=pi.id).first()
-    if existing_payment:
         return jsonify({
-            "message": "Payment verified and recorded.",
-            "payment": existing_payment.to_dict(),
-            "status": "succeeded"
-        }), 200
+            "message": "Payment confirmed and recorded successfully!",
+            "payment": new_payment.to_dict()
+        }), 201
 
-    # Create Payment record
-    new_payment = Payment(
-        account_id=account.id,
-        invoice_id=int(invoice_id) if invoice_id else None,
-        amount=amount,
-        method="Stripe Online Payment",
-        notes=f"Stripe PaymentIntent {pi.id}",
-        status='Success',
-        stripe_payment_intent_id=pi.id,
-        idempotency_key=idempotency_key,
-        transaction_date=datetime.utcnow()
-    )
-    db.session.add(new_payment)
-
-    # Reconcile Invoice status
-    if invoice_id:
-        inv = Invoice.query.filter_by(id=int(invoice_id), account_id=account.id).first()
-        if inv:
-            total_paid = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
-            if (total_paid + amount) >= inv.total_amount:
-                inv.status = 'Paid'
-
-    # Audit Log
-    try:
-        log = FinancialAuditLog(
-            account_id=account.id,
-            transaction_type='Payment',
-            transaction_id=str(new_payment.id),
-            action='Receive',
-            amount=amount,
-            status='Success',
-            actor_name=f"{parent.first_name} {parent.last_name} (Parent)",
-            description=f"Parent Portal payment of ${amount:.2f} confirmed via Stripe"
-        )
-        db.session.add(log)
     except Exception as e:
-        current_app.logger.warning(f"Financial audit log error: {e}")
-
-    log_activity(parent, f"Paid ${amount:.2f} via Stripe for {target_student.first_name} {target_student.last_name}", new_payment)
-    db.session.commit()
-
-    return jsonify({
-        "message": "Payment confirmed and recorded successfully!",
-        "payment": new_payment.to_dict()
-    }), 201
+        db.session.rollback()
+        current_app.logger.error(f"Fatal error in confirm_and_reconcile_payment: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to record payment: {str(e)}"}), 500
 
 # === Parent Documents Endpoints ===
 
