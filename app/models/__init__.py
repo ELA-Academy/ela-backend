@@ -172,5 +172,12 @@ def init_db(app):
         from app.models.generated_report_model import GeneratedReport
         from app.models.student_document_model import StudentDocument
         
-        db.create_all()
-        ensure_runtime_schema_updates()
+        try:
+            db.create_all()
+        except Exception as e:
+            print(f"[InitDB] create_all warning: {e}")
+
+        try:
+            ensure_runtime_schema_updates()
+        except Exception as e:
+            print(f"[InitDB] ensure_runtime_schema_updates warning: {e}")
