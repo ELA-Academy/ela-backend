@@ -1,6 +1,10 @@
 import os
 import logging
-import stripe
+try:
+    import stripe
+except ImportError:
+    stripe = None
+
 from flask import current_app
 from app.models import db
 from app.models.student_model import Parent, ParentPaymentMethod
