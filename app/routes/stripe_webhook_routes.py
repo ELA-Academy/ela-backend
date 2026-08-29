@@ -77,15 +77,16 @@ def handle_stripe_webhook():
         return jsonify({"status": "already_handled"}), 200
 
     # 3. Process Events
+    data_dict = data_object.to_dict() if hasattr(data_object, 'to_dict') else (dict(data_object) if isinstance(data_object, (dict, list)) else {})
     try:
         if event_type == 'payment_intent.succeeded':
-            _handle_payment_intent_succeeded(data_object)
+            _handle_payment_intent_succeeded(data_dict)
         elif event_type == 'payment_intent.payment_failed':
-            _handle_payment_intent_failed(data_object)
+            _handle_payment_intent_failed(data_dict)
         elif event_type == 'payment_intent.requires_action':
-            _handle_payment_intent_requires_action(data_object)
+            _handle_payment_intent_requires_action(data_dict)
         elif event_type == 'charge.refunded':
-            _handle_charge_refunded(data_object)
+            _handle_charge_refunded(data_dict)
         else:
             logger.info(f"Unhandled Stripe webhook event type: {event_type}")
 
