@@ -632,10 +632,15 @@ def confirm_and_reconcile_payment():
                 "status": pi.status
             }), 400
 
-        amount = float(pi.amount_received or pi.amount) / 100.0
-        metadata = pi.metadata or {}
-        raw_invoice_id = metadata.get('invoice_id') or data.get('invoice_id')
-        raw_student_id = metadata.get('student_id') or data.get('student_id')
+        amount = float(getattr(pi, 'amount_received', None) or getattr(pi, 'amount', 0)) / 100.0
+        
+        pi_dict = pi.to_dict() if hasattr(pi, 'to_dict') else (dict(pi) if isinstance(pi, (dict, list)) else {})
+        metadata = pi_dict.get('metadata') if isinstance(pi_dict, dict) else {}
+        if not metadata and hasattr(pi, 'metadata'):
+            metadata = pi.metadata.to_dict() if hasattr(pi.metadata, 'to_dict') else dict(pi.metadata)
+
+        raw_invoice_id = metadata.get('invoice_id') if isinstance(metadata, dict) else data.get('invoice_id')
+        raw_student_id = metadata.get('student_id') if isinstance(metadata, dict) else data.get('student_id')
 
         safe_invoice_id = None
         if raw_invoice_id and str(raw_invoice_id).strip().isdigit():
