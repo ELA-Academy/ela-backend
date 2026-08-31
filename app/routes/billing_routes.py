@@ -166,32 +166,61 @@ def create_subscriptions():
     if not all([student_ids, plan_data]):
         return jsonify({"error": "Student IDs and plan data are required."}), 400
 
-    start_date = datetime.strptime(plan_data['start_date'], '%Y-%m-%dT%H:%M:%S.%fZ').date()
+    def parse_iso_date(dt_str):
+        if not dt_str:
+            return None
+        dt_str = dt_str.replace('Z', '')
+        for fmt in ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
+            try:
+                return datetime.strptime(dt_str, fmt).date()
+            except ValueError:
+                pass
+        return date.today()
+
+    start_date = parse_iso_date(plan_data.get('start_date')) or date.today()
+    end_date = parse_iso_date(plan_data.get('end_date'))
+    cycle = plan_data.get('cycle', 'Monthly')
+    cycle_clean = cycle.lower().replace('-', '').replace(' ', '')
     
     for student_id in student_ids:
         student = Student.query.get(student_id)
         if not student or not student.financial_account: continue
 
-        # Calculate the first invoice date
-        invoice_day = int(plan_data['invoice_generation_day'])
-        next_invoice_date = start_date.replace(day=invoice_day)
-        if start_date.day > invoice_day:
-            next_invoice_date += relativedelta(months=1)
+        # Calculate the first invoice date based on cycle
+        invoice_day = int(plan_data.get('invoice_generation_day', 1))
+        if cycle_clean == 'weekly':
+            next_invoice_date = start_date + relativedelta(weeks=1)
+        elif cycle_clean == 'biweekly':
+            next_invoice_date = start_date + relativedelta(weeks=2)
+        elif cycle_clean == 'quarterly':
+            try:
+                next_invoice_date = start_date.replace(day=invoice_day)
+            except ValueError:
+                next_invoice_date = start_date
+            if start_date.day > invoice_day:
+                next_invoice_date += relativedelta(months=3)
+        else: # Monthly
+            try:
+                next_invoice_date = start_date.replace(day=invoice_day)
+            except ValueError:
+                next_invoice_date = start_date
+            if start_date.day > invoice_day:
+                next_invoice_date += relativedelta(months=1)
 
         sub = Subscription(
             account_id=student.financial_account.id,
-            plan_name=plan_data['plan_name'],
-            cycle=plan_data['cycle'],
+            plan_name=plan_data.get('plan_name', 'Tuition Plan'),
+            cycle=cycle,
             start_date=start_date,
-            end_date=datetime.strptime(plan_data['end_date'], '%Y-%m-%dT%H:%M:%S.%fZ').date() if plan_data.get('end_date') else None,
+            end_date=end_date,
             invoice_generation_day=invoice_day,
-            due_day=int(plan_data['due_day']),
+            due_day=int(plan_data.get('due_day', 15)),
             next_invoice_date=next_invoice_date,
-            items_json=plan_data['items_json']
+            items_json=plan_data.get('items_json', [])
         )
         db.session.add(sub)
     
-    log_activity(actor, f"Created recurring plan '{plan_data['plan_name']}' for {len(student_ids)} student(s)")
+    log_activity(actor, f"Created recurring plan '{plan_data.get('plan_name')}' ({cycle}) for {len(student_ids)} student(s)")
     db.session.commit()
     return jsonify({"message": "Recurring plans created successfully."}), 201
 
@@ -1083,3 +1112,78 @@ def get_all_transactions():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@billing_bp.route('/import-procare-plans', methods=['POST'])
+@jwt_required()
+def import_procare_plans():
+    actor = get_actor()
+    data = request.get_json() or {}
+    plans_data = data.get('plans', [])
+
+    if not plans_data:
+        return jsonify({"error": "No tuition plan data provided for import."}), 400
+
+    imported_plans_count = 0
+    created_subscriptions_count = 0
+    today = date.today()
+
+    for item in plans_data:
+        plan_name = item.get('plan_name') or 'Procare Tuition Plan'
+        cycle = item.get('cycle') or 'Monthly'
+        amount = float(item.get('amount') or 0.0)
+        description = item.get('description') or 'Tuition Charge'
+        student_ids = item.get('student_ids', [])
+
+        items_json = item.get('items') or [
+            {
+                "description": description,
+                "amount": amount,
+                "type": "New Item"
+            }
+        ]
+
+        # 1. Save or update BillingPlan template
+        plan = BillingPlan.query.filter_by(name=plan_name).first()
+        if not plan:
+            plan = BillingPlan(name=plan_name, items_json=items_json)
+            db.session.add(plan)
+            db.session.flush()
+            imported_plans_count += 1
+
+        # 2. Assign to specified students if any
+        cycle_clean = cycle.lower().replace('-', '').replace(' ', '')
+        if cycle_clean == 'weekly':
+            next_invoice = today + relativedelta(weeks=1)
+        elif cycle_clean == 'biweekly':
+            next_invoice = today + relativedelta(weeks=2)
+        elif cycle_clean == 'quarterly':
+            next_invoice = today + relativedelta(months=3)
+        else:
+            next_invoice = today + relativedelta(months=1)
+
+        for s_id in student_ids:
+            st = Student.query.get(s_id)
+            if st and st.financial_account:
+                sub = Subscription(
+                    account_id=st.financial_account.id,
+                    plan_name=plan_name,
+                    cycle=cycle,
+                    start_date=today,
+                    end_date=None,
+                    invoice_generation_day=1,
+                    due_day=15,
+                    next_invoice_date=next_invoice,
+                    items_json=items_json
+                )
+                db.session.add(sub)
+                created_subscriptions_count += 1
+
+    log_activity(actor, f"Imported {imported_plans_count} plan template(s) and {created_subscriptions_count} subscription(s) from Procare export.")
+    db.session.commit()
+
+    return jsonify({
+        "message": f"Successfully imported Procare tuition plans!",
+        "imported_templates_count": imported_plans_count,
+        "assigned_subscriptions_count": created_subscriptions_count
+    }), 201

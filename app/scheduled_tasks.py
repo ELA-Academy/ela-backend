@@ -75,10 +75,17 @@ def generate_invoices_command():
             print(f"  - Invoice email queued for {parent.email}")
 
 
-        if sub.cycle == 'Monthly':
+        cycle_clean = (sub.cycle or 'Monthly').lower().replace('-', '').replace(' ', '')
+        if cycle_clean == 'weekly':
+            sub.next_invoice_date += relativedelta(weeks=1)
+        elif cycle_clean == 'biweekly':
+            sub.next_invoice_date += relativedelta(weeks=2)
+        elif cycle_clean == 'quarterly':
+            sub.next_invoice_date += relativedelta(months=3)
+        else:
             sub.next_invoice_date += relativedelta(months=1)
         
-        print(f"  - Invoice created. Next invoice date set to: {sub.next_invoice_date.isoformat()}")
+        print(f"  - Invoice created. Cycle: {sub.cycle}. Next invoice date set to: {sub.next_invoice_date.isoformat()}")
 
     try:
         db.session.commit()
