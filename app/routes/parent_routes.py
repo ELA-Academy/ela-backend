@@ -1085,3 +1085,30 @@ def admin_delete_parent(parent_id):
     db.session.commit()
     return jsonify({"message": "Parent account removed successfully."}), 200
 
+@parent_bp.route('/payments/<int:payment_id>/receipt', methods=['GET'])
+@jwt_required()
+def get_parent_payment_receipt(payment_id):
+    parent = get_current_parent()
+    if not parent:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    student_ids = [c.id for c in parent.children]
+    accounts = StudentFinancialAccount.query.filter(StudentFinancialAccount.student_id.in_(student_ids)).all() if student_ids else []
+    account_ids = [a.id for a in accounts]
+
+    payment = Payment.query.filter(Payment.id == payment_id, Payment.account_id.in_(account_ids)).first_or_404()
+    student = payment.account.student
+
+    from app.utils.statement_generator import generate_receipt_pdf
+    from flask import send_file
+    pdf_buffer = generate_receipt_pdf(student, payment)
+
+    filename = f"receipt_PYMT_{payment.id:08d}.pdf"
+    return send_file(
+        pdf_buffer,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/pdf'
+    )
+
+
