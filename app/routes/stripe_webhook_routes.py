@@ -138,7 +138,7 @@ def _handle_payment_intent_succeeded(pi):
             db.session.add(payment)
             db.session.commit()
 
-    # Recheck Invoice status
+    # Recheck Invoice status or auto-settle open invoices
     if invoice_id:
         inv = Invoice.query.get(invoice_id)
         if inv:
@@ -146,6 +146,27 @@ def _handle_payment_intent_succeeded(pi):
             if total_paid >= inv.total_amount:
                 inv.status = 'Paid'
                 db.session.commit()
+    elif payment and payment.account_id:
+        open_invoices = Invoice.query.filter(
+            Invoice.account_id == payment.account_id,
+            Invoice.status.in_(['Draft', 'Sent', 'Overdue', 'Action Required'])
+        ).order_by(Invoice.created_at.asc()).all()
+
+        unallocated = payment.amount
+        for inv in open_invoices:
+            if unallocated <= 0:
+                break
+            paid_so_far = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+            due_amount = max(0.0, inv.total_amount - paid_so_far)
+            if due_amount > 0:
+                if unallocated >= due_amount:
+                    inv.status = 'Paid'
+                    unallocated -= due_amount
+                    if not payment.invoice_id:
+                        payment.invoice_id = inv.id
+                else:
+                    unallocated = 0.0
+        db.session.commit()
 
     logger.info(f"Reconciled successful payment of ${amount:.2f} for PaymentIntent {pi_id}")
 
