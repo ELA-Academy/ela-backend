@@ -156,7 +156,7 @@ def get_parent_payments_summary():
     all_tx = []
 
     if account_ids:
-        invoices = Invoice.query.filter(Invoice.account_id.in_(account_ids)).all()
+        invoices = Invoice.query.filter(Invoice.account_id.in_(account_ids), Invoice.status != 'Draft').all()
         payments = Payment.query.filter(Payment.account_id.in_(account_ids)).all()
         credits = Credit.query.filter(Credit.account_id.in_(account_ids)).all()
 
