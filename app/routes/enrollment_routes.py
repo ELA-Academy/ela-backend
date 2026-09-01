@@ -153,6 +153,33 @@ def submit_public_form(token):
         message = f"An enrollment form for {student_name} has been submitted."
         if submission.payment_status == 'Paid': message += " Payment has been confirmed."
         create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=message, target_obj=submission.lead)
+
+    # --- SEND PARENT CONFIRMATION EMAIL ---
+    parent_email = None
+    if submission.lead and getattr(submission.lead, 'primary_email', None):
+        parent_email = submission.lead.primary_email
+    elif submission.lead and getattr(submission.lead, 'email', None):
+        parent_email = submission.lead.email
+    elif submission.responses_json and isinstance(submission.responses_json, dict):
+        for k, v in submission.responses_json.items():
+            if 'email' in k.lower() and isinstance(v, str) and '@' in v:
+                parent_email = v.strip()
+                break
+
+    if parent_email:
+        try:
+            from app.utils.notifications import send_email_in_background
+            form_title = submission.form.name if submission.form else "Enrollment & Registration Form"
+            send_email_in_background(
+                subject=f"Registration Received - Exceptional Learning and Arts Academy",
+                recipients=[parent_email],
+                template_data={
+                    "message": f"Hello,\n\nThank you for submitting the {form_title} for {student_name}.\n\nWe have successfully received your completed form and signed contract. A digital copy of your signed contract has been attached to the student profile.\n\nYou can log into your Parent Dashboard at any time to view your documents, billing statements, and payments.\n\nWarm regards,\nExceptional Learning and Arts Academy"
+                }
+            )
+        except Exception as ex:
+            print(f"[submit_public_form Email Error] {ex}")
+    # --- END SEND PARENT CONFIRMATION EMAIL ---
     
     log_activity(None, f"Parent submitted enrollment for {student_name}", submission.lead)
     db.session.commit()

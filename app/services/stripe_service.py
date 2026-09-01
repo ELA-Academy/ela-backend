@@ -109,7 +109,7 @@ def create_payment_intent(
         "currency": currency.lower(),
         "description": description,
         "metadata": meta,
-        "automatic_payment_methods": {"enabled": True, "allow_redirects": "always"} if not payment_method_id else None
+        "automatic_payment_methods": {"enabled": True, "allow_redirects": "never"} if not payment_method_id else None
     }
 
     # Remove automatic_payment_methods if explicit payment method is passed

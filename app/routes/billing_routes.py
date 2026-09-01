@@ -246,51 +246,89 @@ def log_financial_event(account_id, transaction_type, transaction_id, action, am
 @billing_bp.route('/accounts/<int:student_id>/invoices', methods=['POST'])
 @jwt_required()
 def create_invoice(student_id):
-    actor = get_actor()
-    student = Student.query.get_or_404(student_id)
-    account = student.financial_account
-    if not account:
-        return jsonify({"error": "Financial account not found for this student."}), 404
-        
-    data = request.get_json()
-    items = data.get('items', [])
-    if not items:
-        return jsonify({"error": "Invoice must have at least one item."}), 400
+    try:
+        actor = get_actor()
+        student = Student.query.get_or_404(student_id)
+        account = student.financial_account
+        if not account:
+            return jsonify({"error": "Financial account not found for this student."}), 404
+            
+        data = request.get_json() or {}
+        items = data.get('items', [])
+        if not items:
+            return jsonify({"error": "Invoice must have at least one item."}), 400
 
-    new_invoice = Invoice(
-        account_id=account.id,
-        status=data.get('status', 'Draft'),
-        due_date=datetime.strptime(data['due_date'], '%Y-%m-%d').date() if data.get('due_date') else None
-    )
-    
-    for item in items:
-        new_item = InvoiceItem(
-            description=item['description'], 
-            amount=item['amount'],
-            subsidy_id=item.get('subsidy_id')
+        due_date_val = None
+        if data.get('due_date'):
+            try:
+                due_date_val = datetime.strptime(data['due_date'], '%Y-%m-%d').date()
+            except Exception:
+                try:
+                    due_date_val = datetime.fromisoformat(str(data['due_date']).replace('Z', '')).date()
+                except Exception:
+                    due_date_val = date.today()
+
+        new_invoice = Invoice(
+            account_id=account.id,
+            status=data.get('status', 'Draft'),
+            due_date=due_date_val
         )
-        if item.get('subsidy_id'):
-            subsidy_invoice_transaction = SubsidyTransaction(
-                subsidy_id=item.get('subsidy_id'),
-                transaction_type='Invoice',
-                amount=-item.get('amount'), # Store as positive value
-                transaction_date=new_invoice.due_date or date.today(),
-                notes=f"Applied to invoice for {student.first_name} {student.last_name}"
-            )
-            db.session.add(subsidy_invoice_transaction)
+        
+        for item in items:
+            desc = (item.get('description') or 'Invoice Item').strip()
+            amt = float(item.get('amount') or 0.0)
+            subsidy_id = item.get('subsidy_id')
 
-        new_invoice.items.append(new_item)
-    
-    db.session.add(new_invoice)
-    log_activity(actor, f"Created invoice for {student.first_name} {student.last_name}", new_invoice)
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
-    log_financial_event(
-        account.id, 'Invoice', new_invoice.id, 'Create', new_invoice.total_amount, 
-        'Success' if new_invoice.status == 'Sent' else 'Pending', actor_name, 
-        f"Invoice created with status {new_invoice.status}"
-    )
-    db.session.commit()
-    return jsonify(new_invoice.to_dict()), 201
+            new_item = InvoiceItem(
+                description=desc, 
+                amount=amt,
+                subsidy_id=subsidy_id
+            )
+            if subsidy_id:
+                subsidy_invoice_transaction = SubsidyTransaction(
+                    subsidy_id=subsidy_id,
+                    transaction_type='Invoice',
+                    amount=-amt,
+                    transaction_date=new_invoice.due_date or date.today(),
+                    notes=f"Applied to invoice for {student.first_name} {student.last_name}"
+                )
+                db.session.add(subsidy_invoice_transaction)
+
+            new_invoice.items.append(new_item)
+        
+        db.session.add(new_invoice)
+        db.session.flush() # Ensure new_invoice.id is assigned before logging
+
+        log_activity(actor, f"Created invoice for {student.first_name} {student.last_name}", new_invoice)
+        actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+        log_financial_event(
+            account.id, 'Invoice', new_invoice.id, 'Create', new_invoice.total_amount, 
+            'Success' if new_invoice.status == 'Sent' else 'Pending', actor_name, 
+            f"Invoice created with status {new_invoice.status}"
+        )
+        db.session.commit()
+
+        # Send email notification to parent if invoice status is 'Sent'
+        if new_invoice.status == 'Sent' and student.parents:
+            parent_emails = [p.email for p in student.parents if p.email]
+            if parent_emails:
+                try:
+                    from app.utils.notifications import send_email_in_background
+                    send_email_in_background(
+                        subject=f"New Invoice Billed - Exceptional Learning and Arts Academy",
+                        recipients=parent_emails,
+                        template_data={
+                            "message": f"Hello,\n\nA new invoice of ${new_invoice.total_amount:.2f} due on {new_invoice.due_date} has been posted for {student.first_name} {student.last_name}.\n\nYou can review and pay your invoice anytime on your Parent Dashboard."
+                        }
+                    )
+                except Exception as ex:
+                    print(f"Failed to send parent invoice email: {ex}")
+
+        return jsonify(new_invoice.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        print(f"[create_invoice ERROR] {e}")
+        return jsonify({"error": f"Failed to save invoice: {str(e)}"}), 500
 
 @billing_bp.route('/accounts/<int:student_id>/payments', methods=['POST'])
 @jwt_required()
@@ -552,11 +590,11 @@ def get_all_accounts():
             account = student.financial_account
 
         total_invoiced = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(Invoice.account_id == account.id).scalar() or 0
-        total_paid = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == account.id).scalar() or 0
+        total_paid = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == account.id, Payment.status == 'Success').scalar() or 0
         total_credited = db.session.query(func.sum(Credit.amount)).filter(Credit.account_id == account.id).scalar() or 0
         balance = total_invoiced - (total_paid + total_credited)
         last_invoice = Invoice.query.filter_by(account_id=account.id).order_by(Invoice.created_at.desc()).first()
-        last_payment = Payment.query.filter_by(account_id=account.id).order_by(Payment.transaction_date.desc()).first()
+        last_payment = Payment.query.filter_by(account_id=account.id, status='Success').order_by(Payment.transaction_date.desc()).first()
         
         results.append({
             'student_id': student.id, 'student_name': f"{student.first_name} {student.last_name}",
