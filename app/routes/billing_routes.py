@@ -254,6 +254,18 @@ def log_financial_event(account_id, transaction_type, transaction_id, action, am
         print(f"[FinancialAuditLog] Error logging event: {e}")
 
 
+@billing_bp.route('/accounts/<int:student_id>/parent-payment-methods', methods=['GET'])
+@jwt_required()
+def get_student_parent_payment_methods(student_id):
+    student = Student.query.get_or_404(student_id)
+    methods = []
+    for parent in student.parents:
+        for pm in parent.payment_methods:
+            m_dict = pm.to_dict()
+            m_dict['parent_name'] = f"{parent.first_name} {parent.last_name}"
+            methods.append(m_dict)
+    return jsonify(methods), 200
+
 @billing_bp.route('/accounts/<int:student_id>/invoices', methods=['POST'])
 @jwt_required()
 def create_invoice(student_id):
@@ -310,11 +322,20 @@ def create_invoice(student_id):
         db.session.add(new_invoice)
         db.session.flush() # Ensure new_invoice.id is assigned before logging
 
+        # Auto-settlement check: If student account has unallocated excess payments / credits, settle this invoice
+        total_invoiced_existing = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(Invoice.account_id == account.id, Invoice.id != new_invoice.id, Invoice.status != 'Void').scalar() or 0.0
+        total_paid_existing = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == account.id, Payment.status == 'Success').scalar() or 0.0
+        total_credited_existing = db.session.query(func.sum(Credit.amount)).filter(Credit.account_id == account.id).scalar() or 0.0
+        
+        available_unallocated = (total_paid_existing + total_credited_existing) - total_invoiced_existing
+        if available_unallocated >= new_invoice.total_amount:
+            new_invoice.status = 'Paid'
+
         log_activity(actor, f"Created invoice for {student.first_name} {student.last_name}", new_invoice)
         actor_name = get_actor_display_name(actor)
         log_financial_event(
             account.id, 'Invoice', new_invoice.id, 'Create', new_invoice.total_amount, 
-            'Success' if new_invoice.status == 'Sent' else 'Pending', actor_name, 
+            new_invoice.status if new_invoice.status in ['Paid', 'Sent'] else 'Pending', actor_name, 
             f"Invoice created with status {new_invoice.status}"
         )
         db.session.commit()
@@ -352,15 +373,44 @@ def receive_payment(student_id):
     amount = data.get('amount')
     if not amount or float(amount) <= 0: return jsonify({"error": "Invalid payment amount."}), 400
 
-    new_payment = Payment(account_id=account.id, invoice_id=data.get('invoice_id'), amount=float(amount), method=data.get('method', 'Cash'), notes=data.get('notes'), transaction_date=datetime.utcnow())
+    new_payment = Payment(
+        account_id=account.id, 
+        invoice_id=data.get('invoice_id'), 
+        amount=float(amount), 
+        method=data.get('method', 'Cash'), 
+        notes=data.get('notes'), 
+        transaction_date=datetime.utcnow()
+    )
     db.session.add(new_payment)
-    
+    db.session.flush()
+
     if data.get('invoice_id'):
         invoice = Invoice.query.get(data.get('invoice_id'))
         if invoice:
-            total_paid_for_invoice = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=invoice.id).scalar() or 0
+            total_paid_for_invoice = db.session.query(func.sum(Payment.amount)).filter(Payment.invoice_id == invoice.id, Payment.status == 'Success').scalar() or 0.0
             if total_paid_for_invoice >= invoice.total_amount:
                 invoice.status = 'Paid'
+    else:
+        # Auto-apply payment to open unpaid invoices for this student
+        open_invoices = Invoice.query.filter(
+            Invoice.account_id == account.id,
+            Invoice.status.in_(['Draft', 'Sent', 'Overdue', 'Action Required'])
+        ).order_by(Invoice.created_at.asc()).all()
+
+        unallocated = float(amount)
+        for inv in open_invoices:
+            if unallocated <= 0:
+                break
+            paid_so_far = db.session.query(func.sum(Payment.amount)).filter(Payment.invoice_id == inv.id, Payment.status == 'Success').scalar() or 0.0
+            due_amount = max(0.0, inv.total_amount - paid_so_far)
+            if due_amount > 0:
+                if unallocated >= due_amount:
+                    inv.status = 'Paid'
+                    unallocated -= due_amount
+                    if not new_payment.invoice_id:
+                        new_payment.invoice_id = inv.id
+                else:
+                    unallocated = 0.0
 
     log_activity(actor, f"Recorded payment of ${amount} for {student.first_name} {student.last_name}", new_payment)
     actor_name = get_actor_display_name(actor)
@@ -648,10 +698,12 @@ def get_student_ledger(student_id):
                 'type': 'Invoice', 
                 'date': obj.created_at.isoformat() + 'Z', 
                 'due_date': obj.due_date.isoformat() if obj.due_date else None,
-                'description': ", ".join([i.description for i in obj.items]), 
+                'description': ", ".join([i.description for i in obj.items]) if obj.items else "Invoice", 
                 'amount': obj.total_amount, 
+                'total_amount': obj.total_amount,
                 'status': obj.status, 
-                'balance': tx_item['balance']
+                'balance': tx_item['balance'],
+                'items': [i.to_dict() for i in obj.items]
             })
         elif tx_item['type'] == 'Payment': 
             transactions.append({
@@ -663,6 +715,9 @@ def get_student_ledger(student_id):
                 'status': obj.status, 
                 'method': obj.method,
                 'notes': obj.notes,
+                'invoice_id': obj.invoice_id,
+                'stripe_payment_intent_id': obj.stripe_payment_intent_id,
+                'is_refunded': obj.is_refunded,
                 'balance': tx_item['balance']
             })
         elif tx_item['type'] == 'Credit': 
