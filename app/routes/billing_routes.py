@@ -20,6 +20,17 @@ def get_actor():
         return SuperAdmin.query.filter_by(email=email).first()
     return Staff.query.filter_by(email=email).first()
 
+def get_actor_display_name(actor):
+    if not actor:
+        return "System"
+    if hasattr(actor, 'first_name') and hasattr(actor, 'last_name') and actor.first_name:
+        return f"{actor.first_name} {actor.last_name}"
+    if hasattr(actor, 'name') and actor.name:
+        return actor.name
+    if hasattr(actor, 'email') and actor.email:
+        return actor.email
+    return str(actor)
+
 # === Recurring Plan Endpoints ===
 
 @billing_bp.route('/plans', methods=['GET'])
@@ -300,7 +311,7 @@ def create_invoice(student_id):
         db.session.flush() # Ensure new_invoice.id is assigned before logging
 
         log_activity(actor, f"Created invoice for {student.first_name} {student.last_name}", new_invoice)
-        actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+        actor_name = get_actor_display_name(actor)
         log_financial_event(
             account.id, 'Invoice', new_invoice.id, 'Create', new_invoice.total_amount, 
             'Success' if new_invoice.status == 'Sent' else 'Pending', actor_name, 
@@ -352,7 +363,7 @@ def receive_payment(student_id):
                 invoice.status = 'Paid'
 
     log_activity(actor, f"Recorded payment of ${amount} for {student.first_name} {student.last_name}", new_payment)
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Payment', new_payment.id, 'Receive', new_payment.amount, 
         new_payment.status, actor_name, f"Payment recorded via {new_payment.method}"
@@ -478,7 +489,7 @@ def charge_saved_card(student_id):
             if inv and (total_paid_inv + charge_amount) >= inv.total_amount:
                 inv.status = 'Paid'
 
-            actor_name = f"{actor.first_name} {actor.last_name}" if actor else "Staff"
+            actor_name = get_actor_display_name(actor)
             log_financial_event(
                 account.id, 'Payment', new_payment.id, 'Receive', charge_amount,
                 'Success', actor_name, f"Charged saved card (*{pm_record.last4}) via Stripe"
@@ -540,7 +551,7 @@ def refund_payment_direct(payment_id):
     if payment.refund_amount >= payment.amount:
         payment.status = 'Refunded'
 
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "Staff"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         payment.account_id, 'Refund', payment.id, 'Refund', refund_amount,
         'Success', actor_name, f"Refund of ${refund_amount:.2f} issued. Reason: {reason}"
@@ -568,7 +579,7 @@ def add_credit(student_id):
     new_credit = Credit(account_id=account.id, amount=float(amount), reason=reason)
     db.session.add(new_credit)
     log_activity(actor, f"Added credit of ${amount} for {student.first_name} {student.last_name}", new_credit)
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Credit', new_credit.id, 'Create', new_credit.amount, 
         'Success', actor_name, f"Credit added: {new_credit.reason}"
@@ -817,7 +828,7 @@ def refund_payment(student_id, payment_id):
             
     db.session.add(refund_payment)
     log_activity(actor, f"Issued refund of ${refund_amount} for payment #{payment.id} for {student.first_name} {student.last_name}", refund_payment)
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Refund', refund_payment.id, 'Refund', refund_payment.amount, 
         'Success', actor_name, f"Refund issued for payment #{payment.id}. Note: {description}"
@@ -876,7 +887,7 @@ def edit_invoice(invoice_id):
                 db.session.add(subsidy_invoice_transaction)
             invoice.items.append(new_item)
             
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Invoice', invoice.id, 'Update', invoice.total_amount, 
         'Success' if invoice.status == 'Sent' else 'Pending', actor_name, 
@@ -896,7 +907,7 @@ def cancel_invoice(invoice_id):
         
     invoice.status = 'Void'
     
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Invoice', invoice.id, 'Void', invoice.total_amount, 
         'Voided', actor_name, "Invoice canceled/voided."
@@ -916,7 +927,23 @@ def send_invoice(invoice_id):
     if invoice.status == 'Draft':
         invoice.status = 'Sent'
         
-    actor_name = f"{actor.first_name} {actor.last_name}" if actor else "System"
+    student = account.student
+    if student and student.parents:
+        parent_emails = [p.email for p in student.parents if p.email]
+        if parent_emails:
+            try:
+                from app.utils.notifications import send_email_in_background
+                send_email_in_background(
+                    subject=f"New Invoice Billed - Exceptional Learning and Arts Academy",
+                    recipients=parent_emails,
+                    template_data={
+                        "message": f"Hello,\n\nA new invoice of ${invoice.total_amount:.2f} due on {invoice.due_date} has been posted for {student.first_name} {student.last_name}.\n\nYou can review and pay your invoice anytime on your Parent Dashboard."
+                    }
+                )
+            except Exception as ex:
+                print(f"Failed to send parent invoice email: {ex}")
+        
+    actor_name = get_actor_display_name(actor)
     log_financial_event(
         account.id, 'Invoice', invoice.id, 'Send', invoice.total_amount, 
         'Success', actor_name, "Invoice sent to parent."
