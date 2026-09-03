@@ -202,12 +202,15 @@ def get_public_submission_view(token):
 
 @enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
 @enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
+@enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
+@enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
 def download_submission_contract_pdf(token):
     submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
     
+    import base64
     from io import BytesIO
     from reportlab.lib.pagesizes import letter
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib import colors
     from reportlab.lib.units import inch
@@ -288,7 +291,37 @@ def download_submission_contract_pdf(token):
         story.append(sec_table)
         story.append(Spacer(1, 10))
 
+    # --- PARENT DIGITAL SIGNATURE BLOCK ---
+    parent_sig = responses.get('parent_signature')
+    signer_name = responses.get('parent_signer_name') or "Parent / Guardian"
+    story.append(Paragraph("<b>Parent / Guardian Digital Signature</b>", section_title))
+    
+    sig_content = []
+    if parent_sig and isinstance(parent_sig, str) and parent_sig.startswith('data:image'):
+        try:
+            sig_data = parent_sig.split(',', 1)[1]
+            img_bytes = base64.b64decode(sig_data)
+            img_buffer = BytesIO(img_bytes)
+            rl_img = RLImage(img_buffer, width=2.5*inch, height=0.8*inch)
+            sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), rl_img])
+        except Exception as sig_err:
+            sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), Paragraph("<i>[Signature Recorded]</i>", normal_text)])
+    else:
+        sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), Paragraph(f"<i>{signer_name} (Electronically Signed)</i>", normal_text)])
+
+    sig_content.append([Paragraph("<b>Signer Name:</b>", bold_text), Paragraph(signer_name, normal_text)])
+    sig_content.append([Paragraph("<b>Signature Date:</b>", bold_text), Paragraph(submitted_date, normal_text)])
+
+    sig_table = Table(sig_content, colWidths=[2.5*inch, 5.0*inch])
+    sig_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f0f9ff')),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#bae6fd'))
+    ]))
+    story.append(sig_table)
     story.append(Spacer(1, 15))
+
     story.append(Paragraph("<i>This document is an electronically signed and executed contract on file with Exceptional Learning and Arts Academy.</i>", ParagraphStyle('Foot', parent=normal_text, fontSize=8, textColor=colors.HexColor('#64748b'))))
 
     doc.build(story)
@@ -324,6 +357,45 @@ def get_forms():
 def get_submissions():
     submissions = EnrollmentSubmission.query.order_by(EnrollmentSubmission.sent_at.desc()).all()
     return jsonify([sub.to_dict() for sub in submissions]), 200
+
+@enrollment_bp.route('/submissions/<int:submission_id>/approve', methods=['POST'])
+@jwt_required()
+def approve_submission(submission_id):
+    actor = get_actor()
+    if not actor: return jsonify({"error": "Unauthorized actor"}), 401
+    
+    submission = EnrollmentSubmission.query.get_or_404(submission_id)
+    submission.status = 'Completed'
+    
+    target_student = _perform_lead_conversion(submission.lead)
+    if not target_student and submission.lead:
+        target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+        
+    if target_student:
+        from app.models.student_document_model import StudentDocument
+        doc_name = f"{target_student.first_name} {target_student.last_name} - {submission.form.name}"
+        file_url = f"/api/enrollment/submission/{submission.secure_token}/pdf"
+        
+        existing_doc = StudentDocument.query.filter_by(student_id=target_student.id, name=doc_name).first()
+        if not existing_doc:
+            doc = StudentDocument(
+                student_id=target_student.id,
+                name=doc_name,
+                file_path=file_url,
+                document_type="Document",
+                status="UPLOADED"
+            )
+            db.session.add(doc)
+        else:
+            existing_doc.file_path = file_url
+            
+    student_name = submission.lead.students[0].first_name if submission.lead and submission.lead.students else "a student"
+    log_activity(actor, f"Approved registration & contract for {student_name}", submission.form)
+    db.session.commit()
+    return jsonify({
+        "message": "Registration approved successfully and contract linked to Student Profile!",
+        "submission": submission.to_dict()
+    }), 200
 
 @enrollment_bp.route('/submissions/<int:submission_id>', methods=['DELETE'])
 @jwt_required()
