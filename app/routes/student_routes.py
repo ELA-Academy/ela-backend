@@ -111,6 +111,28 @@ def upload_student_document(student_id):
     
     return jsonify(doc.to_dict()), 201
 
+@student_bp.route('/documents/<int:doc_id>', methods=['PUT'])
+@jwt_required()
+def update_student_document(doc_id):
+    doc = StudentDocument.query.get_or_404(doc_id)
+    data = request.get_json() or {}
+    
+    if 'name' in data:
+        doc.name = data['name']
+    if 'document_type' in data:
+        doc.document_type = data['document_type']
+    if 'expiry_date' in data:
+        if data['expiry_date']:
+            try:
+                doc.expiry_date = datetime.strptime(data['expiry_date'], "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        else:
+            doc.expiry_date = None
+            
+    db.session.commit()
+    return jsonify(doc.to_dict()), 200
+
 @student_bp.route('/documents/<int:doc_id>', methods=['DELETE'])
 @jwt_required()
 def delete_student_document(doc_id):

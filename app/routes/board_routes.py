@@ -2424,8 +2424,80 @@ def jotform_webhook():
     import json
     import re
     import os
+    import html
+    from html.parser import HTMLParser
     from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskHistory
     from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+
+    class HTMLToText(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.text = []
+        def handle_starttag(self, tag, attrs):
+            if tag in ('br', 'p', 'tr', 'li', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                self.text.append('\n')
+        def handle_data(self, data):
+            self.text.append(data)
+        def get_text(self):
+            t = ''.join(self.text)
+            lines = [line.strip() for line in t.splitlines()]
+            return "\n".join(line for line in lines if line)
+
+    def strip_html_tags(text):
+        if not isinstance(text, str):
+            return text
+        if '<' not in text or '>' not in text:
+            return text.strip()
+        try:
+            parser = HTMLToText()
+            parser.feed(text)
+            cleaned = parser.get_text()
+            cleaned = html.unescape(cleaned)
+            return cleaned.strip()
+        except Exception:
+            cleaned = re.sub(r'<[^>]+>', ' ', text)
+            cleaned = html.unescape(cleaned)
+            return re.sub(r'\s+', ' ', cleaned).strip()
+
+    # Pattern-based exclusion for dynamic Jotform internal keys
+    def is_jotform_internal(key):
+        """Returns True if the key looks like a Jotform internal/system field."""
+        if not key:
+            return True
+        key_clean = str(key).strip().lower()
+        norm = re.sub(r'[^a-z0-9]', '', key_clean)
+        
+        blocked_normalized = {
+            'formid', 'submissionid', 'webhookurl', 'ip', 'formtitle', 'eventid',
+            'rawrequest', 'slug', 'submit', 'username', 'type', 'pretty', 'path',
+            'jsexecutiontracker', 'submitsource', 'submitdate', 'builddate',
+            'uploadserverurl', 'eventobserver', 'timetosubmit', 'paymentversion',
+            'paymenttotalchecksum', 'paymentdiscountvalue', 'validatednewrequiredfieldids',
+            'requiredfieldids', 'quantity', 'item', 'special'
+        }
+        
+        if norm in blocked_normalized:
+            return True
+            
+        internal_patterns = [
+            'jsexecution', 'submitsource', 'submitdate', 'builddate',
+            'uploadserver', 'eventobserver', 'timetosubmit', 'paymentversion',
+            'paymentchecksum', 'paymentdiscount', 'validatednew', 'webhookurl'
+        ]
+        for pattern in internal_patterns:
+            if pattern in norm:
+                return True
+
+        if re.match(r'^q\d+_(payment|submit|step|page)\d*$', str(key), re.IGNORECASE):
+            return True
+        return False
+
+    def clean_key_name(key_str):
+        clean_key = re.sub(r'^q\d+_', '', key_str)
+        words = re.findall(r'[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z][a-z0-9]|\b)', clean_key)
+        if not words:
+            words = clean_key.split('_')
+        return " ".join(w.capitalize() for w in words if w)
 
     # 1. Retrieve configuration from query params
     board_id = request.args.get('board_id')
@@ -2449,7 +2521,19 @@ def jotform_webhook():
             return jsonify({"error": "Board not found"}), 404
         board_id = board.id
 
-    # 3. Resolve Status Group (Defaults to the first group/Todo column on the board)
+    # 3. Auto-cleanup existing internal Jotform junk custom fields on the board
+    try:
+        junk_fields = BoardCustomField.query.filter_by(board_id=board_id).all()
+        for jf in junk_fields:
+            if is_jotform_internal(jf.name):
+                # Delete task values for this junk field
+                TaskCustomFieldValue.query.filter_by(field_id=jf.id).delete()
+                db.session.delete(jf)
+        db.session.flush()
+    except Exception as cleanup_err:
+        current_app.logger.warning(f"Error auto-cleaning junk fields: {cleanup_err}")
+
+    # 4. Resolve Status Group
     if not group_id:
         group = BoardGroup.query.filter_by(board_id=board_id).order_by(BoardGroup.position.asc()).first()
         if not group:
@@ -2460,7 +2544,7 @@ def jotform_webhook():
         if not group or group.board_id != board_id:
             return jsonify({"error": "Group not found or not on this board"}), 404
 
-    # 3. Parse Jotform POST data
+    # 5. Parse Jotform POST data
     raw_request_str = request.form.get('rawRequest')
     raw_data = {}
     if raw_request_str:
@@ -2469,152 +2553,103 @@ def jotform_webhook():
         except Exception as e:
             current_app.logger.error(f"Jotform failed to parse rawRequest: {e}")
 
-    # Merge top-level form fields with rawRequest details
     form_data = {k: v for k, v in request.form.items()}
     if raw_data:
         form_data.update(raw_data)
 
-    submission_id = request.form.get('submissionID')
-    form_title = request.form.get('formTitle', 'Jotform Submission')
+    submission_id = request.form.get('submissionID') or raw_data.get('submissionID')
+    form_title = request.form.get('formTitle') or raw_data.get('formTitle') or 'Jotform Submission'
 
-    # Helper function to clean keys into labels
-    def clean_key_name(key_str):
-        # Remove q123_ prefixes
-        clean_key = re.sub(r'^q\d+_', '', key_str)
-        # Split camelCase and snake_case
-        words = re.findall(r'[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z][a-z0-9]|\b)', clean_key)
-        if not words:
-            words = clean_key.split('_')
-        return " ".join(w.capitalize() for w in words if w)
+    entries = []  # list of (label, clean_value) tuples
 
-    # Metadata fields to exclude from notes and custom fields
-    metadata_fields = {
-        # Core Jotform submission metadata
-        'formID', 'submissionID', 'webhookURL', 'ip', 'formTitle',
-        'event_id', 'rawRequest', 'slug', 'submit',
-        # Jotform internal tracking
-        'username', 'type', 'pretty', 'path',
-        'jsExecutionTracker', 'js_execution_tracker',
-        'submitSource', 'submit_source',
-        'submitDate', 'submit_date',
-        'buildDate', 'build_date',
-        'uploadServerUrl', 'upload_server_url',
-        'eventObserver', 'event_observer',
-        'timeToSubmit', 'time_to_submit',
-        # Payment internals
-        'paymentVersion', 'payment_version',
-        'paymentTotalChecksum', 'payment_total_checksum',
-        'paymentDiscountValue', 'payment_discount_value',
-        # Validation internals
-        'validatedNewRequiredFieldIds', 'validated_new_required_field_ids',
-    }
-
-    # Pattern-based exclusion for dynamic Jotform internal keys
-    def is_jotform_internal(key):
-        """Returns True if the key looks like a Jotform internal/system field."""
-        if not key:
-            return True
-        if key in metadata_fields:
-            return True
-        k_lower = key.lower().replace('_', '').replace('-', '').replace(' ', '')
-        internal_patterns = [
-            'jsexecution', 'executiontracker', 'submitsource', 'submitdate',
-            'builddate', 'uploadserver', 'eventobserver', 'timetosubmit',
-            'paymentversion', 'paymenttotal', 'paymentchecksum', 'paymentdiscount',
-            'validatednew', 'requiredfieldid', 'webhookurl',
-        ]
-        for pattern in internal_patterns:
-            if pattern in k_lower:
-                return True
-        # Jotform payment widget fields (e.g. q5_payment3)
-        if re.match(r'^q\d+_payment\d*$', key, re.IGNORECASE):
-            return True
-        return False
-
-    # 4. Extract clean question entries from form data & Jotform 'pretty' string
-    task_title = None
-    submitter_email = None
-    entries = []  # list of (label, value) tuples
-
-    # Flatten dictionaries (like full name/address fields in Jotform)
     def flatten_value(val):
         if isinstance(val, dict):
-            # Check for name fields (first, last)
             if 'first' in val or 'last' in val:
                 return f"{val.get('first', '')} {val.get('last', '')}".strip()
-            # Address fields
             if 'addr_line1' in val or 'city' in val or 'state' in val:
                 parts = [val.get('addr_line1', ''), val.get('addr_line2', ''),
                          val.get('city', ''), val.get('state', ''), val.get('postal', '')]
                 return ", ".join(p for p in parts if p)
-            # Skip dicts that look like Jotform internal structures (special_*, item_*)
             if any(k.startswith('special_') or k.startswith('item_') for k in val.keys()):
                 return None
-            # Skip deeply nested dicts (validation internals, etc.)
             if any(isinstance(v, dict) for v in val.values()):
                 return None
-            # General dict - join only meaningful values
             meaningful = {k: v for k, v in val.items() if v and str(v).strip()}
             if not meaningful:
                 return None
             return ", ".join(f"{k}: {v}" for k, v in meaningful.items())
-        if isinstance(val, str):
-            stripped = val.strip()
-            if stripped.startswith('{') and ('special_' in stripped or 'item_' in stripped):
-                return None
         return val
 
-    # First, try to parse Jotform's 'pretty' field which has the real human question labels
-    pretty_str = request.form.get('pretty') or raw_data.get('pretty')
-    parsed_pretty = False
-    if pretty_str and isinstance(pretty_str, str):
-        try:
-            # Format is typically "Label 1:Value 1, Label 2:Value 2"
-            parts = re.split(r',\s*(?=[^:]+:)', pretty_str.strip())
-            for part in parts:
-                if ':' in part:
-                    p_key, p_val = part.split(':', 1)
-                    p_key = p_key.strip()
-                    p_val = p_val.strip()
-                    if p_key and p_val and not is_jotform_internal(p_key):
-                        entries.append((p_key, p_val))
-            if entries:
-                parsed_pretty = True
-        except Exception as e:
-            current_app.logger.warning(f"Failed parsing Jotform pretty string: {e}")
-
-    # Fallback to form_data keys if pretty wasn't available
-    if not parsed_pretty:
-        for raw_k, raw_v in form_data.items():
+    # Primary parsing: Use raw_data JSON keys if available
+    parsed_structured = False
+    if raw_data and isinstance(raw_data, dict):
+        for raw_k, raw_v in raw_data.items():
             if is_jotform_internal(raw_k):
                 continue
             flat_val = flatten_value(raw_v)
             if not flat_val:
                 continue
-            cleaned_k = clean_key_name(raw_k)
-            # Remove trailing numbers like "Fullname0" -> "Full Name"
-            cleaned_k = re.sub(r'(\D+)\d+$', r'\1', cleaned_k).strip()
-            entries.append((cleaned_k, flat_val))
+            cleaned_val = strip_html_tags(str(flat_val))
+            if not cleaned_val:
+                continue
+            label = clean_key_name(raw_k)
+            label = re.sub(r'(\D+)\d+$', r'\1', label).strip()
+            if is_jotform_internal(label):
+                continue
+            entries.append((label, cleaned_val))
+        if entries:
+            parsed_structured = True
+
+    # Fallback: Parse 'pretty' string or request.form
+    if not parsed_structured:
+        pretty_str = request.form.get('pretty') or raw_data.get('pretty')
+        if pretty_str and isinstance(pretty_str, str):
+            try:
+                # Clean html in pretty_str first
+                clean_pretty = strip_html_tags(pretty_str)
+                parts = re.split(r',\s*(?=[^:]+:)', clean_pretty.strip())
+                for part in parts:
+                    if ':' in part:
+                        p_key, p_val = part.split(':', 1)
+                        p_key = p_key.strip()
+                        p_val = p_val.strip()
+                        if p_key and p_val and not is_jotform_internal(p_key):
+                            entries.append((p_key, p_val))
+            except Exception as e:
+                current_app.logger.warning(f"Failed parsing Jotform pretty string: {e}")
+
+        if not entries:
+            for raw_k, raw_v in form_data.items():
+                if is_jotform_internal(raw_k):
+                    continue
+                flat_val = flatten_value(raw_v)
+                if not flat_val:
+                    continue
+                cleaned_val = strip_html_tags(str(flat_val))
+                if not cleaned_val:
+                    continue
+                cleaned_k = clean_key_name(raw_k)
+                cleaned_k = re.sub(r'(\D+)\d+$', r'\1', cleaned_k).strip()
+                if is_jotform_internal(cleaned_k):
+                    continue
+                entries.append((cleaned_k, cleaned_val))
 
     # Identify task title & submitter email
-    notes_list = []
+    task_title = None
+    submitter_email = None
     student_name = None
     parent_name = None
     general_name = None
 
     for label, val in entries:
-        notes_list.append(f"**{label}**: {val}")
         lbl_lower = label.lower()
 
-        # Email
         if 'email' in lbl_lower and not submitter_email:
             submitter_email = str(val).strip()
 
-        # Title keywords
         if ('title' in lbl_lower or 'subject' in lbl_lower or 'topic' in lbl_lower) and not task_title:
             task_title = str(val).strip()
 
-        # Name tracking for fallback title
         if 'student' in lbl_lower and 'name' in lbl_lower and not student_name:
             student_name = str(val).strip()
         elif 'parent' in lbl_lower and 'name' in lbl_lower and not parent_name:
@@ -2633,21 +2668,21 @@ def jotform_webhook():
         else:
             task_title = f"{form_title} #{submission_id or ''}"
 
-    # Compile task notes as clean HTML for proper rendering
+    # Compile task notes as clean HTML card
     notes_html = '<div style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">'
     notes_html += f'<h5 style="font-weight:700;color:#0f172a;margin:0 0 10px 0;font-size:14px;border-bottom:1px solid #e2e8f0;padding-bottom:8px;">Jotform Submission Details</h5>'
-    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">Form Name</span><span style="color:#0f172a;">{form_title}</span></div>'
-    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">Submission ID</span><span style="color:#0f172a;">{submission_id or "N/A"}</span></div>'
+    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:160px;color:#64748b;font-weight:600;flex-shrink:0;">Form Name</span><span style="color:#0f172a;">{html.escape(form_title)}</span></div>'
+    notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:160px;color:#64748b;font-weight:600;flex-shrink:0;">Submission ID</span><span style="color:#0f172a;">{html.escape(str(submission_id or "N/A"))}</span></div>'
     notes_html += '<div style="height:8px;"></div>'
 
     for label, val in entries:
-        escaped_label = str(label).replace('<', '&lt;').replace('>', '&gt;')
-        escaped_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
-        notes_html += f'<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:140px;color:#64748b;font-weight:600;flex-shrink:0;">{escaped_label}</span><span style="color:#0f172a;word-break:break-word;">{escaped_val}</span></div>'
+        escaped_label = html.escape(str(label))
+        escaped_val = html.escape(str(val)).replace('\n', '<br/>')
+        notes_html += f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9;font-size:13px;"><span style="min-width:160px;color:#64748b;font-weight:600;flex-shrink:0;">{escaped_label}</span><span style="color:#0f172a;word-break:break-word;white-space:pre-wrap;">{escaped_val}</span></div>'
 
     notes_html += '</div>'
 
-    # 5. Create the BoardTask
+    # 6. Create the BoardTask
     last_task = BoardTask.query.filter_by(group_id=group_id).order_by(BoardTask.position.desc()).first()
     position = (last_task.position + 1) if last_task else 0
 
@@ -2662,19 +2697,16 @@ def jotform_webhook():
     db.session.add(new_task)
     db.session.flush()
 
-    # 6. Log in task history
+    # 7. Log in task history
     db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name="Jotform Integration", action="Created task via Webhook"))
 
-    # 7. Smart Custom Fields Mapping
-    # Load all existing custom fields for this board
+    # 8. Smart Custom Fields Mapping & Assignment
     existing_fields = BoardCustomField.query.filter_by(board_id=board_id).all()
 
     def normalize_str(s):
-        """Normalizes a string for fuzzy comparison (e.g. 'Student\'s Full Name' -> 'studentfullname')"""
         return re.sub(r'[^a-z0-9]', '', (s or '').lower())
 
     def find_best_field_match(entry_label):
-        """Finds the best matching existing custom field on the board."""
         norm_label = normalize_str(entry_label)
         lbl_lower = entry_label.lower()
 
@@ -2688,44 +2720,35 @@ def jotform_webhook():
             f_norm = normalize_str(f.name)
             f_lower = f.name.lower()
 
-            # Student Name
             if 'student' in lbl_lower and ('student' in f_lower or f_norm == 'studentname'):
                 return f
 
-            # Parent Name
             if 'parent' in lbl_lower and ('parent' in f_lower or f_norm == 'parentname'):
                 return f
 
-            # Attendees / Party / Number of people
             if any(w in lbl_lower for w in ['attendee', 'party', 'people', 'number of', 'attendees', 'how many', 'count']) and \
                any(w in f_lower for w in ['attendee', 'party', 'people', '#', 'count', 'number', 'size']):
                 return f
 
-            # Payment / Amount / Total / Fee
             if any(w in lbl_lower for w in ['payment', 'price', 'amount', 'total', 'fee', 'cost']) and \
                any(w in f_lower for w in ['payment', 'price', 'amount', 'total', 'fee', 'cost', '$']):
                 return f
 
-            # Phone / Contact number
             if ('phone' in lbl_lower or 'cell' in lbl_lower) and ('phone' in f_lower or 'contact' in f_lower):
                 return f
 
-            # Email
             if 'email' in lbl_lower and 'email' in f_lower:
                 return f
 
-            # Address / Location
             if ('address' in lbl_lower or 'location' in lbl_lower) and ('address' in f_lower or 'location' in f_lower):
                 return f
 
-            # Grade / Class
             if 'grade' in lbl_lower and 'grade' in f_lower:
                 return f
 
-        # 3. Substring containment match
         for f in existing_fields:
             f_norm = normalize_str(f.name)
-            if f_norm and (f_norm in norm_label or norm_label in f_norm):
+            if f_norm and len(f_norm) >= 4 and (f_norm in norm_label or norm_label in f_norm):
                 return f
 
         return None
@@ -2738,7 +2761,6 @@ def jotform_webhook():
         if matched_field:
             target_field = matched_field
         else:
-            # Clean up the label for creating a new field (avoid raw Q2... names)
             clean_label = label.strip()
             if re.match(r'^q\d+_', clean_label, re.IGNORECASE):
                 clean_label = clean_key_name(clean_label)
@@ -2752,16 +2774,45 @@ def jotform_webhook():
             db.session.flush()
             existing_fields.append(target_field)
 
-        # Avoid setting the same custom field multiple times in a single submission
         if target_field.id in mapped_field_ids:
             continue
         mapped_field_ids.add(target_field.id)
 
-        # Insert value
-        value_json_str = json.dumps(val)
+        clean_val_str = strip_html_tags(str(val))
+        value_json_str = json.dumps(clean_val_str)
         field_val = TaskCustomFieldValue(task_id=new_task.id, field_id=target_field.id, value_json=value_json_str)
         db.session.add(field_val)
 
     db.session.commit()
     return jsonify(new_task.to_dict()), 201
+
+
+@board_bp.route('/<string:board_id>/clean-junk-fields', methods=['POST'])
+@jwt_required()
+def clean_junk_custom_fields(board_id):
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+
+    deleted_count = 0
+    fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+    for f in fields:
+        norm = re.sub(r'[^a-z0-9]', '', f.name.lower())
+        blocked = {
+            'username', 'type', 'pretty', 'path', 'jsexecutiontracker', 'submitsource',
+            'submitdate', 'builddate', 'uploadserverurl', 'eventobserver', 'timetosubmit',
+            'paymentversion', 'paymenttotalchecksum', 'paymentdiscountvalue',
+            'validatednewrequiredfieldids', 'requiredfieldids', 'slug', 'submit',
+            'rawrequest', 'formid', 'submissionid', 'webhookurl', 'ip', 'formtitle', 'quantity'
+        }
+        is_junk = norm in blocked or any(p in norm for p in ['jsexecution', 'submitsource', 'submitdate', 'builddate', 'uploadserver', 'eventobserver', 'validatednew'])
+        if is_junk:
+            TaskCustomFieldValue.query.filter_by(field_id=f.id).delete()
+            db.session.delete(f)
+            deleted_count += 1
+
+    db.session.commit()
+    return jsonify({"message": f"Successfully cleaned up {deleted_count} junk custom field(s)"}), 200
+
 
