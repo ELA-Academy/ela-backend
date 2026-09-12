@@ -504,10 +504,49 @@ def update_board(board_id):
             board.budget_amount = float(data.get('budget_amount')) if data.get('budget_amount') is not None else None
         except:
             pass
+    if 'view_settings' in data:
+        v_settings = data.get('view_settings')
+        if v_settings is not None:
+            board.view_settings = json.dumps(v_settings) if isinstance(v_settings, (dict, list)) else str(v_settings)
 
     sync_board_access(board, actor, role, data.get('access_members', board.to_dict().get('access_members', [])))
     db.session.commit()
     return jsonify(board.to_dict()), 200
+
+
+@board_bp.route('/<string:board_id>/view-settings', methods=['GET', 'PUT', 'OPTIONS'])
+@jwt_required(optional=True)
+def manage_board_view_settings(board_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    import json
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+
+    if request.method == 'GET':
+        settings_val = {}
+        if board.view_settings:
+            try:
+                settings_val = json.loads(board.view_settings)
+            except Exception:
+                settings_val = {}
+        return jsonify(settings_val), 200
+
+    data = request.get_json() or {}
+    current_settings = {}
+    if board.view_settings:
+        try:
+            current_settings = json.loads(board.view_settings)
+        except Exception:
+            current_settings = {}
+
+    current_settings.update(data)
+    board.view_settings = json.dumps(current_settings)
+    db.session.commit()
+    return jsonify(current_settings), 200
 
 
 @board_bp.route('/<string:board_id>', methods=['DELETE'])
@@ -2701,10 +2740,20 @@ def jotform_webhook():
     db.session.add(BoardTaskHistory(task_id=new_task.id, actor_name="Jotform Integration", action="Created task via Webhook"))
 
     # 8. Smart Custom Fields Mapping & Assignment
-    existing_fields = BoardCustomField.query.filter_by(board_id=board_id).all()
+    existing_fields = BoardCustomField.query.filter_by(board_id=board_id).order_by(BoardCustomField.position.asc(), BoardCustomField.id.asc()).all()
+
+    # Load board view settings to check deleted/ignored fields
+    board_view_settings = {}
+    if board.view_settings:
+        try:
+            board_view_settings = json.loads(board.view_settings)
+        except Exception:
+            board_view_settings = {}
 
     def normalize_str(s):
         return re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+    deleted_field_names = set(normalize_str(n) for n in board_view_settings.get('deleted_field_names', []))
 
     def find_best_field_match(entry_label):
         norm_label = normalize_str(entry_label)
@@ -2756,20 +2805,30 @@ def jotform_webhook():
     mapped_field_ids = set()
 
     for label, val in entries:
+        norm_label = normalize_str(label)
+        # If user explicitly deleted this column on the board, never resurrect it!
+        if norm_label in deleted_field_names:
+            continue
+
         matched_field = find_best_field_match(label)
 
         if matched_field:
             target_field = matched_field
         else:
+            # If the board already has custom fields established, do NOT create random new columns
+            # (The full submission details are already safely preserved in task description_html & notes)
+            if len(existing_fields) > 0:
+                continue
+
             clean_label = label.strip()
             if re.match(r'^q\d+_', clean_label, re.IGNORECASE):
                 clean_label = clean_key_name(clean_label)
             clean_label = re.sub(r'(\D+)\d+$', r'\1', clean_label).strip()
 
-            if not clean_label or is_jotform_internal(clean_label):
+            if not clean_label or is_jotform_internal(clean_label) or normalize_str(clean_label) in deleted_field_names:
                 continue
 
-            target_field = BoardCustomField(board_id=board_id, name=clean_label, type='text')
+            target_field = BoardCustomField(board_id=board_id, name=clean_label, type='text', position=len(existing_fields))
             db.session.add(target_field)
             db.session.flush()
             existing_fields.append(target_field)
@@ -2787,9 +2846,12 @@ def jotform_webhook():
     return jsonify(new_task.to_dict()), 201
 
 
-@board_bp.route('/<string:board_id>/clean-junk-fields', methods=['POST'])
-@jwt_required()
+@board_bp.route('/<string:board_id>/clean-junk-fields', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def clean_junk_custom_fields(board_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
     actor, role = get_actor()
     board = get_board_or_404_with_access(board_id, actor, role)
     if not board:
@@ -2797,6 +2859,9 @@ def clean_junk_custom_fields(board_id):
 
     deleted_count = 0
     fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+    cleaned_names = []
+    cleaned_ids = []
+
     for f in fields:
         norm = re.sub(r'[^a-z0-9]', '', f.name.lower())
         blocked = {
@@ -2804,15 +2869,38 @@ def clean_junk_custom_fields(board_id):
             'submitdate', 'builddate', 'uploadserverurl', 'eventobserver', 'timetosubmit',
             'paymentversion', 'paymenttotalchecksum', 'paymentdiscountvalue',
             'validatednewrequiredfieldids', 'requiredfieldids', 'slug', 'submit',
-            'rawrequest', 'formid', 'submissionid', 'webhookurl', 'ip', 'formtitle', 'quantity'
+            'rawrequest', 'formid', 'submissionid', 'webhookurl', 'ip', 'formtitle', 'quantity', 'item', 'special'
         }
-        is_junk = norm in blocked or any(p in norm for p in ['jsexecution', 'submitsource', 'submitdate', 'builddate', 'uploadserver', 'eventobserver', 'validatednew'])
+        is_junk = norm in blocked or any(p in norm for p in ['jsexecution', 'submitsource', 'submitdate', 'builddate', 'uploadserver', 'eventobserver', 'validatednew', 'webhookurl'])
         if is_junk:
+            cleaned_names.append(f.name)
+            cleaned_ids.append(str(f.id))
             TaskCustomFieldValue.query.filter_by(field_id=f.id).delete()
             db.session.delete(f)
             deleted_count += 1
 
+    # Also update board view_settings to blacklist cleaned fields and remove from column_order
+    if board.view_settings or cleaned_names:
+        try:
+            b_settings = {}
+            if board.view_settings:
+                b_settings = json.loads(board.view_settings)
+            deleted_list = b_settings.get('deleted_field_names', [])
+            for cname in cleaned_names:
+                if cname not in deleted_list:
+                    deleted_list.append(cname)
+            b_settings['deleted_field_names'] = deleted_list
+
+            if 'column_order' in b_settings and isinstance(b_settings['column_order'], list):
+                b_settings['column_order'] = [
+                    c for c in b_settings['column_order']
+                    if str(c) not in cleaned_ids and str(c).replace('custom_', '') not in cleaned_ids
+                ]
+            board.view_settings = json.dumps(b_settings)
+        except Exception as e:
+            current_app.logger.warning(f"Error updating view_settings in clean_junk_custom_fields: {e}")
+
     db.session.commit()
-    return jsonify({"message": f"Successfully cleaned up {deleted_count} junk custom field(s)"}), 200
+    return jsonify({"message": f"Successfully cleaned up {deleted_count} junk custom field(s)", "deleted_count": deleted_count}), 200
 
 

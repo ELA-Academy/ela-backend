@@ -274,7 +274,7 @@ def get_board_custom_fields(board_id):
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
     
-    fields = BoardCustomField.query.filter_by(board_id=board.id).all()
+    fields = BoardCustomField.query.filter_by(board_id=board.id).order_by(BoardCustomField.position.asc(), BoardCustomField.id.asc()).all()
     return jsonify([f.to_dict() for f in fields]), 200
 
 @board_extensions_bp.route('/boards/<string:board_id>/custom-fields', methods=['POST'])
@@ -295,16 +295,52 @@ def create_board_custom_field(board_id):
 
     config_str = json.dumps(config) if config else None
 
+    max_pos = db.session.query(db.func.max(BoardCustomField.position)).filter_by(board_id=board.id).scalar()
+    next_pos = (max_pos + 1) if max_pos is not None else 0
+
     field = BoardCustomField(
         board_id=board.id,
         name=name,
         type=field_type,
-        config_json=config_str
+        config_json=config_str,
+        position=next_pos
     )
     db.session.add(field)
+
+    # If field was previously in deleted_field_names, remove it so it's active again
+    if board.view_settings:
+        try:
+            b_settings = json.loads(board.view_settings)
+            deleted_list = b_settings.get('deleted_field_names', [])
+            norm_name = re.sub(r'[^a-z0-9]', '', name.lower())
+            new_deleted = [d for d in deleted_list if re.sub(r'[^a-z0-9]', '', str(d).lower()) != norm_name]
+            if len(new_deleted) != len(deleted_list):
+                b_settings['deleted_field_names'] = new_deleted
+                board.view_settings = json.dumps(b_settings)
+        except Exception:
+            pass
+
     db.session.commit()
     log_activity(actor, f"Created custom field: '{name}' ({field_type}) in board '{board.name}'")
     return jsonify(field.to_dict()), 201
+
+@board_extensions_bp.route('/boards/<string:board_id>/custom-fields/reorder', methods=['POST'])
+@jwt_required()
+def reorder_board_custom_fields(board_id):
+    actor, role = get_actor()
+    board = Board.get_by_id_or_public_id_or_404(board_id)
+    if not ensure_board_access(board, actor, role):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.get_json() or {}
+    field_ids = data.get('field_ids', [])
+    for pos, fid in enumerate(field_ids):
+        field = BoardCustomField.query.filter_by(id=fid, board_id=board.id).first()
+        if field:
+            field.position = pos
+
+    db.session.commit()
+    return jsonify({"message": "Custom fields reordered successfully"}), 200
 
 @board_extensions_bp.route('/custom-fields/<int:field_id>', methods=['DELETE'])
 @jwt_required()
@@ -315,9 +351,31 @@ def delete_board_custom_field(field_id):
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
+    field_name = field.name
+    # Record deleted field name in board view_settings so Jotform webhook will NEVER recreate it!
+    try:
+        board_settings = {}
+        if board.view_settings:
+            board_settings = json.loads(board.view_settings)
+        deleted_names = board_settings.get('deleted_field_names', [])
+        clean_name = field_name.strip()
+        if clean_name not in deleted_names:
+            deleted_names.append(clean_name)
+        board_settings['deleted_field_names'] = deleted_names
+
+        # Also remove from column_order if present
+        if 'column_order' in board_settings and isinstance(board_settings['column_order'], list):
+            board_settings['column_order'] = [
+                c for c in board_settings['column_order']
+                if str(c) != str(field.id) and str(c) != f"custom_{field.id}"
+            ]
+        board.view_settings = json.dumps(board_settings)
+    except Exception as e:
+        current_app.logger.warning(f"Failed updating deleted_field_names on board: {e}")
+
     db.session.delete(field)
     db.session.commit()
-    log_activity(actor, f"Deleted custom field: '{field.name}' from board '{board.name}'")
+    log_activity(actor, f"Deleted custom field: '{field_name}' from board '{board.name}'")
     return jsonify({"message": "Custom field deleted"}), 200
 
 @board_extensions_bp.route('/custom-fields/<int:field_id>', methods=['PUT'])

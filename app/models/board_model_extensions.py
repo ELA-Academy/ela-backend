@@ -14,6 +14,7 @@ class BoardCustomField(db.Model):
     name = db.Column(db.String(100), nullable=False)
     type = db.Column(db.String(50), nullable=False)  # 'text', 'number', 'date', 'dropdown', 'multi_select', 'currency', 'formula', 'rating'
     config_json = db.Column(db.Text, nullable=True) # options for dropdowns, formulas, etc.
+    position = db.Column(db.Integer, default=0, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     values = db.relationship('TaskCustomFieldValue', backref='field', cascade='all, delete-orphan', lazy=True)
@@ -33,6 +34,7 @@ class BoardCustomField(db.Model):
             'board_id': board_uuid,
             'name': self.name,
             'type': self.type,
+            'position': self.position if self.position is not None else 0,
             'config': config_val,
             'created_at': self.created_at.isoformat() + 'Z'
         }
