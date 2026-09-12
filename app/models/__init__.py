@@ -66,9 +66,13 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('boards', 'priority', "VARCHAR(50) NOT NULL DEFAULT 'Normal'")
         add_column_if_missing('boards', 'category', 'VARCHAR(100) NULL')
         add_column_if_missing('boards', 'budget_amount', 'FLOAT NULL')
+        add_column_if_missing('boards', 'view_settings', 'TEXT NULL')
         add_column_if_missing('boards', 'is_personal', 'BOOLEAN NOT NULL DEFAULT FALSE')
         add_column_if_missing('boards', 'owner_staff_id', 'INTEGER NULL')
         add_column_if_missing('boards', 'owner_super_admin_id', 'INTEGER NULL')
+
+    if inspector.has_table('board_custom_fields'):
+        add_column_if_missing('board_custom_fields', 'position', 'INTEGER NOT NULL DEFAULT 0')
 
     if inspector.has_table('calendar_events'):
         add_column_if_missing('calendar_events', 'reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
