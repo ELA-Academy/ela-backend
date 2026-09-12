@@ -1,5 +1,8 @@
 import os
 import uuid
+import json
+import time
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request, current_app
@@ -726,6 +729,129 @@ def get_messages(conversation_id):
     }), 200
 
 
+def dispatch_message_notifications(conversation, user, role, content, new_message, mentions):
+    now = datetime.now(timezone.utc)
+    notification_cooldown = timedelta(minutes=15)
+    notified_mentions = set()
+    from app.utils.notifications import enqueue_user_notification
+
+    # 1. Parse mentions and dispatch high-priority mention notifications
+    for mention in (mentions or []):
+        m_id_raw = mention.get('id')
+        m_role_raw = str(mention.get('role') or '').lower().replace(' ', '')
+        m_id = None
+
+        if m_id_raw is not None:
+            if isinstance(m_id_raw, str):
+                if '_' in m_id_raw:
+                    parts = m_id_raw.split('_', 1)
+                    if not m_role_raw or m_role_raw not in ('staff', 'superadmin'):
+                        m_role_raw = parts[0].lower()
+                    try:
+                        m_id = int(parts[1])
+                    except ValueError:
+                        m_id = None
+                else:
+                    try:
+                        m_id = int(m_id_raw)
+                    except ValueError:
+                        m_id = None
+            elif isinstance(m_id_raw, int):
+                m_id = m_id_raw
+
+        if m_role_raw in ('staff', 'superadmin') and m_id is not None:
+            key = f"{m_role_raw}_{m_id}"
+            if key not in notified_mentions:
+                notified_mentions.add(key)
+                # 15s window to deduplicate consecutive mentions
+                raw_key = f"mention:{conversation.id}:{m_role_raw}:{m_id}:{int(time.time() / 15)}"
+                idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+
+                if conversation.conversation_type == 'direct':
+                    participants = conversation.get_participants()
+                    if len(participants) > 2:
+                        convo_desc = "your group message"
+                    else:
+                        convo_desc = "a direct message"
+                    notif_msg = f"{user.name} @mentioned you in {convo_desc}."
+                else:
+                    convo_title = conversation.name or conversation.display_name()
+                    notif_msg = f"{user.name} @mentioned you in conversation '{convo_title}'."
+
+                enqueue_user_notification(
+                    user_id=m_id,
+                    user_role=m_role_raw,
+                    message=notif_msg,
+                    category='mention',
+                    target_type="Conversation",
+                    target_id=conversation.id,
+                    target_link=f"/admin/messaging?conversation={conversation.id}",
+                    idempotency_key=idempotency_key
+                )
+
+    # 2. General message notifications and realtime push/emails
+    for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
+        recipient_key = f"{recipient_role}_{recipient.id}"
+        # Skip generic notification if already notified as a mention
+        if recipient_key not in notified_mentions:
+            raw_key = f"msg:{conversation.id}:{recipient_role}:{recipient.id}:{int(time.time() / 15)}"
+            idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+
+            convo_label = "your group message" if (conversation.conversation_type == 'direct' and len(conversation.participants) > 2) else (conversation.name or 'a conversation')
+            enqueue_user_notification(
+                user_id=recipient.id,
+                user_role=recipient_role,
+                message=f"You have a new message in {convo_label}.",
+                category='general',
+                target_type="Conversation",
+                target_id=conversation.id,
+                target_link=f"/admin/messaging?conversation={conversation.id}",
+                idempotency_key=idempotency_key
+            )
+
+        recipient_entry = get_participant_entry(conversation.id, recipient, recipient_role)
+        if not recipient_entry:
+            recipient_entry = ConversationParticipant(
+                conversation_id=conversation.id,
+                staff=recipient if recipient_role == 'staff' else None,
+                super_admin=recipient if recipient_role == 'superadmin' else None,
+                last_read_at=datetime.min.replace(tzinfo=timezone.utc)
+            )
+            db.session.add(recipient_entry)
+            db.session.flush()
+
+        if conversation.conversation_type != 'direct':
+            continue
+
+        should_send_realtime_notification = (
+            recipient_entry.last_notified_at is None
+            or (now - recipient_entry.last_notified_at.replace(tzinfo=timezone.utc)) > notification_cooldown
+        )
+        if not should_send_realtime_notification:
+            continue
+
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+        action_link = f"{frontend_url}/admin/messaging?conversation={conversation.id}"
+        is_mentioned = recipient_key in notified_mentions
+        push_title = f"{user.name} mentioned you" if is_mentioned else f"New Message from {user.name}"
+        email_data = {
+            'message': f"{user.name} mentioned you in a conversation." if is_mentioned else f"You have a new message from {user.name} in one of your conversations.",
+            'action_link': action_link
+        }
+        send_email_in_background(
+            subject=push_title,
+            recipients=[recipient.email],
+            template_data=email_data
+        )
+        push_payload = {
+            "title": push_title,
+            "body": new_message.content,
+            "url": f"/admin/messaging?conversation={conversation.id}"
+        }
+        send_push_notification(recipient, push_payload)
+        recipient_entry.last_notified_at = now
+
+
 @messaging_bp.route('/conversations/<int:conversation_id>/messages', methods=['POST'])
 @jwt_required()
 def send_message(conversation_id):
@@ -768,117 +894,8 @@ def send_message(conversation_id):
         )
     )
 
-    now = datetime.now(timezone.utc)
-    notification_cooldown = timedelta(minutes=15)
-
-    # Parse mentions from payload
     mentions = data.get('mentions', [])
-    notified_mentions = set()
-    from app.utils.notifications import enqueue_user_notification
-    import time
-    import hashlib
-
-    for mention in mentions:
-        m_id_raw = mention.get('id')
-        m_role_raw = str(mention.get('role') or '').lower().replace(' ', '')
-        m_id = None
-
-        if m_id_raw is not None:
-            if isinstance(m_id_raw, str):
-                if '_' in m_id_raw:
-                    parts = m_id_raw.split('_', 1)
-                    if not m_role_raw or m_role_raw not in ('staff', 'superadmin'):
-                        m_role_raw = parts[0].lower()
-                    try:
-                        m_id = int(parts[1])
-                    except ValueError:
-                        m_id = None
-                else:
-                    try:
-                        m_id = int(m_id_raw)
-                    except ValueError:
-                        m_id = None
-            elif isinstance(m_id_raw, int):
-                m_id = m_id_raw
-
-        if m_role_raw in ('staff', 'superadmin') and m_id is not None:
-            key = f"{m_role_raw}_{m_id}"
-            if key not in notified_mentions:
-                notified_mentions.add(key)
-                # 15s window to deduplicate consecutive mentions
-                raw_key = f"mention:{conversation.id}:{m_role_raw}:{m_id}:{int(time.time() / 15)}"
-                idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
-                enqueue_user_notification(
-                    user_id=m_id,
-                    user_role=m_role_raw,
-                    message=f"{user.name} @mentioned you in conversation '{conversation.name or 'a conversation'}'.",
-                    category='mention',
-                    target_type="Conversation",
-                    target_id=conversation.id,
-                    target_link=f"/admin/messaging?conversation={conversation.id}",
-                    idempotency_key=idempotency_key
-                )
-
-    for recipient, recipient_role in recipients_for_conversation(conversation, user, role):
-        recipient_key = f"{recipient_role}_{recipient.id}"
-        # Skip generic notification if already notified as a mention
-        if recipient_key in notified_mentions:
-            pass
-        else:
-            # 15s window to deduplicate consecutive messages
-            raw_key = f"msg:{conversation.id}:{recipient_role}:{recipient.id}:{int(time.time() / 15)}"
-            idempotency_key = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
-            
-            enqueue_user_notification(
-                user_id=recipient.id,
-                user_role=recipient_role,
-                message=f"You have a new message in {conversation.name or 'a conversation'}.",
-                category='general',
-                target_type="Conversation",
-                target_id=conversation.id,
-                target_link=f"/admin/messaging?conversation={conversation.id}",
-                idempotency_key=idempotency_key
-            )
-
-        recipient_entry = get_participant_entry(conversation_id, recipient, recipient_role)
-        if not recipient_entry:
-            recipient_entry = ConversationParticipant(
-                conversation_id=conversation_id,
-                staff=recipient if recipient_role == 'staff' else None,
-                super_admin=recipient if recipient_role == 'superadmin' else None,
-                last_read_at=datetime.min.replace(tzinfo=timezone.utc)
-            )
-            db.session.add(recipient_entry)
-            db.session.flush()
-
-        if conversation.conversation_type != 'direct':
-            continue
-
-        should_send_realtime_notification = (
-            recipient_entry.last_notified_at is None
-            or (now - recipient_entry.last_notified_at.replace(tzinfo=timezone.utc)) > notification_cooldown
-        )
-        if not should_send_realtime_notification:
-            continue
-
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-        action_link = f"{frontend_url}/admin/messaging?conversation={conversation_id}"
-        email_data = {
-            'message': f"You have a new message from {user.name} in one of your conversations.",
-            'action_link': action_link
-        }
-        send_email_in_background(
-            subject="You have a new message",
-            recipients=[recipient.email],
-            template_data=email_data
-        )
-        push_payload = {
-            "title": f"New Message from {user.name}",
-            "body": new_message.content,
-            "url": f"/admin/messaging?conversation={conversation_id}"
-        }
-        send_push_notification(recipient, push_payload)
-        recipient_entry.last_notified_at = now
+    dispatch_message_notifications(conversation, user, role, content, new_message, mentions)
 
     conversation.updated_at = datetime.utcnow()
     db.session.commit()
@@ -978,6 +995,16 @@ def upload_message_file(conversation_id):
             content=content
         )
     )
+
+    mentions_raw = request.form.get('mentions')
+    mentions = []
+    if mentions_raw:
+        try:
+            mentions = json.loads(mentions_raw)
+        except Exception:
+            mentions = []
+
+    dispatch_message_notifications(conversation, user, role, content, new_message, mentions)
 
     conversation.updated_at = datetime.utcnow()
     db.session.commit()

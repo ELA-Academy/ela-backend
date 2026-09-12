@@ -26,6 +26,7 @@ class Board(db.Model):
     category = db.Column(db.String(100), nullable=True)
     budget_amount = db.Column(db.Float, nullable=True)
     
+    view_settings = db.Column(db.Text, nullable=True)
     is_personal = db.Column(db.Boolean, default=False, nullable=False)
     owner_staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=True)
     owner_super_admin_id = db.Column(db.Integer, db.ForeignKey('super_admins.id', ondelete='CASCADE'), nullable=True)
@@ -61,10 +62,17 @@ class Board(db.Model):
             except:
                 pass
 
+        view_settings_val = None
+        if self.view_settings:
+            try:
+                view_settings_val = json.loads(self.view_settings)
+            except:
+                pass
+
         custom_fields_val = []
         try:
             from app.models.board_model_extensions import BoardCustomField
-            fields = BoardCustomField.query.filter_by(board_id=self.id).all()
+            fields = BoardCustomField.query.filter_by(board_id=self.id).order_by(BoardCustomField.position.asc(), BoardCustomField.id.asc()).all()
             custom_fields_val = [f.to_dict() for f in fields]
         except Exception:
             pass
@@ -85,6 +93,7 @@ class Board(db.Model):
             'description': self.description,
             'is_private': self.is_private,
             'custom_statuses': custom_statuses_val,
+            'view_settings': view_settings_val,
             'parent_id': parent_uuid,
             'is_folder': self.is_folder,
             'color': self.color,

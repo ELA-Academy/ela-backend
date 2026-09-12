@@ -7,15 +7,18 @@ except Exception:
 import os
 from dotenv import load_dotenv
 
-# Load env variables before importing config or models
+# Load base .env first
+load_dotenv()
+
+# Override with environment-specific .env if it exists
 if os.getenv('FLASK_ENV') == 'production':
-    dotenv_path = os.path.join(os.path.dirname(__file__), '..', 'production.env')
-    load_dotenv(dotenv_path=dotenv_path)
+    prod_env = os.path.join(os.path.dirname(__file__), '..', 'production.env')
+    if os.path.exists(prod_env):
+        load_dotenv(dotenv_path=prod_env, override=True)
 elif os.getenv('FLASK_ENV') == 'staging':
-    dotenv_path = os.path.join(os.path.dirname(__file__), '..', 'staging.env')
-    load_dotenv(dotenv_path=dotenv_path)
-else:
-    load_dotenv()
+    staging_env = os.path.join(os.path.dirname(__file__), '..', 'staging.env')
+    if os.path.exists(staging_env):
+        load_dotenv(dotenv_path=staging_env, override=True)
 
 from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS

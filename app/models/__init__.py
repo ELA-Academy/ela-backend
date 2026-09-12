@@ -6,12 +6,16 @@ db = SQLAlchemy()
 
 def ensure_runtime_schema_updates():
     def add_column_if_missing(table_name, column_name, sql_definition):
-        inspector = inspect(db.engine)
-        existing_columns = {column['name'] for column in inspector.get_columns(table_name)}
-        if column_name in existing_columns:
-            return
-        db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}"))
-        db.session.commit()
+        try:
+            inspector = inspect(db.engine)
+            existing_columns = {column['name'] for column in inspector.get_columns(table_name)}
+            if column_name in existing_columns:
+                return
+            db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_definition}"))
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"[Schema] Could not add {table_name}.{column_name}: {e}")
 
     def alter_column_type_if_needed(table_name, column_name, target_type_keyword):
         """Alter a column's type if it doesn't match the target type (e.g. VARCHAR -> TEXT)."""
@@ -62,9 +66,13 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('boards', 'priority', "VARCHAR(50) NOT NULL DEFAULT 'Normal'")
         add_column_if_missing('boards', 'category', 'VARCHAR(100) NULL')
         add_column_if_missing('boards', 'budget_amount', 'FLOAT NULL')
+        add_column_if_missing('boards', 'view_settings', 'TEXT NULL')
         add_column_if_missing('boards', 'is_personal', 'BOOLEAN NOT NULL DEFAULT FALSE')
         add_column_if_missing('boards', 'owner_staff_id', 'INTEGER NULL')
         add_column_if_missing('boards', 'owner_super_admin_id', 'INTEGER NULL')
+
+    if inspector.has_table('board_custom_fields'):
+        add_column_if_missing('board_custom_fields', 'position', 'INTEGER NOT NULL DEFAULT 0')
 
     if inspector.has_table('calendar_events'):
         add_column_if_missing('calendar_events', 'reminder_sent', 'BOOLEAN NOT NULL DEFAULT FALSE')
@@ -112,6 +120,19 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('board_task_assignees'):
         add_column_if_missing('board_task_assignees', 'department_id', 'INTEGER NULL')
 
+    if inspector.has_table('payments'):
+        add_column_if_missing('payments', 'stripe_payment_intent_id', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'stripe_charge_id', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'idempotency_key', 'VARCHAR(100) NULL')
+        add_column_if_missing('payments', 'is_refunded', 'BOOLEAN NOT NULL DEFAULT FALSE')
+        add_column_if_missing('payments', 'refund_amount', 'FLOAT NOT NULL DEFAULT 0.0')
+
+    if inspector.has_table('parent_payment_methods'):
+        add_column_if_missing('parent_payment_methods', 'stripe_payment_method_id', 'VARCHAR(100) NULL')
+
+    if inspector.has_table('parents'):
+        add_column_if_missing('parents', 'stripe_customer_id', 'VARCHAR(100) NULL')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
@@ -135,7 +156,7 @@ def init_db(app):
         from app.models.financial_model import (
             StudentFinancialAccount, PresetChargeItem, Invoice, 
             InvoiceItem, Payment, Credit, BillingPlan, Subscription,
-            PresetDiscount, FinancialAuditLog
+            PresetDiscount, FinancialAuditLog, ProcessedStripeEvent
         )
         from app.models.subsidy_model import Subsidy
         from app.models.message_log_model import MessageLog
@@ -155,5 +176,12 @@ def init_db(app):
         from app.models.generated_report_model import GeneratedReport
         from app.models.student_document_model import StudentDocument
         
-        db.create_all()
-        ensure_runtime_schema_updates()
+        try:
+            db.create_all()
+        except Exception as e:
+            print(f"[InitDB] create_all warning: {e}")
+
+        try:
+            ensure_runtime_schema_updates()
+        except Exception as e:
+            print(f"[InitDB] ensure_runtime_schema_updates warning: {e}")

@@ -124,28 +124,62 @@ def submit_public_form(token):
         submission.payment_status = 'Paid'
         submission.status = 'Completed'
 
-    # --- AUTOMATIC CONVERSION ---
-    new_student = _perform_lead_conversion(submission.lead)
-    if new_student:
+    # --- AUTOMATIC CONVERSION & STUDENT DOCUMENT SAVE ---
+    target_student = _perform_lead_conversion(submission.lead)
+    if not target_student and submission.lead:
+        target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+
+    if target_student:
         from app.models.student_document_model import StudentDocument
-        doc_name = f"{new_student.first_name} {new_student.last_name} {submission.form.name}"
-        # Point to the read-only submission viewer page on the frontend
-        file_url = f"/enrollment/view/{submission.secure_token}"
-        doc = StudentDocument(
-            student_id=new_student.id,
-            name=doc_name,
-            file_path=file_url,
-            document_type="Document",
-            status="UPLOADED"
-        )
-        db.session.add(doc)
-    # --- END AUTOMATIC CONVERSION ---
+        doc_name = f"{target_student.first_name} {target_student.last_name} - {submission.form.name}"
+        file_url = f"/api/enrollment/submission/{submission.secure_token}/pdf"
+        
+        existing_doc = StudentDocument.query.filter_by(student_id=target_student.id, name=doc_name).first()
+        if not existing_doc:
+            doc = StudentDocument(
+                student_id=target_student.id,
+                name=doc_name,
+                file_path=file_url,
+                document_type="Document",
+                status="UPLOADED"
+            )
+            db.session.add(doc)
+        else:
+            existing_doc.file_path = file_url
+    # --- END AUTOMATIC CONVERSION & STUDENT DOCUMENT SAVE ---
 
     accounting_dept = Department.query.filter_by(name="Accounting Department").first()
     if accounting_dept and accounting_dept.staff_members:
         message = f"An enrollment form for {student_name} has been submitted."
         if submission.payment_status == 'Paid': message += " Payment has been confirmed."
         create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=message, target_obj=submission.lead)
+
+    # --- SEND PARENT CONFIRMATION EMAIL ---
+    parent_email = None
+    if submission.lead and getattr(submission.lead, 'primary_email', None):
+        parent_email = submission.lead.primary_email
+    elif submission.lead and getattr(submission.lead, 'email', None):
+        parent_email = submission.lead.email
+    elif submission.responses_json and isinstance(submission.responses_json, dict):
+        for k, v in submission.responses_json.items():
+            if 'email' in k.lower() and isinstance(v, str) and '@' in v:
+                parent_email = v.strip()
+                break
+
+    if parent_email:
+        try:
+            from app.utils.notifications import send_email_in_background
+            form_title = submission.form.name if submission.form else "Enrollment & Registration Form"
+            send_email_in_background(
+                subject=f"Registration Received - Exceptional Learning and Arts Academy",
+                recipients=[parent_email],
+                template_data={
+                    "message": f"Hello,\n\nThank you for submitting the {form_title} for {student_name}.\n\nWe have successfully received your completed form and signed contract. A digital copy of your signed contract has been attached to the student profile.\n\nYou can log into your Parent Dashboard at any time to view your documents, billing statements, and payments.\n\nWarm regards,\nExceptional Learning and Arts Academy"
+                }
+            )
+        except Exception as ex:
+            print(f"[submit_public_form Email Error] {ex}")
+    # --- END SEND PARENT CONFIRMATION EMAIL ---
     
     log_activity(None, f"Parent submitted enrollment for {student_name}", submission.lead)
     db.session.commit()
@@ -162,8 +196,145 @@ def get_public_submission_view(token):
         "responses": submission.responses_json,
         "status": submission.status,
         "submitted_at": submission.submitted_at.isoformat() if submission.submitted_at else None,
-        "student_name": f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}" if submission.lead.students else "N/A"
+        "student_name": f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}" if submission.lead and submission.lead.students else "N/A"
     }), 200
+
+
+@enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
+@enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
+@enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
+@enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
+def download_submission_contract_pdf(token):
+    submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
+    
+    import base64
+    from io import BytesIO
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from flask import send_file
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle('DocTitle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#0b2f4c'), spaceAfter=10)
+    section_title = ParagraphStyle('SectionTitle', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=colors.HexColor('#007ba4'), spaceBefore=12, spaceAfter=6)
+    normal_text = ParagraphStyle('NormalText', parent=styles['Normal'], fontName='Helvetica', fontSize=10, leading=14, textColor=colors.HexColor('#333333'))
+    bold_text = ParagraphStyle('BoldText', parent=normal_text, fontName='Helvetica-Bold')
+
+    story = []
+    story.append(Paragraph("<b>Exceptional Learning and Arts Academy</b>", title_style))
+    story.append(Paragraph("Official Enrollment & Registration Contract", ParagraphStyle('Sub', parent=normal_text, fontSize=11, textColor=colors.HexColor('#64748b'))))
+    story.append(Spacer(1, 10))
+
+    form_name = submission.form.name if submission.form else "Enrollment Form"
+    submitted_date = submission.submitted_at.strftime('%B %d, %Y at %I:%M %p') if submission.submitted_at else "N/A"
+    student_name = "N/A"
+    if submission.lead and submission.lead.students:
+        student_name = f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}"
+
+    meta_data = [
+        [Paragraph("<b>Form / Contract:</b>", bold_text), Paragraph(form_name, normal_text)],
+        [Paragraph("<b>Student Name:</b>", bold_text), Paragraph(student_name, normal_text)],
+        [Paragraph("<b>Submission Date:</b>", bold_text), Paragraph(submitted_date, normal_text)],
+        [Paragraph("<b>Contract Status:</b>", bold_text), Paragraph(submission.status, normal_text)],
+        [Paragraph("<b>Registration Fee:</b>", bold_text), Paragraph(f"${submission.form.fee_amount:.2f} ({submission.payment_status or 'N/A'})" if submission.form and submission.form.collect_fee else "N/A", normal_text)]
+    ]
+    meta_table = Table(meta_data, colWidths=[1.8*inch, 5.7*inch])
+    meta_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('LINEBELOW', (0,-1), (-1,-1), 1, colors.HexColor('#e2e8f0'))
+    ]))
+    story.append(meta_table)
+    story.append(Spacer(1, 15))
+
+    structure = submission.form.form_structure_json if submission.form else {}
+    responses = submission.responses_json or {}
+
+    sections = structure.get('sections', [])
+    for sec in sections:
+        sec_title = sec.get('title', 'Section')
+        story.append(Paragraph(f"<b>{sec_title}</b>", section_title))
+        fields = sec.get('fields', [])
+        
+        sec_rows = []
+        for field in fields:
+            f_id = field.get('id')
+            f_label = field.get('label') or field.get('name') or f_id
+            f_val = responses.get(f_id, '')
+            if isinstance(f_val, list):
+                f_val = ", ".join([str(v) for v in f_val])
+            elif isinstance(f_val, bool):
+                f_val = "Yes / Agreed" if f_val else "No"
+            else:
+                f_val = str(f_val) if f_val is not None else ""
+
+            sec_rows.append([
+                Paragraph(f"<b>{f_label}:</b>", bold_text),
+                Paragraph(f_val or "<i>[Not provided]</i>", normal_text)
+            ])
+
+        if not sec_rows:
+            sec_rows.append([Paragraph("Section Info:", bold_text), Paragraph("Completed", normal_text)])
+
+        sec_table = Table(sec_rows, colWidths=[2.5*inch, 5.0*inch])
+        sec_table.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f8fafc')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cbd5e1'))
+        ]))
+        story.append(sec_table)
+        story.append(Spacer(1, 10))
+
+    # --- PARENT DIGITAL SIGNATURE BLOCK ---
+    parent_sig = responses.get('parent_signature')
+    signer_name = responses.get('parent_signer_name') or "Parent / Guardian"
+    story.append(Paragraph("<b>Parent / Guardian Digital Signature</b>", section_title))
+    
+    sig_content = []
+    if parent_sig and isinstance(parent_sig, str) and parent_sig.startswith('data:image'):
+        try:
+            sig_data = parent_sig.split(',', 1)[1]
+            img_bytes = base64.b64decode(sig_data)
+            img_buffer = BytesIO(img_bytes)
+            rl_img = RLImage(img_buffer, width=2.5*inch, height=0.8*inch)
+            sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), rl_img])
+        except Exception as sig_err:
+            sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), Paragraph("<i>[Signature Recorded]</i>", normal_text)])
+    else:
+        sig_content.append([Paragraph("<b>Digital Signature:</b>", bold_text), Paragraph(f"<i>{signer_name} (Electronically Signed)</i>", normal_text)])
+
+    sig_content.append([Paragraph("<b>Signer Name:</b>", bold_text), Paragraph(signer_name, normal_text)])
+    sig_content.append([Paragraph("<b>Signature Date:</b>", bold_text), Paragraph(submitted_date, normal_text)])
+
+    sig_table = Table(sig_content, colWidths=[2.5*inch, 5.0*inch])
+    sig_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#f0f9ff')),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#bae6fd'))
+    ]))
+    story.append(sig_table)
+    story.append(Spacer(1, 15))
+
+    story.append(Paragraph("<i>This document is an electronically signed and executed contract on file with Exceptional Learning and Arts Academy.</i>", ParagraphStyle('Foot', parent=normal_text, fontSize=8, textColor=colors.HexColor('#64748b'))))
+
+    doc.build(story)
+    buffer.seek(0)
+
+    filename = f"Contract_{submission.secure_token[:8]}.pdf"
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/pdf'
+    )
+
 
 
 # --- ADMIN ROUTES (AUTH REQUIRED) ---
@@ -186,6 +357,45 @@ def get_forms():
 def get_submissions():
     submissions = EnrollmentSubmission.query.order_by(EnrollmentSubmission.sent_at.desc()).all()
     return jsonify([sub.to_dict() for sub in submissions]), 200
+
+@enrollment_bp.route('/submissions/<int:submission_id>/approve', methods=['POST'])
+@jwt_required()
+def approve_submission(submission_id):
+    actor = get_actor()
+    if not actor: return jsonify({"error": "Unauthorized actor"}), 401
+    
+    submission = EnrollmentSubmission.query.get_or_404(submission_id)
+    submission.status = 'Completed'
+    
+    target_student = _perform_lead_conversion(submission.lead)
+    if not target_student and submission.lead:
+        target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+        
+    if target_student:
+        from app.models.student_document_model import StudentDocument
+        doc_name = f"{target_student.first_name} {target_student.last_name} - {submission.form.name}"
+        file_url = f"/api/enrollment/submission/{submission.secure_token}/pdf"
+        
+        existing_doc = StudentDocument.query.filter_by(student_id=target_student.id, name=doc_name).first()
+        if not existing_doc:
+            doc = StudentDocument(
+                student_id=target_student.id,
+                name=doc_name,
+                file_path=file_url,
+                document_type="Document",
+                status="UPLOADED"
+            )
+            db.session.add(doc)
+        else:
+            existing_doc.file_path = file_url
+            
+    student_name = submission.lead.students[0].first_name if submission.lead and submission.lead.students else "a student"
+    log_activity(actor, f"Approved registration & contract for {student_name}", submission.form)
+    db.session.commit()
+    return jsonify({
+        "message": "Registration approved successfully and contract linked to Student Profile!",
+        "submission": submission.to_dict()
+    }), 200
 
 @enrollment_bp.route('/submissions/<int:submission_id>', methods=['DELETE'])
 @jwt_required()

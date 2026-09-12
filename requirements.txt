@@ -47,4 +47,4 @@ simple-websocket==1.1.0
 redis>=5.0.1
 reportlab>=4.1.0
 openpyxl>=3.1.5
-
+stripe>=7.0.0

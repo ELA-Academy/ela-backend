@@ -79,11 +79,38 @@ class Payment(db.Model):
     amount = db.Column(db.Float, nullable=False)
     method = db.Column(db.String(50), nullable=False)
     notes = db.Column(db.Text, nullable=True)
-    status = db.Column(db.String(50), default='Success', nullable=False) # Success, Failed, In Process
+    status = db.Column(db.String(50), default='Success', nullable=False) # Success, Failed, In Process, Action Required
     transaction_date = db.Column(db.DateTime, default=datetime.utcnow)
     
+    # Stripe security & idempotency fields
+    stripe_payment_intent_id = db.Column(db.String(100), unique=True, nullable=True, index=True)
+    stripe_charge_id = db.Column(db.String(100), nullable=True)
+    idempotency_key = db.Column(db.String(100), unique=True, nullable=True, index=True)
+    is_refunded = db.Column(db.Boolean, default=False, nullable=False)
+    refund_amount = db.Column(db.Float, default=0.0, nullable=False)
+    
     def to_dict(self):
-        return { 'id': self.id, 'amount': self.amount, 'method': self.method, 'notes': self.notes, 'status': self.status, 'transaction_date': self.transaction_date.isoformat() + 'Z' }
+        return {
+            'id': self.id,
+            'amount': self.amount,
+            'method': self.method,
+            'notes': self.notes,
+            'status': self.status,
+            'stripe_payment_intent_id': self.stripe_payment_intent_id,
+            'is_refunded': self.is_refunded,
+            'refund_amount': self.refund_amount,
+            'transaction_date': self.transaction_date.isoformat() + 'Z'
+        }
+
+class ProcessedStripeEvent(db.Model):
+    __tablename__ = 'processed_stripe_events'
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    event_type = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return { 'id': self.id, 'event_id': self.event_id, 'event_type': self.event_type, 'created_at': self.created_at.isoformat() + 'Z' }
 
 class Credit(db.Model):
     __tablename__ = 'credits'

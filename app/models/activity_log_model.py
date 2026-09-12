@@ -45,10 +45,12 @@ def log_activity(actor, action, target=None):
     else:
         actor_id = actor.id
         actor_type = actor.__class__.__name__ # 'Staff', 'SuperAdmin', 'Parent'
-        if hasattr(actor, 'name'):
-            actor_name = actor.name
-        elif hasattr(actor, 'first_name') and hasattr(actor, 'last_name'):
+        if hasattr(actor, 'first_name') and hasattr(actor, 'last_name') and actor.first_name:
             actor_name = f"{actor.first_name} {actor.last_name}"
+        elif hasattr(actor, 'name') and actor.name:
+            actor_name = actor.name
+        elif hasattr(actor, 'email') and actor.email:
+            actor_name = actor.email
         else:
             actor_name = str(actor)
     
