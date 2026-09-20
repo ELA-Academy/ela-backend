@@ -132,6 +132,15 @@ def update_notification_preferences():
         if not admin:
             return jsonify({"error": "Super Admin not found"}), 404
         admin.notification_preferences = prefs_str
+
+        # If user turned off email alerts, purge any queued pending emails immediately
+        if data.get('email_alerts') is False:
+            try:
+                from app.models.notification_model import PendingEmailNotification
+                PendingEmailNotification.query.filter_by(recipient_id=admin.id, recipient_role='superadmin').delete()
+            except Exception as purge_err:
+                print(f"[Preferences Update] Error purging pending emails: {purge_err}")
+
         db.session.commit()
         
         # Invalidate Redis cache for immediate response
@@ -146,6 +155,15 @@ def update_notification_preferences():
         if not staff:
             return jsonify({"error": "Staff member not found"}), 404
         staff.notification_preferences = prefs_str
+
+        # If user turned off email alerts, purge any queued pending emails immediately
+        if data.get('email_alerts') is False:
+            try:
+                from app.models.notification_model import PendingEmailNotification
+                PendingEmailNotification.query.filter_by(recipient_id=staff.id, recipient_role='staff').delete()
+            except Exception as purge_err:
+                print(f"[Preferences Update] Error purging pending emails: {purge_err}")
+
         db.session.commit()
         
         # Invalidate Redis cache for immediate response

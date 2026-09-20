@@ -282,7 +282,9 @@ def create_task():
     message = f"{actor.name} assigned you a new task: '{new_task.title}' for the lead {student_name}."
     
     if recipients:
-         create_notifications_and_send_emails(list(recipients), message, new_task)
+        valid_recipients = [r for r in recipients if not (getattr(r, 'id', None) == getattr(actor, 'id', None) and r.__class__.__name__ == actor.__class__.__name__)]
+        if valid_recipients:
+            create_notifications_and_send_emails(valid_recipients, message, new_task)
 
     db.session.commit()
     return jsonify(new_task.to_dict()), 201
@@ -334,7 +336,9 @@ def update_task(id):
         student_name = f"{task.lead.students[0].first_name} {task.lead.students[0].last_name}"
         message = f"{actor.name} assigned you a task: '{task.title}' for the lead {student_name}."
         if new_recipients:
-            create_notifications_and_send_emails(list(new_recipients), message, task)
+            valid_recipients = [r for r in new_recipients if not (getattr(r, 'id', None) == getattr(actor, 'id', None) and r.__class__.__name__ == actor.__class__.__name__)]
+            if valid_recipients:
+                create_notifications_and_send_emails(valid_recipients, message, task)
     
     db.session.commit()
     return jsonify(task.to_dict()), 200

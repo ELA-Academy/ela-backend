@@ -688,6 +688,9 @@ def create_task(group_id):
         from app.utils.notifications import enqueue_user_notification
         user_id = assignee.super_admin_id if assignee.super_admin_id else assignee.staff_id
         user_role = 'superadmin' if assignee.super_admin_id else 'staff'
+        # Skip self-assignment notification (actor assigning task to themselves)
+        if user_id == actor.id and user_role == role:
+            continue
         enqueue_user_notification(
             user_id=user_id,
             user_role=user_role,
@@ -863,6 +866,9 @@ def update_task(task_id):
         message = f"{actor.name} assigned you the task: '{task.title}' on board '{board.name}'"
         for assignee_key in added_assignee_keys:
             assignee_role, raw_id = assignee_key.split('_', 1)
+            # Skip self-assignment notification (actor assigning task to themselves)
+            if int(raw_id) == actor.id and assignee_role == role:
+                continue
             from app.utils.notifications import enqueue_user_notification
             enqueue_user_notification(
                 user_id=int(raw_id),
