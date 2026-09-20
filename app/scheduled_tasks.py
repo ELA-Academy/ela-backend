@@ -461,6 +461,21 @@ def send_batch_digests():
             db.session.commit()
             continue
 
+        # Respect user notification preferences for email_alerts
+        if getattr(recipient, 'notification_preferences', None):
+            try:
+                import json
+                prefs = json.loads(recipient.notification_preferences) if isinstance(recipient.notification_preferences, str) else recipient.notification_preferences
+                if prefs.get('email_alerts') is False:
+                    # User opted out of email notifications; discard pending emails
+                    for item in items:
+                        db.session.delete(item)
+                    db.session.commit()
+                    print(f"[Digest Worker] Skipped email digest for {recipient.email} (email_alerts preference is False)")
+                    continue
+            except Exception as pref_err:
+                print(f"[Digest Worker] Preference check error: {pref_err}")
+
         # Prepare digest subject and content
         count = len(items)
         if count == 1:
