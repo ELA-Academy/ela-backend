@@ -1,5 +1,5 @@
 import os
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from app.models import db
 from app.models.department_model import Department
