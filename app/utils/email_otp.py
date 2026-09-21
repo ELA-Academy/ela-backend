@@ -142,6 +142,22 @@ def send_invite_email(mail, recipient_email, recipient_name, invite_link, role_n
 
 def send_login_notice_email(mail, recipient_email, timestamp_str, ip_address, device_str, sender_email="itdept@ela-academy.org"):
     """Sends a security alert email notifying the user of a successful login."""
+    try:
+        import json
+        from app.models.staff_model import Staff
+        from app.models.super_admin_model import SuperAdmin
+        from app.models import db
+        user = Staff.query.filter(db.func.lower(Staff.email) == db.func.lower(recipient_email)).first()
+        if not user:
+            user = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(recipient_email)).first()
+        if user and getattr(user, 'notification_preferences', None):
+            prefs = json.loads(user.notification_preferences) if isinstance(user.notification_preferences, str) else user.notification_preferences
+            if prefs.get('email_alerts') is False:
+                print(f"[Login Notice] Skipping login security email to {recipient_email} (email_alerts is False)")
+                return True
+    except Exception as pref_err:
+        print(f"[Login Notice] Preference check exception: {pref_err}")
+
     subject = 'New Login Detected - ELA Academy'
     body_text = (
         f"Hello,\n\n"

@@ -858,6 +858,7 @@ def send_message(conversation_id):
     user, role = get_current_user()
     data = request.get_json() or {}
     content = (data.get('content') or '').strip()
+    client_temp_id = data.get('client_temp_id')
 
     if not content:
         return jsonify({'error': 'Message content cannot be empty'}), 400
@@ -865,6 +866,20 @@ def send_message(conversation_id):
     conversation = Conversation.query.get_or_404(conversation_id)
     if not can_access_conversation(user, role, conversation):
         return jsonify({"error": "Forbidden"}), 403
+
+    # Deduplicate rapid identical submissions (within 2 seconds) by same user
+    recent_dup = Message.query.filter(
+        Message.conversation_id == conversation_id,
+        Message.sender_id == user.id,
+        Message.sender_type == role,
+        Message.content == content,
+        Message.created_at >= datetime.utcnow() - timedelta(seconds=2)
+    ).first()
+    if recent_dup:
+        dup_dict = recent_dup.to_dict()
+        if client_temp_id:
+            dup_dict['client_temp_id'] = client_temp_id
+        return jsonify(dup_dict), 200
 
     get_or_create_participant_entry(conversation, user, role)
 
@@ -903,6 +918,8 @@ def send_message(conversation_id):
     # Broadcast the message in real time to the room using Socket.IO!
     from app import socketio
     message_dict = new_message.to_dict()
+    if client_temp_id:
+        message_dict['client_temp_id'] = client_temp_id
     socketio.emit('new_message', message_dict, room=f"conversation_{conversation_id}")
     
     # Also notify all participants (including sender) to update their conversation lists/unread counts in real time

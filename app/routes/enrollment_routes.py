@@ -1,5 +1,5 @@
 import os
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from app.models import db
 from app.models.department_model import Department
@@ -18,7 +18,7 @@ enrollment_bp = Blueprint('enrollment', __name__)
 
 def _perform_lead_conversion(lead):
     """Converts a Lead to a permanent Student and Parent, and creates a financial account."""
-    if not lead or Student.query.filter_by(lead_id=lead.id).first():
+    if not lead or not lead.students or Student.query.filter_by(lead_id=lead.id).first():
         return None # Already converted or invalid lead
 
     lead_student_info = lead.students[0]
@@ -97,22 +97,73 @@ def get_public_submission(token):
         "parents": [p.to_dict() for p in submission.lead.parents]
     }
 
+    pub_key = current_app.config.get('STRIPE_PUBLISHABLE_KEY') or os.getenv('STRIPE_PUBLISHABLE_KEY') or ""
+
     return jsonify({
         "submission_id": submission.id,
         "form_structure": submission.form.form_structure_json,
         "fee_required": submission.form.collect_fee,
         "fee_amount": submission.form.fee_amount,
+        "stripe_publishable_key": pub_key,
         "student_name": f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}" if submission.lead.students else "N/A",
         "prefill_data": prefill_data # Add the data to the response
     }), 200
+
+@enrollment_bp.route('/public/submission/<string:token>/create-payment-intent', methods=['POST'])
+def create_public_submission_payment_intent(token):
+    """Creates a Stripe PaymentIntent for public enrollment registration fee."""
+    submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
+    if submission.status in ['Submitted', 'Completed']:
+        return jsonify({"error": "This form has already been submitted."}), 400
+    if not submission.form or not submission.form.collect_fee or not submission.form.fee_amount or submission.form.fee_amount <= 0:
+        return jsonify({"error": "No fee is required for this form."}), 400
+
+    from app.services import stripe_service
+    student_name = "Student"
+    if submission.lead and submission.lead.students:
+        student_name = f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}"
+
+    amount_cents = int(round(float(submission.form.fee_amount) * 100))
+    metadata = {
+        "submission_id": str(submission.id),
+        "submission_token": submission.secure_token,
+        "form_id": str(submission.form_id),
+        "form_name": submission.form.name,
+        "student_name": student_name,
+        "type": "enrollment_fee"
+    }
+
+    try:
+        intent = stripe_service.create_payment_intent(
+            amount_in_cents=amount_cents,
+            description=f"Enrollment Registration Fee for {student_name} - {submission.form.name}",
+            metadata=metadata
+        )
+        if isinstance(intent, dict) and intent.get("error"):
+            return jsonify({"error": intent.get("message", "Payment processor error")}), 400
+
+        return jsonify({
+            "client_secret": intent.client_secret,
+            "payment_intent_id": intent.id,
+            "amount": submission.form.fee_amount
+        }), 200
+    except Exception as e:
+        current_app.logger.error(f"Error creating enrollment payment intent: {e}", exc_info=True)
+        return jsonify({"error": str(e) or "Failed to initiate payment."}), 500
 
 @enrollment_bp.route('/public/submission/<string:token>', methods=['POST'])
 def submit_public_form(token):
     submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
     if submission.status in ['Submitted', 'Completed']:
          return jsonify({"error": "This form has already been submitted."}), 403
-    data = request.get_json()
-    submission.responses_json = data.get('responses')
+    data = request.get_json() or {}
+    payment_intent_id = data.get('payment_intent_id')
+    raw_responses = data.get('responses') or {}
+    
+    if payment_intent_id and isinstance(raw_responses, dict):
+        raw_responses['_stripe_payment_intent_id'] = payment_intent_id
+
+    submission.responses_json = raw_responses
     submission.status = 'Submitted'
     submission.submitted_at = datetime.utcnow()
     
@@ -128,6 +179,70 @@ def submit_public_form(token):
     target_student = _perform_lead_conversion(submission.lead)
     if not target_student and submission.lead:
         target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+
+    # --- RECORD TRANSACTION IN FINANCIAL ACCOUNT ---
+    if target_student and submission.form.collect_fee and submission.form.fee_amount:
+        try:
+            from app.models.financial_model import StudentFinancialAccount, Invoice, InvoiceItem, Payment, FinancialAuditLog
+            import uuid
+
+            account = StudentFinancialAccount.query.filter_by(student_id=target_student.id).first()
+            if not account:
+                account = StudentFinancialAccount(student_id=target_student.id)
+                db.session.add(account)
+                db.session.flush()
+
+            fee_amt = float(submission.form.fee_amount or 0.0)
+            if fee_amt > 0:
+                # Idempotency check: see if a payment already exists with this payment_intent_id
+                existing_pmt = Payment.query.filter_by(stripe_payment_intent_id=payment_intent_id).first() if payment_intent_id else None
+                if not existing_pmt:
+                    inv = Invoice(
+                        account_id=account.id,
+                        status='Paid',
+                        due_date=datetime.utcnow().date(),
+                        created_at=datetime.utcnow()
+                    )
+                    db.session.add(inv)
+                    db.session.flush()
+
+                    inv_item = InvoiceItem(
+                        invoice_id=inv.id,
+                        description=f"Registration & Enrollment Fee - {submission.form.name}",
+                        amount=fee_amt
+                    )
+                    db.session.add(inv_item)
+
+                    pmt = Payment(
+                        account_id=account.id,
+                        invoice_id=inv.id,
+                        amount=fee_amt,
+                        method="Stripe Online Payment" if payment_intent_id else "Registration Fee",
+                        notes=f"Enrollment fee for {student_name} ({submission.form.name})" + (f" - Stripe Intent: {payment_intent_id}" if payment_intent_id else ""),
+                        status='Success',
+                        stripe_payment_intent_id=payment_intent_id,
+                        idempotency_key=f"enroll_{submission.id}_{payment_intent_id}" if payment_intent_id else f"enroll_{submission.id}_{uuid.uuid4()}",
+                        transaction_date=datetime.utcnow()
+                    )
+                    db.session.add(pmt)
+
+                    try:
+                        audit = FinancialAuditLog(
+                            account_id=account.id,
+                            transaction_type='Payment',
+                            transaction_id=str(payment_intent_id or f"enroll_{submission.id}"),
+                            action='Receive',
+                            amount=fee_amt,
+                            status='Success',
+                            actor_name=f"{student_name} (Parent Enrollment)",
+                            description=f"Registration fee of ${fee_amt:.2f} received via Stripe on enrollment submission."
+                        )
+                        db.session.add(audit)
+                    except Exception as audit_err:
+                        current_app.logger.warning(f"Could not record financial audit log: {audit_err}")
+        except Exception as fin_err:
+            current_app.logger.error(f"Error creating financial record for enrollment fee: {fin_err}", exc_info=True)
+    # --- END RECORD TRANSACTION IN FINANCIAL ACCOUNT ---
 
     if target_student:
         from app.models.student_document_model import StudentDocument
@@ -202,8 +317,6 @@ def get_public_submission_view(token):
 
 @enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
 @enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
-@enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
-@enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
 def download_submission_contract_pdf(token):
     submission = EnrollmentSubmission.query.filter_by(secure_token=token).first_or_404()
     
@@ -236,12 +349,21 @@ def download_submission_contract_pdf(token):
     if submission.lead and submission.lead.students:
         student_name = f"{submission.lead.students[0].first_name} {submission.lead.students[0].last_name}"
 
+    fee_display = "N/A"
+    if submission.form and submission.form.collect_fee:
+        pi_ref = ""
+        if submission.responses_json and isinstance(submission.responses_json, dict):
+            pi_id = submission.responses_json.get('_stripe_payment_intent_id')
+            if pi_id:
+                pi_ref = f" • Stripe Ref: {pi_id}"
+        fee_display = f"${submission.form.fee_amount:.2f} ({submission.payment_status or 'Paid'}{pi_ref})"
+
     meta_data = [
         [Paragraph("<b>Form / Contract:</b>", bold_text), Paragraph(form_name, normal_text)],
         [Paragraph("<b>Student Name:</b>", bold_text), Paragraph(student_name, normal_text)],
         [Paragraph("<b>Submission Date:</b>", bold_text), Paragraph(submitted_date, normal_text)],
         [Paragraph("<b>Contract Status:</b>", bold_text), Paragraph(submission.status, normal_text)],
-        [Paragraph("<b>Registration Fee:</b>", bold_text), Paragraph(f"${submission.form.fee_amount:.2f} ({submission.payment_status or 'N/A'})" if submission.form and submission.form.collect_fee else "N/A", normal_text)]
+        [Paragraph("<b>Registration Fee:</b>", bold_text), Paragraph(fee_display, normal_text)]
     ]
     meta_table = Table(meta_data, colWidths=[1.8*inch, 5.7*inch])
     meta_table.setStyle(TableStyle([
@@ -266,16 +388,24 @@ def download_submission_contract_pdf(token):
             f_id = field.get('id')
             f_label = field.get('label') or field.get('name') or f_id
             f_val = responses.get(f_id, '')
-            if isinstance(f_val, list):
-                f_val = ", ".join([str(v) for v in f_val])
+            if isinstance(f_val, str) and f_val.startswith('data:image'):
+                try:
+                    sig_data = f_val.split(',', 1)[1]
+                    img_bytes = base64.b64decode(sig_data)
+                    img_buffer = BytesIO(img_bytes)
+                    val_cell = RLImage(img_buffer, width=2.5*inch, height=0.7*inch)
+                except Exception:
+                    val_cell = Paragraph("<i>[Digital Signature Recorded]</i>", normal_text)
+            elif isinstance(f_val, list):
+                val_cell = Paragraph(", ".join([str(v) for v in f_val]), normal_text)
             elif isinstance(f_val, bool):
-                f_val = "Yes / Agreed" if f_val else "No"
+                val_cell = Paragraph("Yes / Agreed" if f_val else "No", normal_text)
             else:
-                f_val = str(f_val) if f_val is not None else ""
+                val_cell = Paragraph(str(f_val) if f_val else "<i>[Not provided]</i>", normal_text)
 
             sec_rows.append([
                 Paragraph(f"<b>{f_label}:</b>", bold_text),
-                Paragraph(f_val or "<i>[Not provided]</i>", normal_text)
+                val_cell
             ])
 
         if not sec_rows:

@@ -549,6 +549,81 @@ def manage_board_view_settings(board_id):
     return jsonify(current_settings), 200
 
 
+@board_bp.route('/<string:board_id>/whiteboard', methods=['GET', 'PUT', 'OPTIONS'])
+@jwt_required(optional=True)
+def manage_board_whiteboard(board_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    import base64
+    from flask import current_app
+
+    actor, role = get_actor()
+    board = get_board_or_404_with_access(board_id, actor, role)
+    if not board:
+        return jsonify({"error": "Forbidden"}), 403
+
+    whiteboard_folder = os.path.join(current_app.root_path, 'static', 'uploads', 'whiteboards')
+    os.makedirs(whiteboard_folder, exist_ok=True)
+    drawing_file_path = os.path.join(whiteboard_folder, f"board_{board.id}_drawing.png")
+
+    settings_val = {}
+    if board.view_settings:
+        try:
+            settings_val = json.loads(board.view_settings)
+        except Exception:
+            settings_val = {}
+
+    if request.method == 'GET':
+        notes = settings_val.get('whiteboard_notes', [])
+        drawing_url = None
+        if os.path.exists(drawing_file_path):
+            drawing_url = f"/static/uploads/whiteboards/board_{board.id}_drawing.png?t={int(os.path.getmtime(drawing_file_path))}"
+
+        return jsonify({
+            'notes': notes,
+            'drawing_url': drawing_url,
+            'is_shared': True,
+            'last_updated_by': settings_val.get('whiteboard_last_updated_by'),
+            'last_updated_at': settings_val.get('whiteboard_last_updated_at')
+        }), 200
+
+    # PUT
+    data = request.get_json() or {}
+    notes = data.get('notes')
+    drawing_base64 = data.get('drawing')
+
+    if notes is not None:
+        settings_val['whiteboard_notes'] = notes
+    if actor:
+        settings_val['whiteboard_last_updated_by'] = actor.name
+    settings_val['whiteboard_last_updated_at'] = datetime.utcnow().isoformat() + 'Z'
+
+    drawing_url = None
+    if drawing_base64 and isinstance(drawing_base64, str) and drawing_base64.startswith('data:image'):
+        try:
+            header, encoded = drawing_base64.split(',', 1)
+            file_data = base64.b64decode(encoded)
+            with open(drawing_file_path, 'wb') as f:
+                f.write(file_data)
+            drawing_url = f"/static/uploads/whiteboards/board_{board.id}_drawing.png?t={int(datetime.utcnow().timestamp())}"
+        except Exception as e:
+            print("Failed to save whiteboard drawing:", e)
+    elif os.path.exists(drawing_file_path):
+        drawing_url = f"/static/uploads/whiteboards/board_{board.id}_drawing.png?t={int(os.path.getmtime(drawing_file_path))}"
+
+    board.view_settings = json.dumps(settings_val)
+    db.session.commit()
+
+    return jsonify({
+        'notes': settings_val.get('whiteboard_notes', []),
+        'drawing_url': drawing_url,
+        'is_shared': True,
+        'last_updated_by': settings_val.get('whiteboard_last_updated_by'),
+        'last_updated_at': settings_val.get('whiteboard_last_updated_at')
+    }), 200
+
+
 @board_bp.route('/<string:board_id>', methods=['DELETE'])
 @jwt_required()
 def delete_board(board_id):
@@ -688,6 +763,9 @@ def create_task(group_id):
         from app.utils.notifications import enqueue_user_notification
         user_id = assignee.super_admin_id if assignee.super_admin_id else assignee.staff_id
         user_role = 'superadmin' if assignee.super_admin_id else 'staff'
+        # Skip self-assignment notification (actor assigning task to themselves)
+        if user_id == actor.id and user_role == role:
+            continue
         enqueue_user_notification(
             user_id=user_id,
             user_role=user_role,
@@ -863,6 +941,9 @@ def update_task(task_id):
         message = f"{actor.name} assigned you the task: '{task.title}' on board '{board.name}'"
         for assignee_key in added_assignee_keys:
             assignee_role, raw_id = assignee_key.split('_', 1)
+            # Skip self-assignment notification (actor assigning task to themselves)
+            if int(raw_id) == actor.id and assignee_role == role:
+                continue
             from app.utils.notifications import enqueue_user_notification
             enqueue_user_notification(
                 user_id=int(raw_id),
