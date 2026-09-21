@@ -18,7 +18,7 @@ enrollment_bp = Blueprint('enrollment', __name__)
 
 def _perform_lead_conversion(lead):
     """Converts a Lead to a permanent Student and Parent, and creates a financial account."""
-    if not lead or Student.query.filter_by(lead_id=lead.id).first():
+    if not lead or not lead.students or Student.query.filter_by(lead_id=lead.id).first():
         return None # Already converted or invalid lead
 
     lead_student_info = lead.students[0]
@@ -315,8 +315,6 @@ def get_public_submission_view(token):
     }), 200
 
 
-@enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
-@enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
 @enrollment_bp.route('/public/submission/<string:token>/pdf', methods=['GET'])
 @enrollment_bp.route('/submission/<string:token>/pdf', methods=['GET'])
 def download_submission_contract_pdf(token):
