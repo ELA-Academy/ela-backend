@@ -263,11 +263,62 @@ def submit_public_form(token):
             existing_doc.file_path = file_url
     # --- END AUTOMATIC CONVERSION & STUDENT DOCUMENT SAVE ---
 
+    fee_amt = float(submission.form.fee_amount or 0.0) if submission.form else 0.0
+    parent_name = "Parent / Guardian"
+    if submission.lead and submission.lead.parents:
+        parent_name = f"{submission.lead.parents[0].first_name} {submission.lead.parents[0].last_name}"
+
+    # 1. Notify Accounting Department
     accounting_dept = Department.query.filter_by(name="Accounting Department").first()
     if accounting_dept and accounting_dept.staff_members:
-        message = f"An enrollment form for {student_name} has been submitted."
-        if submission.payment_status == 'Paid': message += " Payment has been confirmed."
-        create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=message, target_obj=submission.lead)
+        acct_msg = f"💳 Registration form submitted for {student_name}."
+        if submission.payment_status == 'Paid':
+            acct_msg += f" Registration fee of ${fee_amt:.2f} received via Stripe."
+        create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=acct_msg, target_obj=submission.lead)
+
+    # 2. Notify Admission Department
+    admissions_dept = Department.query.filter_by(name="Admission Department").first()
+    if admissions_dept and admissions_dept.staff_members:
+        adm_msg = f"🎉 Enrollment registration completed for {student_name} ({parent_name})."
+        if submission.payment_status == 'Paid':
+            adm_msg += f" Fee paid: ${fee_amt:.2f}."
+        create_notifications_and_send_emails(recipients=admissions_dept.staff_members, message=adm_msg, target_obj=submission.lead)
+
+    # 3. Auto-create Onboarding Task for Administration Department
+    admin_dept = Department.query.filter_by(name="Administration Department").first()
+    if not admin_dept:
+        admin_dept = Department.query.filter(Department.name.ilike('%admin%')).first()
+
+    if admin_dept and submission.lead:
+        from app.models.task_model import Task
+        creator_staff = Staff.query.first()
+        creator_id = creator_staff.id if creator_staff else 1
+        
+        task_title = f"Onboard & Issue Portal Invite for {student_name}"
+        task_note = (
+            f"Parent {parent_name} has completed the enrollment registration form and confirmed payment of "
+            f"${fee_amt:.2f}. The signed contract and student financial account are established. "
+            f"Please verify records in Administration > Parent Accounts and send portal invite."
+        )
+        
+        existing_task = Task.query.filter_by(lead_id=submission.lead.id, title=task_title).first()
+        if not existing_task:
+            onboarding_task = Task(
+                title=task_title,
+                note=task_note,
+                lead_id=submission.lead.id,
+                created_by_staff_id=creator_id
+            )
+            onboarding_task.assigned_departments.append(admin_dept)
+            db.session.add(onboarding_task)
+            
+            if admin_dept.staff_members:
+                task_msg = f"📋 New Onboarding Task: '{task_title}' assigned to Administration Department."
+                create_notifications_and_send_emails(
+                    recipients=admin_dept.staff_members,
+                    message=task_msg,
+                    target_obj=onboarding_task
+                )
 
     # --- SEND PARENT CONFIRMATION EMAIL ---
     parent_email = None

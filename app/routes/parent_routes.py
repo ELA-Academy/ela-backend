@@ -929,9 +929,33 @@ def admin_get_all_parents():
     if not actor:
         return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
 
+    from app.models.enrollment_submission_model import EnrollmentSubmission
+
     parents = Parent.query.order_by(Parent.created_at.desc()).all()
     results = []
     for p in parents:
+        children = p.children or []
+        # Check if parent is linked to an unpaid prospective lead
+        if children:
+            all_lead_children = [c for c in children if getattr(c, 'lead_id', None)]
+            if len(all_lead_children) == len(children):
+                # All children come from leads. Ensure at least one has a paid/completed registration submission
+                has_paid = False
+                for c in all_lead_children:
+                    paid_sub = EnrollmentSubmission.query.filter(
+                        EnrollmentSubmission.lead_id == c.lead_id,
+                        db.or_(
+                            EnrollmentSubmission.payment_status == 'Paid',
+                            EnrollmentSubmission.status.in_(['Completed', 'APPROVED'])
+                        )
+                    ).first()
+                    if paid_sub:
+                        has_paid = True
+                        break
+                if not has_paid:
+                    # Unpaid lead parent: exclude from active parent accounts list
+                    continue
+
         results.append({
             'id': p.id,
             'first_name': p.first_name,
@@ -1054,6 +1078,26 @@ def admin_resend_parent_invite(parent_id):
         return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
 
     parent = Parent.query.get_or_404(parent_id)
+
+    children = parent.children or []
+    if children:
+        all_lead_children = [c for c in children if getattr(c, 'lead_id', None)]
+        if len(all_lead_children) == len(children):
+            from app.models.enrollment_submission_model import EnrollmentSubmission
+            has_paid = False
+            for c in all_lead_children:
+                paid_sub = EnrollmentSubmission.query.filter(
+                    EnrollmentSubmission.lead_id == c.lead_id,
+                    db.or_(
+                        EnrollmentSubmission.payment_status == 'Paid',
+                        EnrollmentSubmission.status.in_(['Completed', 'APPROVED'])
+                    )
+                ).first()
+                if paid_sub:
+                    has_paid = True
+                    break
+            if not has_paid:
+                return jsonify({"error": "Cannot send portal invitation. Registration fee payment has not yet been received for this prospective family."}), 400
 
     setup_token = create_access_token(
         identity=parent.email,
