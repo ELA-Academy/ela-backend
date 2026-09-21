@@ -266,16 +266,24 @@ def download_submission_contract_pdf(token):
             f_id = field.get('id')
             f_label = field.get('label') or field.get('name') or f_id
             f_val = responses.get(f_id, '')
-            if isinstance(f_val, list):
-                f_val = ", ".join([str(v) for v in f_val])
+            if isinstance(f_val, str) and f_val.startswith('data:image'):
+                try:
+                    sig_data = f_val.split(',', 1)[1]
+                    img_bytes = base64.b64decode(sig_data)
+                    img_buffer = BytesIO(img_bytes)
+                    val_cell = RLImage(img_buffer, width=2.5*inch, height=0.7*inch)
+                except Exception:
+                    val_cell = Paragraph("<i>[Digital Signature Recorded]</i>", normal_text)
+            elif isinstance(f_val, list):
+                val_cell = Paragraph(", ".join([str(v) for v in f_val]), normal_text)
             elif isinstance(f_val, bool):
-                f_val = "Yes / Agreed" if f_val else "No"
+                val_cell = Paragraph("Yes / Agreed" if f_val else "No", normal_text)
             else:
-                f_val = str(f_val) if f_val is not None else ""
+                val_cell = Paragraph(str(f_val) if f_val else "<i>[Not provided]</i>", normal_text)
 
             sec_rows.append([
                 Paragraph(f"<b>{f_label}:</b>", bold_text),
-                Paragraph(f_val or "<i>[Not provided]</i>", normal_text)
+                val_cell
             ])
 
         if not sec_rows:
