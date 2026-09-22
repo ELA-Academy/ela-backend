@@ -335,15 +335,52 @@ def update_lead(token):
 
     if 'status' in data:
         new_status = data['status']
+        old_status = lead.status
         lead.status = new_status
+        
+        student_name = f"{lead.students[0].first_name} {lead.students[0].last_name}" if lead.students else "Lead"
+
+        # Only perform conversion to permanent student/parent if registration is paid or force_convert is passed
         if new_status in ['Admitted', 'Enrolled']:
             from app.models.student_model import Student
             existing_student = Student.query.filter_by(lead_id=lead.id).first()
             if not existing_student:
-                from app.routes.enrollment_routes import _perform_lead_conversion
-                _perform_lead_conversion(lead)
-                # Preserve selected status if Admitted
-                lead.status = new_status
+                from app.models.enrollment_submission_model import EnrollmentSubmission
+                paid_sub = EnrollmentSubmission.query.filter(
+                    EnrollmentSubmission.lead_id == lead.id,
+                    db.or_(
+                        EnrollmentSubmission.payment_status == 'Paid',
+                        EnrollmentSubmission.status.in_(['Completed', 'APPROVED'])
+                    )
+                ).first()
+                if paid_sub or data.get('force_convert'):
+                    from app.routes.enrollment_routes import _perform_lead_conversion
+                    _perform_lead_conversion(lead)
+                    lead.status = new_status
+
+        # Cross-department notifications on status change
+        if new_status != old_status:
+            # When advancing to Interested / Toured: Notify Accounting Department
+            if new_status in ['Interested', 'Toured']:
+                acct_dept = Department.query.filter_by(name="Accounting Department").first()
+                if acct_dept and acct_dept.staff_members:
+                    msg = f"📌 Lead '{student_name}' status updated to '{new_status}' by {actor.name}. Ready for registration form & fee assignment."
+                    create_notifications_and_send_emails(recipients=acct_dept.staff_members, message=msg, target_obj=lead)
+            
+            # When marked Admitted or Enrolled: Notify Admissions and Administration
+            elif new_status in ['Admitted', 'Enrolled']:
+                adm_dept = Department.query.filter_by(name="Admission Department").first()
+                admin_dept = Department.query.filter(Department.name.ilike('%admin%')).first()
+                
+                notif_recipients = set()
+                if adm_dept: notif_recipients.update(adm_dept.staff_members)
+                if admin_dept: notif_recipients.update(admin_dept.staff_members)
+                
+                valid_recipients = [r for r in notif_recipients if not (getattr(r, 'id', None) == getattr(actor, 'id', None) and r.__class__.__name__ == actor.__class__.__name__)]
+                if valid_recipients:
+                    msg = f"🎉 Lead '{student_name}' has been marked as '{new_status}' by {actor.name}."
+                    create_notifications_and_send_emails(recipients=valid_recipients, message=msg, target_obj=lead)
+
     if 'internal_notes' in data:
         lead.internal_notes = data['internal_notes']
         

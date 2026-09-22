@@ -281,6 +281,11 @@ def create_task():
     student_name = f"{lead.students[0].first_name} {lead.students[0].last_name}"
     message = f"{actor.name} assigned you a new task: '{new_task.title}' for the lead {student_name}."
     
+    # Ensure Admission Department is also kept informed of tasks created for this prospective lead
+    admissions_dept = Department.query.filter_by(name="Admission Department").first()
+    if admissions_dept and admissions_dept.staff_members:
+        recipients.update(admissions_dept.staff_members)
+
     if recipients:
         valid_recipients = [r for r in recipients if not (getattr(r, 'id', None) == getattr(actor, 'id', None) and r.__class__.__name__ == actor.__class__.__name__)]
         if valid_recipients:
