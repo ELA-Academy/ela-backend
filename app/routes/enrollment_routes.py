@@ -49,9 +49,13 @@ def _perform_lead_conversion(lead):
     for p in parents_to_link:
         new_student.parents.append(p)
     db.session.add(new_student)
+    db.session.flush()
     
-    financial_account = StudentFinancialAccount(student=new_student)
-    db.session.add(financial_account)
+    financial_account = StudentFinancialAccount.query.filter_by(student_id=new_student.id).first()
+    if not financial_account:
+        financial_account = StudentFinancialAccount(student_id=new_student.id)
+        db.session.add(financial_account)
+        db.session.flush()
     
     lead.status = "Enrolled"
     return new_student
@@ -176,9 +180,16 @@ def submit_public_form(token):
         submission.status = 'Completed'
 
     # --- AUTOMATIC CONVERSION & STUDENT DOCUMENT SAVE ---
-    target_student = _perform_lead_conversion(submission.lead)
-    if not target_student and submission.lead:
-        target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+    try:
+        target_student = _perform_lead_conversion(submission.lead)
+        if not target_student and submission.lead:
+            target_student = Student.query.filter_by(lead_id=submission.lead.id).first()
+
+        if target_student:
+            db.session.flush()
+    except Exception as conv_err:
+        current_app.logger.error(f"Error during lead conversion in submit_public_form: {conv_err}", exc_info=True)
+        target_student = None
 
     # --- RECORD TRANSACTION IN FINANCIAL ACCOUNT ---
     if target_student and submission.form.collect_fee and submission.form.fee_amount:
@@ -186,7 +197,7 @@ def submit_public_form(token):
             from app.models.financial_model import StudentFinancialAccount, Invoice, InvoiceItem, Payment, FinancialAuditLog
             import uuid
 
-            account = StudentFinancialAccount.query.filter_by(student_id=target_student.id).first()
+            account = getattr(target_student, 'financial_account', None) or StudentFinancialAccount.query.filter_by(student_id=target_student.id).first()
             if not account:
                 account = StudentFinancialAccount(student_id=target_student.id)
                 db.session.add(account)
@@ -245,22 +256,25 @@ def submit_public_form(token):
     # --- END RECORD TRANSACTION IN FINANCIAL ACCOUNT ---
 
     if target_student:
-        from app.models.student_document_model import StudentDocument
-        doc_name = f"{target_student.first_name} {target_student.last_name} - {submission.form.name}"
-        file_url = f"/api/enrollment/submission/{submission.secure_token}/pdf"
-        
-        existing_doc = StudentDocument.query.filter_by(student_id=target_student.id, name=doc_name).first()
-        if not existing_doc:
-            doc = StudentDocument(
-                student_id=target_student.id,
-                name=doc_name,
-                file_path=file_url,
-                document_type="Document",
-                status="UPLOADED"
-            )
-            db.session.add(doc)
-        else:
-            existing_doc.file_path = file_url
+        try:
+            from app.models.student_document_model import StudentDocument
+            doc_name = f"{target_student.first_name} {target_student.last_name} - {submission.form.name}"
+            file_url = f"/api/enrollment/submission/{submission.secure_token}/pdf"
+            
+            existing_doc = StudentDocument.query.filter_by(student_id=target_student.id, name=doc_name).first()
+            if not existing_doc:
+                doc = StudentDocument(
+                    student_id=target_student.id,
+                    name=doc_name,
+                    file_path=file_url,
+                    document_type="Document",
+                    status="UPLOADED"
+                )
+                db.session.add(doc)
+            else:
+                existing_doc.file_path = file_url
+        except Exception as doc_err:
+            current_app.logger.warning(f"Could not link student document: {doc_err}")
     # --- END AUTOMATIC CONVERSION & STUDENT DOCUMENT SAVE ---
 
     fee_amt = float(submission.form.fee_amount or 0.0) if submission.form else 0.0
@@ -268,57 +282,61 @@ def submit_public_form(token):
     if submission.lead and submission.lead.parents:
         parent_name = f"{submission.lead.parents[0].first_name} {submission.lead.parents[0].last_name}"
 
-    # 1. Notify Accounting Department
-    accounting_dept = Department.query.filter_by(name="Accounting Department").first()
-    if accounting_dept and accounting_dept.staff_members:
-        acct_msg = f"💳 Registration form submitted for {student_name}."
-        if submission.payment_status == 'Paid':
-            acct_msg += f" Registration fee of ${fee_amt:.2f} received via Stripe."
-        create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=acct_msg, target_obj=submission.lead)
+    try:
+        # 1. Notify Accounting Department
+        accounting_dept = Department.query.filter_by(name="Accounting Department").first()
+        if accounting_dept and accounting_dept.staff_members:
+            acct_msg = f"💳 Registration form submitted for {student_name}."
+            if submission.payment_status == 'Paid':
+                acct_msg += f" Registration fee of ${fee_amt:.2f} received via Stripe."
+            create_notifications_and_send_emails(recipients=accounting_dept.staff_members, message=acct_msg, target_obj=submission.lead)
 
-    # 2. Notify Admission Department
-    admissions_dept = Department.query.filter_by(name="Admission Department").first()
-    if admissions_dept and admissions_dept.staff_members:
-        adm_msg = f"🎉 Enrollment registration completed for {student_name} ({parent_name})."
-        if submission.payment_status == 'Paid':
-            adm_msg += f" Fee paid: ${fee_amt:.2f}."
-        create_notifications_and_send_emails(recipients=admissions_dept.staff_members, message=adm_msg, target_obj=submission.lead)
+        # 2. Notify Admission Department
+        admissions_dept = Department.query.filter_by(name="Admission Department").first()
+        if admissions_dept and admissions_dept.staff_members:
+            adm_msg = f"🎉 Enrollment registration completed for {student_name} ({parent_name})."
+            if submission.payment_status == 'Paid':
+                adm_msg += f" Fee paid: ${fee_amt:.2f}."
+            create_notifications_and_send_emails(recipients=admissions_dept.staff_members, message=adm_msg, target_obj=submission.lead)
 
-    # 3. Auto-create Onboarding Task for Administration Department
-    admin_dept = Department.query.filter_by(name="Administration Department").first()
-    if not admin_dept:
-        admin_dept = Department.query.filter(Department.name.ilike('%admin%')).first()
+        # 3. Auto-create Onboarding Task for Administration Department
+        admin_dept = Department.query.filter_by(name="Administration Department").first()
+        if not admin_dept:
+            admin_dept = Department.query.filter(Department.name.ilike('%admin%')).first()
 
-    if admin_dept and submission.lead:
-        from app.models.task_model import Task
-        creator_staff = Staff.query.first()
-        creator_id = creator_staff.id if creator_staff else 1
-        
-        task_title = f"Onboard & Issue Portal Invite for {student_name}"
-        task_note = (
-            f"Parent {parent_name} has completed the enrollment registration form and confirmed payment of "
-            f"${fee_amt:.2f}. The signed contract and student financial account are established. "
-            f"Please verify records in Administration > Parent Accounts and send portal invite."
-        )
-        
-        existing_task = Task.query.filter_by(lead_id=submission.lead.id, title=task_title).first()
-        if not existing_task:
-            onboarding_task = Task(
-                title=task_title,
-                note=task_note,
-                lead_id=submission.lead.id,
-                created_by_staff_id=creator_id
-            )
-            onboarding_task.assigned_departments.append(admin_dept)
-            db.session.add(onboarding_task)
+        if admin_dept and submission.lead:
+            from app.models.task_model import Task
+            creator_staff = Staff.query.first()
+            creator_id = creator_staff.id if creator_staff else None
             
-            if admin_dept.staff_members:
-                task_msg = f"📋 New Onboarding Task: '{task_title}' assigned to Administration Department."
-                create_notifications_and_send_emails(
-                    recipients=admin_dept.staff_members,
-                    message=task_msg,
-                    target_obj=onboarding_task
+            task_title = f"Onboard & Issue Portal Invite for {student_name}"
+            task_note = (
+                f"Parent {parent_name} has completed the enrollment registration form and confirmed payment of "
+                f"${fee_amt:.2f}. The signed contract and student financial account are established. "
+                f"Please verify records in Administration > Parent Accounts and send portal invite."
+            )
+            
+            existing_task = Task.query.filter_by(lead_id=submission.lead.id, title=task_title).first()
+            if not existing_task:
+                onboarding_task = Task(
+                    title=task_title,
+                    note=task_note,
+                    lead_id=submission.lead.id,
+                    created_by_staff_id=creator_id
                 )
+                onboarding_task.assigned_departments.append(admin_dept)
+                db.session.add(onboarding_task)
+                db.session.flush()
+                
+                if admin_dept.staff_members:
+                    task_msg = f"📋 New Onboarding Task: '{task_title}' assigned to Administration Department."
+                    create_notifications_and_send_emails(
+                        recipients=admin_dept.staff_members,
+                        message=task_msg,
+                        target_obj=onboarding_task
+                    )
+    except Exception as notif_err:
+        current_app.logger.error(f"Error during enrollment notifications or task creation: {notif_err}", exc_info=True)
 
     # --- SEND PARENT CONFIRMATION EMAIL ---
     parent_email = None
@@ -344,10 +362,14 @@ def submit_public_form(token):
                 }
             )
         except Exception as ex:
-            print(f"[submit_public_form Email Error] {ex}")
+            current_app.logger.warning(f"[submit_public_form Email Error] {ex}")
     # --- END SEND PARENT CONFIRMATION EMAIL ---
     
-    log_activity(None, f"Parent submitted enrollment for {student_name}", submission.lead)
+    try:
+        log_activity(None, f"Parent submitted enrollment for {student_name}", submission.lead)
+    except Exception as act_err:
+        current_app.logger.warning(f"Could not log activity: {act_err}")
+
     db.session.commit()
     return jsonify({"message": "Your submission was successful!"}), 200
 
