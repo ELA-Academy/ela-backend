@@ -659,6 +659,7 @@ def get_all_accounts():
         
         results.append({
             'student_id': student.id, 'student_name': f"{student.first_name} {student.last_name}",
+            'grade_level': student.grade_level,
             'open_balance': balance, 'last_invoice_date': last_invoice.created_at.isoformat() if last_invoice else None,
             'last_invoice_amount': last_invoice.total_amount if last_invoice else None,
             'last_payment_date': last_payment.transaction_date.isoformat() if last_payment else None,

@@ -44,7 +44,8 @@ def _perform_lead_conversion(lead):
         date_of_birth=lead_student_info.date_of_birth,
         grade_level=lead_student_info.grade_level,
         enrollment_date=date.today(),
-        lead_id=lead.id
+        lead_id=lead.id,
+        notes=lead.internal_notes
     )
     for p in parents_to_link:
         new_student.parents.append(p)

@@ -21,14 +21,17 @@ class Student(db.Model):
     
     # Foreign key for the temporary lead this student came from
     lead_id = db.Column(db.Integer, db.ForeignKey('leads.id'), nullable=True)
+    notes = db.Column(db.Text, nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Relationships
+    lead = db.relationship('Lead', foreign_keys=[lead_id])
     parents = db.relationship('Parent', secondary=parent_student_association, back_populates='children')
     financial_account = db.relationship('StudentFinancialAccount', backref='student', uselist=False, cascade="all, delete-orphan")
 
     def to_dict(self):
+        lead_notes = self.lead.internal_notes if self.lead else None
         return {
             'id': self.id,
             'student_id_number': self.student_id_number,
@@ -38,6 +41,7 @@ class Student(db.Model):
             'status': self.status,
             'enrollment_date': self.enrollment_date.isoformat() if self.enrollment_date else None,
             'grade_level': self.grade_level,
+            'notes': self.notes or lead_notes or "",
             'parent_names': [f"{p.first_name} {p.last_name}" for p in self.parents],
             'parents': [p.to_dict() for p in self.parents]
         }
