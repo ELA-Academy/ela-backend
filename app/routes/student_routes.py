@@ -55,6 +55,19 @@ def get_student_by_id(student_id):
     return jsonify(student_dict), 200
 
 
+@student_bp.route('/<int:student_id>/notes', methods=['PUT'])
+@jwt_required()
+def update_student_notes(student_id):
+    student = Student.query.get_or_404(student_id)
+    data = request.get_json() or {}
+    notes = data.get('notes', '')
+    student.notes = notes
+    if student.lead:
+        student.lead.internal_notes = notes
+    db.session.commit()
+    return jsonify({"message": "Student notes updated successfully.", "notes": student.notes}), 200
+
+
 # --- STUDENT PROFILE DOCUMENTS ROUTES ---
 
 @student_bp.route('/<int:student_id>/documents', methods=['GET'])

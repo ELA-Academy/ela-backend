@@ -31,10 +31,26 @@ def generate_invoices_command():
     for sub in due_subscriptions:
         print(f"Processing subscription for student: {sub.account.student.first_name} {sub.account.student.last_name}")
         
-        # Calculate the due date for the new invoice
-        due_date = today.replace(day=sub.due_day)
-        if today.day > sub.due_day:
-            due_date += relativedelta(months=1)
+        cycle_clean = (sub.cycle or 'Monthly').lower().replace('-', '').replace(' ', '')
+        # Calculate the due date for the new invoice based on plan cycle
+        if cycle_clean == 'weekly':
+            due_date = today + relativedelta(days=7)
+        elif cycle_clean == 'biweekly':
+            due_date = today + relativedelta(days=14)
+        elif cycle_clean == 'quarterly':
+            try:
+                due_date = today.replace(day=sub.due_day)
+            except ValueError:
+                due_date = today
+            if today.day > sub.due_day:
+                due_date += relativedelta(months=3)
+        else: # Monthly
+            try:
+                due_date = today.replace(day=sub.due_day)
+            except ValueError:
+                due_date = today
+            if today.day > sub.due_day:
+                due_date += relativedelta(months=1)
 
         # Create the new invoice
         new_invoice = Invoice(
