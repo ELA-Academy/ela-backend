@@ -34,9 +34,11 @@ def generate_invoices_command():
         cycle_clean = (sub.cycle or 'Monthly').lower().replace('-', '').replace(' ', '')
         # Calculate the due date for the new invoice based on plan cycle
         if cycle_clean == 'weekly':
-            due_date = today + relativedelta(days=7)
+            offset = (sub.due_day - sub.invoice_generation_day) if (sub.due_day and sub.invoice_generation_day and sub.due_day >= sub.invoice_generation_day) else 7
+            due_date = today + relativedelta(days=offset)
         elif cycle_clean == 'biweekly':
-            due_date = today + relativedelta(days=14)
+            offset = (sub.due_day - sub.invoice_generation_day) if (sub.due_day and sub.invoice_generation_day and sub.due_day >= sub.invoice_generation_day) else 14
+            due_date = today + relativedelta(days=offset)
         elif cycle_clean == 'quarterly':
             try:
                 due_date = today.replace(day=sub.due_day)
