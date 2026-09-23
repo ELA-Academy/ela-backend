@@ -918,7 +918,7 @@ def get_admin_actor():
         if staff and getattr(staff, 'is_active', True):
             for dept in staff.departments:
                 clean = dept.name.strip().lower()
-                if re.search(r'\b(it|information technology|info tech|tech|administration|admin)\b', clean):
+                if re.search(r'\b(it|information technology|info tech|tech|administration|admin|accounting|finance|bursar)\b', clean):
                     return staff
     return None
 
@@ -927,7 +927,7 @@ def get_admin_actor():
 def admin_get_all_parents():
     actor = get_admin_actor()
     if not actor:
-        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration, Accounting, or IT Department access."}), 403
 
     from app.models.enrollment_submission_model import EnrollmentSubmission
 

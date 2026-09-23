@@ -133,6 +133,9 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('parents'):
         add_column_if_missing('parents', 'stripe_customer_id', 'VARCHAR(100) NULL')
 
+    if inspector.has_table('students'):
+        add_column_if_missing('students', 'notes', 'TEXT NULL')
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)

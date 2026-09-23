@@ -105,6 +105,86 @@ def create_lead():
     return jsonify(new_lead.to_dict()), 201
 
 
+@admissions_bp.route('/admin/leads', methods=['POST'])
+@jwt_required()
+def admin_create_lead():
+    """Allows staff/admins to manually add a prospective lead."""
+    current_user_email = get_jwt_identity()
+    actor = Staff.query.filter_by(email=current_user_email).first()
+    if not actor:
+        from app.models.super_admin_model import SuperAdmin
+        actor = SuperAdmin.query.filter_by(email=current_user_email).first()
+    if not actor:
+        return jsonify({"error": "Unauthorized actor"}), 401
+
+    data = request.get_json() or {}
+    students_data = data.get('students', [])
+    parents_data = data.get('parents', [])
+
+    # Support flat shorthand payload as well
+    if not students_data and data.get('student_first_name'):
+        students_data = [{
+            'first_name': data.get('student_first_name'),
+            'last_name': data.get('student_last_name', ''),
+            'date_of_birth': data.get('date_of_birth') or '2018-01-01',
+            'grade_level': data.get('grade_level', 'Kindergarten'),
+            'city_state': data.get('city_state', '')
+        }]
+
+    if not parents_data and (data.get('parent_first_name') or data.get('parent_email')):
+        parents_data = [{
+            'first_name': data.get('parent_first_name', ''),
+            'last_name': data.get('parent_last_name', ''),
+            'email': (data.get('parent_email') or '').strip().lower(),
+            'phone': data.get('parent_phone', 'N/A')
+        }]
+
+    if not students_data or not parents_data:
+        return jsonify({"error": "At least one student and parent/guardian contact are required."}), 400
+
+    lead_status = data.get('status', 'Interested')
+    internal_notes = data.get('internal_notes', '')
+
+    new_lead = Lead(
+        status=lead_status,
+        internal_notes=internal_notes,
+        policy_agreed=True
+    )
+    db.session.add(new_lead)
+    db.session.flush()
+
+    for s in students_data:
+        dob_str = s.get('date_of_birth') or '2018-01-01'
+        try:
+            dob = datetime.strptime(dob_str, '%Y-%m-%d').date()
+        except Exception:
+            dob = datetime.utcnow().date()
+        new_student = LeadStudent(
+            first_name=s.get('first_name', '').strip(),
+            last_name=s.get('last_name', '').strip(),
+            date_of_birth=dob,
+            grade_level=s.get('grade_level', 'Kindergarten'),
+            city_state=s.get('city_state', ''),
+            lead_id=new_lead.id
+        )
+        db.session.add(new_student)
+
+    for p in parents_data:
+        new_parent = LeadParent(
+            first_name=p.get('first_name', '').strip(),
+            last_name=p.get('last_name', '').strip(),
+            email=p.get('email', '').strip().lower(),
+            phone=p.get('phone', 'N/A').strip(),
+            lead_id=new_lead.id
+        )
+        db.session.add(new_parent)
+
+    student_name = f"{students_data[0].get('first_name', '')} {students_data[0].get('last_name', '')}".strip()
+    log_activity(actor, f"Manually created new prospective lead for {student_name}", new_lead)
+    db.session.commit()
+    return jsonify(new_lead.to_dict()), 201
+
+
 @admissions_bp.route('/live-look-in', methods=['POST'])
 def create_live_look_in():
     import json

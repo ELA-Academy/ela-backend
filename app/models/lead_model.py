@@ -27,6 +27,7 @@ class Lead(db.Model):
             'id': self.id,
             'secure_token': self.secure_token,
             'status': self.status,
+            'internal_notes': self.internal_notes,
             'created_at': self.created_at.isoformat() + 'Z',
             'students': [student.to_dict() for student in self.students],
             'parents': [parent.to_dict() for parent in self.parents],
