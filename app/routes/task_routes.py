@@ -241,9 +241,10 @@ def create_task():
 
     assigned_department_ids = data.get('assigned_department_ids', [])
     assigned_staff_ids = data.get('assigned_staff_ids', [])
+    workspace_board_id = data.get('workspace_board_id')
 
-    if not assigned_department_ids and not assigned_staff_ids:
-        return jsonify({"error": "Task must be assigned to at least one department or staff member."}), 400
+    if not assigned_department_ids and not assigned_staff_ids and not workspace_board_id:
+        return jsonify({"error": "Task must be assigned to at least one department, staff member, or workspace space."}), 400
 
     due_date = None
     if data.get('due_date'):
@@ -256,8 +257,8 @@ def create_task():
     if not lead:
         return jsonify({"error": "Associated lead not found."}), 404
 
-    creator_staff_id = actor.id if isinstance(actor, Staff) else Staff.query.first().id
-    if not creator_staff_id:
+    creator_staff_id = actor.id if isinstance(actor, Staff) else (Staff.query.first().id if Staff.query.first() else None)
+    if not creator_staff_id and not isinstance(actor, SuperAdmin):
         return jsonify({"error": "Cannot create task. No staff members exist in the system."}), 400
 
     new_task = Task(title=data['title'], note=data.get('note', ''), lead_id=data['lead_id'], created_by_staff_id=creator_staff_id, due_date=due_date)
@@ -276,9 +277,46 @@ def create_task():
             recipients.add(staff)
 
     db.session.add(new_task)
+
+    student_name = f"{lead.students[0].first_name} {lead.students[0].last_name}" if lead.students else "Lead"
+
+    # If assigned to a Workspace Board, create corresponding BoardTask
+    if workspace_board_id:
+        from app.models.board_model import Board, BoardGroup, BoardTask, BoardTaskAssignee
+        board = Board.get_by_id_or_public_id(workspace_board_id)
+        if board:
+            group = board.groups[0] if board.groups else None
+            if not group:
+                group = BoardGroup(board_id=board.id, name="To Do", position=0)
+                db.session.add(group)
+                db.session.flush()
+
+            bt_notes = f"Associated Lead: {student_name} (Status: {lead.status})\n\n{data.get('note', '')}"
+            bt_due_date = due_date.date() if due_date else None
+
+            board_task = BoardTask(
+                group_id=group.id,
+                title=new_task.title,
+                notes=bt_notes,
+                due_date=bt_due_date,
+                priority='Normal',
+                status='Not Started'
+            )
+            if isinstance(actor, Staff):
+                board_task.responsible_staff_id = actor.id
+            elif isinstance(actor, SuperAdmin):
+                board_task.responsible_super_admin_id = actor.id
+
+            db.session.add(board_task)
+            db.session.flush()
+
+            for dept_id in assigned_department_ids:
+                db.session.add(BoardTaskAssignee(task_id=board_task.id, department_id=dept_id))
+            for s_id in assigned_staff_ids:
+                db.session.add(BoardTaskAssignee(task_id=board_task.id, staff_id=s_id))
+
     log_activity(actor, f"Created a new task: '{new_task.title}'", lead)
     
-    student_name = f"{lead.students[0].first_name} {lead.students[0].last_name}"
     message = f"{actor.name} assigned you a new task: '{new_task.title}' for the lead {student_name}."
     
     # Ensure Admission Department is also kept informed of tasks created for this prospective lead
