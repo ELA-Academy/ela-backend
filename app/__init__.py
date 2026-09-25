@@ -1,8 +1,10 @@
-try:
-    import eventlet
-    eventlet.monkey_patch()
-except Exception:
-    pass
+import os
+if os.environ.get('EVENTLET_NO_PATCH') != '1':
+    try:
+        import eventlet
+        eventlet.monkey_patch()
+    except Exception:
+        pass
 
 import os
 from dotenv import load_dotenv

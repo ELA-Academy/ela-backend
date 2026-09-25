@@ -1235,76 +1235,162 @@ def get_all_transactions():
         return jsonify({'error': str(e)}), 500
 
 
+# === Procare Import Endpoints ===
+
+DEFAULT_PROCARE_EXCEL = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'BillingTuitionPlanDetailed_AllRooms.xlsx'))
+if not os.path.exists(DEFAULT_PROCARE_EXCEL):
+    DEFAULT_PROCARE_EXCEL = os.path.abspath('BillingTuitionPlanDetailed_AllRooms.xlsx')
+
+@billing_bp.route('/preview-procare-plans', methods=['POST'])
+@jwt_required()
+def preview_procare_plans():
+    from app.utils.procare_importer import load_and_parse_file, parse_procare_excel_file
+    
+    parsed_data = None
+    file_source_name = "Uploaded File"
+    
+    if 'file' in request.files and request.files['file'].filename:
+        f = request.files['file']
+        file_source_name = f.filename
+        parsed_data = load_and_parse_file(f, f.filename)
+    else:
+        # Check if client requested default workspace file or if no file supplied
+        data = request.get_json(silent=True) or {}
+        if data.get('use_default_file') or os.path.exists(DEFAULT_PROCARE_EXCEL):
+            if os.path.exists(DEFAULT_PROCARE_EXCEL):
+                file_source_name = os.path.basename(DEFAULT_PROCARE_EXCEL)
+                parsed_data = parse_procare_excel_file(DEFAULT_PROCARE_EXCEL)
+            else:
+                return jsonify({"error": "No file uploaded and default workspace file not found."}), 400
+        else:
+            return jsonify({"error": "Please select a Procare file (.xlsx or .csv) to preview."}), 400
+
+    # Match existing students in DB
+    all_db_students = Student.query.all()
+    db_student_keys = {(s.first_name.strip().lower(), s.last_name.strip().lower()) for s in all_db_students}
+
+    students = parsed_data.get('students', [])
+    templates = parsed_data.get('templates', [])
+    preset_charges = parsed_data.get('preset_charges', [])
+    preset_discounts = parsed_data.get('preset_discounts', [])
+
+    matched_students = 0
+    new_students = 0
+    for s in students:
+        k = (s['first_name'].strip().lower(), s['last_name'].strip().lower())
+        if k in db_student_keys:
+            s['is_matched'] = True
+            matched_students += 1
+        else:
+            s['is_matched'] = False
+            new_students += 1
+
+    students_with_plans = [s for s in students if s.get('has_plan')]
+    students_without_plans = [s for s in students if not s.get('has_plan')]
+
+    return jsonify({
+        "file_name": file_source_name,
+        "has_default_file": os.path.exists(DEFAULT_PROCARE_EXCEL),
+        "total_students": len(students),
+        "students_with_plans": len(students_with_plans),
+        "students_without_plans": len(students_without_plans),
+        "matched_existing_students": matched_students,
+        "new_students_to_create": new_students,
+        "templates": templates,
+        "preset_charges": preset_charges,
+        "preset_discounts": preset_discounts,
+        "preview_students": students_with_plans[:60] if students_with_plans else students[:60]
+    }), 200
+
+
 @billing_bp.route('/import-procare-plans', methods=['POST'])
 @jwt_required()
 def import_procare_plans():
     actor = get_actor()
-    data = request.get_json() or {}
-    plans_data = data.get('plans', [])
+    from app.utils.procare_importer import load_and_parse_file, parse_procare_excel_file, execute_procare_import
 
-    if not plans_data:
-        return jsonify({"error": "No tuition plan data provided for import."}), 400
+    options = {
+        'import_templates': True,
+        'import_presets': True,
+        'create_missing_students': True,
+        'import_subscriptions': True,
+        'all_students': False
+    }
 
-    imported_plans_count = 0
-    created_subscriptions_count = 0
-    today = date.today()
+    parsed_data = None
 
-    for item in plans_data:
-        plan_name = item.get('plan_name') or 'Procare Tuition Plan'
-        cycle = item.get('cycle') or 'Monthly'
-        amount = float(item.get('amount') or 0.0)
-        description = item.get('description') or 'Tuition Charge'
-        student_ids = item.get('student_ids', [])
+    if 'file' in request.files and request.files['file'].filename:
+        f = request.files['file']
+        parsed_data = load_and_parse_file(f, f.filename)
+        # Check form fields for options
+        for opt_key in options.keys():
+            if opt_key in request.form:
+                val = request.form[opt_key].lower() in ['true', '1', 'yes']
+                options[opt_key] = val
+    elif request.is_json:
+        data = request.get_json() or {}
+        # Client can pass custom options
+        for opt_key in options.keys():
+            if opt_key in data:
+                options[opt_key] = bool(data[opt_key])
 
-        items_json = item.get('items') or [
-            {
-                "description": description,
-                "amount": amount,
-                "type": "New Item"
+        # If client passes pre-parsed data:
+        if 'parsed_data' in data:
+            parsed_data = data['parsed_data']
+        elif 'plans' in data:
+            # Legacy backward-compatibility format
+            legacy_plans = data['plans']
+            parsed_data = {
+                'students': [],
+                'templates': [],
+                'preset_charges': [],
+                'preset_discounts': []
             }
-        ]
-
-        # 1. Save or update BillingPlan template
-        plan = BillingPlan.query.filter_by(name=plan_name).first()
-        if not plan:
-            plan = BillingPlan(name=plan_name, items_json=items_json)
-            db.session.add(plan)
-            db.session.flush()
-            imported_plans_count += 1
-
-        # 2. Assign to specified students if any
-        cycle_clean = cycle.lower().replace('-', '').replace(' ', '')
-        if cycle_clean == 'weekly':
-            next_invoice = today + relativedelta(weeks=1)
-        elif cycle_clean == 'biweekly':
-            next_invoice = today + relativedelta(weeks=2)
-        elif cycle_clean == 'quarterly':
-            next_invoice = today + relativedelta(months=3)
+            for p in legacy_plans:
+                p_name = p.get('plan_name') or 'Procare Tuition Plan'
+                amt = float(p.get('amount') or 0.0)
+                desc = p.get('description') or 'Tuition Fee'
+                cycle = p.get('cycle') or 'Monthly'
+                parsed_data['templates'].append({
+                    'name': p_name,
+                    'items_json': [{'description': desc, 'amount': amt, 'type': 'New Item', 'value': amt, 'unit': '$'}]
+                })
+                for s_id in p.get('student_ids', []):
+                    st = Student.query.get(s_id)
+                    if st:
+                        parsed_data['students'].append({
+                            'first_name': st.first_name,
+                            'last_name': st.last_name,
+                            'has_plan': True,
+                            'plan_name': p_name,
+                            'plan_status': 'Active',
+                            'cycle': cycle,
+                            'items': [{'description': desc, 'amount': amt, 'type': 'New Item'}]
+                        })
+        elif data.get('use_default_file') or os.path.exists(DEFAULT_PROCARE_EXCEL):
+            if os.path.exists(DEFAULT_PROCARE_EXCEL):
+                parsed_data = parse_procare_excel_file(DEFAULT_PROCARE_EXCEL)
+            else:
+                return jsonify({"error": "Default workspace file not found."}), 400
         else:
-            next_invoice = today + relativedelta(months=1)
+            return jsonify({"error": "No tuition plan data or file provided for import."}), 400
+    else:
+        # Form submission without file
+        if os.path.exists(DEFAULT_PROCARE_EXCEL):
+            parsed_data = parse_procare_excel_file(DEFAULT_PROCARE_EXCEL)
+        else:
+            return jsonify({"error": "No file provided and default file not found."}), 400
 
-        for s_id in student_ids:
-            st = Student.query.get(s_id)
-            if st and st.financial_account:
-                sub = Subscription(
-                    account_id=st.financial_account.id,
-                    plan_name=plan_name,
-                    cycle=cycle,
-                    start_date=today,
-                    end_date=None,
-                    invoice_generation_day=1,
-                    due_day=15,
-                    next_invoice_date=next_invoice,
-                    items_json=items_json
-                )
-                db.session.add(sub)
-                created_subscriptions_count += 1
+    if not parsed_data or not (parsed_data.get('students') or parsed_data.get('templates')):
+        return jsonify({"error": "Failed to parse any valid tuition plan data from the provided source."}), 400
 
-    log_activity(actor, f"Imported {imported_plans_count} plan template(s) and {created_subscriptions_count} subscription(s) from Procare export.")
-    db.session.commit()
-
-    return jsonify({
-        "message": f"Successfully imported Procare tuition plans!",
-        "imported_templates_count": imported_plans_count,
-        "assigned_subscriptions_count": created_subscriptions_count
-    }), 201
+    try:
+        results = execute_procare_import(parsed_data, options=options, actor=actor)
+        return jsonify({
+            "message": "Successfully processed Procare tuition plans import!",
+            "results": results
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error importing Procare data: {str(e)}"}), 500
+
