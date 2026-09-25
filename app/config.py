@@ -27,14 +27,17 @@ class Config:
     STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
     STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
 
+raw_db_url = os.getenv('DATABASE_URL')
+clean_db_url = raw_db_url.strip('\'"') if raw_db_url else None
+
 class DevelopmentConfig(Config):
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'mysql+mysqlconnector://root:@127.0.0.1/school_db')
+    SQLALCHEMY_DATABASE_URI = clean_db_url or 'mysql+mysqlconnector://root:@127.0.0.1/school_db'
 
 class ProductionConfig(Config):
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL')
+    SQLALCHEMY_DATABASE_URI = clean_db_url
 
 class StagingConfig(Config):
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL')
+    SQLALCHEMY_DATABASE_URI = clean_db_url
