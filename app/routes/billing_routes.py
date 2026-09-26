@@ -1,5 +1,5 @@
 import os
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, request, send_file, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from app.models import db
 from app.models.staff_model import Staff
@@ -867,7 +867,34 @@ def refund_payment(student_id, payment_id):
     max_refund = payment.amount - total_refunded
     if refund_amount > max_refund:
         return jsonify({"error": f"Refund amount exceeds the maximum refundable amount of ${max_refund:.2f}."}), 400
-        
+
+    # If the original payment was processed through Stripe, issue actual refund to customer via Stripe API
+    stripe_refund_id = None
+    charge_or_pi_id = payment.stripe_payment_intent_id or payment.stripe_charge_id
+    if charge_or_pi_id:
+        import uuid
+        from app.services import stripe_service
+        idempotency_key = request.headers.get('Idempotency-Key') or f"refund_{payment.id}_{uuid.uuid4()}"
+        amount_cents = int(round(refund_amount * 100))
+        try:
+            stripe_res = stripe_service.create_refund(
+                charge_id_or_payment_intent_id=charge_or_pi_id,
+                amount_in_cents=amount_cents,
+                reason="requested_by_customer",
+                metadata={"payment_id": str(payment.id), "student_id": str(student_id)},
+                idempotency_key=idempotency_key
+            )
+            stripe_refund_id = stripe_res.get('id') if isinstance(stripe_res, dict) else getattr(stripe_res, 'id', None)
+        except Exception as e:
+            current_app.logger.error(f"Stripe Refund API error: {e}")
+            return jsonify({"error": f"Stripe refund processing failed: {str(e)}"}), 500
+
+    # Mark original payment state
+    payment.is_refunded = True
+    payment.refund_amount = (payment.refund_amount or 0.0) + refund_amount
+    if (total_refunded + refund_amount) >= payment.amount:
+        payment.status = 'Refunded'
+
     refund_payment = Payment(
         account_id=account.id,
         invoice_id=payment.invoice_id,
@@ -875,14 +902,16 @@ def refund_payment(student_id, payment_id):
         method='Refund',
         notes=f"Refund for Payment #{payment.id}. Note: {description}" + (f" | Staff Note: {staff_note}" if staff_note else ""),
         status='Success',
+        stripe_charge_id=stripe_refund_id,
+        stripe_payment_intent_id=payment.stripe_payment_intent_id,
         transaction_date=datetime.utcnow()
     )
-    
+
     if payment.invoice_id:
         invoice = Invoice.query.get(payment.invoice_id)
         if invoice and invoice.status == 'Paid':
             invoice.status = 'Sent'
-            
+
     db.session.add(refund_payment)
     log_activity(actor, f"Issued refund of ${refund_amount} for payment #{payment.id} for {student.first_name} {student.last_name}", refund_payment)
     actor_name = get_actor_display_name(actor)
