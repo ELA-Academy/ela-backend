@@ -54,7 +54,7 @@ def parse_dob(dob_val):
 
 def clean_phone(p):
     if not p:
-        return ""
+        return "555-0100"
     p_str = str(p).strip()
     # Keep digits and clean format
     digits = re.sub(r'\D', '', p_str)
@@ -62,7 +62,9 @@ def clean_phone(p):
         return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
     elif len(digits) == 11 and digits.startswith('1'):
         return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
-    return p_str
+    elif len(digits) > 10:
+        return f"+{digits[:14]}"[:20]
+    return (p_str[:20] if p_str else "555-0100")
 
 
 def parse_family_rows(rows_iterator):
@@ -443,11 +445,11 @@ def execute_family_import(students_data, options=None, actor=None):
         # 2. Reconcile Parents for this student
         raw_parents = s_info.get('parents', [])
         for p_data in raw_parents:
-            real_email = p_data.get('email', '').strip().lower()
-            p_fn = p_data.get('first_name', '').strip()
-            p_ln = p_data.get('last_name', '').strip() or ln
-            p_phone = p_data.get('phone', '').strip() or "555-0100"
-            p_pin = p_data.get('pin', '').strip() or "2963"
+            real_email = (p_data.get('email', '') or '').strip().lower()[:120]
+            p_fn = ((p_data.get('first_name', '') or '').strip() or "Parent")[:100]
+            p_ln = ((p_data.get('last_name', '') or '').strip() or ln or "Guardian")[:100]
+            p_phone = clean_phone(p_data.get('phone', ''))[:20]
+            p_pin = str(p_data.get('pin', '') or "2963").strip()[:10]
 
             # Check if parent with this real email already exists in DB
             target_parent = parent_by_email.get(real_email) if real_email else None
