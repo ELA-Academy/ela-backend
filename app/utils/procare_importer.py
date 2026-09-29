@@ -465,29 +465,42 @@ def execute_procare_import(parsed_data, options=None, actor=None):
             plan_status = s_info.get('plan_status', 'Active')
             items_json = s_info.get('items', [])
 
-            # Calculate next invoice date
-            invoice_gen_day = 1
-            due_day = 15
+            # Schedule & Billing Generation Rules (5 days prior to due date)
+            sched_preset = options.get('schedule_preset', '1st')
+            if sched_preset == '15th' or options.get('due_day') == 15:
+                due_day = 15
+                invoice_gen_day = 10
+            else:
+                due_day = int(options.get('due_day') or 1)
+                invoice_gen_day = int(options.get('invoice_generation_day') or 26)
+
             cycle_clean = cycle.lower().replace('-', '').replace(' ', '')
 
-            if cycle_clean == 'weekly':
-                next_invoice = start_date + relativedelta(weeks=1)
-            elif cycle_clean == 'biweekly':
-                next_invoice = start_date + relativedelta(weeks=2)
-            elif cycle_clean == 'quarterly':
-                try:
-                    next_invoice = start_date.replace(day=invoice_gen_day)
-                except ValueError:
-                    next_invoice = start_date
-                if start_date.day > invoice_gen_day:
-                    next_invoice += relativedelta(months=3)
-            else:  # Monthly
-                try:
-                    next_invoice = start_date.replace(day=invoice_gen_day)
-                except ValueError:
-                    next_invoice = start_date
-                if start_date.day > invoice_gen_day:
-                    next_invoice += relativedelta(months=1)
+            # Check if explicit next_invoice_date provided in options
+            custom_next_inv = options.get('next_invoice_date')
+            if custom_next_inv:
+                next_invoice = parse_procare_date(custom_next_inv) or today
+            else:
+                # Calculate next upcoming invoice date
+                base_date = start_date if start_date >= today else today
+                if cycle_clean == 'weekly':
+                    next_invoice = base_date + relativedelta(weeks=1)
+                elif cycle_clean == 'biweekly':
+                    next_invoice = base_date + relativedelta(weeks=2)
+                elif cycle_clean == 'quarterly':
+                    try:
+                        next_invoice = base_date.replace(day=invoice_gen_day)
+                    except ValueError:
+                        next_invoice = base_date
+                    if base_date.day > invoice_gen_day:
+                        next_invoice += relativedelta(months=3)
+                else:  # Monthly
+                    try:
+                        next_invoice = base_date.replace(day=invoice_gen_day)
+                    except ValueError:
+                        next_invoice = base_date
+                    if base_date.day >= invoice_gen_day:
+                        next_invoice += relativedelta(months=1)
 
             # Check existing subscription for this student and plan
             sub = Subscription.query.filter_by(
@@ -501,6 +514,8 @@ def execute_procare_import(parsed_data, options=None, actor=None):
                 sub.start_date = start_date
                 sub.end_date = end_date
                 sub.items_json = items_json
+                sub.invoice_generation_day = invoice_gen_day
+                sub.due_day = due_day
                 sub.next_invoice_date = next_invoice
                 results['subscriptions_updated'] += 1
             else:
