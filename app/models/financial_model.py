@@ -1,5 +1,6 @@
 from app.models import db
-from datetime import datetime
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
 
 class StudentFinancialAccount(db.Model):
     __tablename__ = 'student_financial_accounts'
@@ -149,20 +150,57 @@ class Subscription(db.Model):
 
     def to_dict(self):
         student_name = "N/A (Student Not Found)"
+        grade_level = ""
+        student_id = None
         if self.account and self.account.student:
-            student_name = f"{self.account.student.first_name} {self.account.student.last_name}"
+            student = self.account.student
+            student_name = f"{student.first_name} {student.last_name}"
+            grade_level = student.grade_level or ""
+            student_id = student.id
+
+        # Accurately compute next due date based on cycle and due_day:
+        next_due_date = None
+        if self.next_invoice_date:
+            cycle_clean = (self.cycle or 'Monthly').lower().replace('-', '').replace(' ', '')
+            due_d = self.due_day if (self.due_day is not None and self.due_day > 0) else 1
+            if cycle_clean == 'weekly':
+                offset = (due_d - self.invoice_generation_day) if (self.invoice_generation_day and due_d >= self.invoice_generation_day) else 7
+                next_due_date = self.next_invoice_date + relativedelta(days=offset)
+            elif cycle_clean == 'biweekly':
+                offset = (due_d - self.invoice_generation_day) if (self.invoice_generation_day and due_d >= self.invoice_generation_day) else 14
+                next_due_date = self.next_invoice_date + relativedelta(days=offset)
+            elif cycle_clean == 'quarterly':
+                try:
+                    next_due_date = self.next_invoice_date.replace(day=due_d)
+                except ValueError:
+                    next_due_date = self.next_invoice_date
+                if self.next_invoice_date.day > due_d:
+                    next_due_date += relativedelta(months=3)
+            else:  # Monthly
+                try:
+                    next_due_date = self.next_invoice_date.replace(day=due_d)
+                except ValueError:
+                    next_due_date = self.next_invoice_date
+                if self.next_invoice_date.day > due_d:
+                    next_due_date += relativedelta(months=1)
 
         return {
             'id': self.id,
             'account_id': self.account_id,
+            'student_id': student_id,
             'student_name': student_name,
+            'grade_level': grade_level,
             'plan_name': self.plan_name,
             'status': self.status,
             'cycle': self.cycle,
-            'start_date': self.start_date.isoformat(),
+            'start_date': self.start_date.isoformat() if self.start_date else None,
             'end_date': self.end_date.isoformat() if self.end_date else None,
-            'next_invoice_date': self.next_invoice_date.isoformat(),
-            'total_amount': sum(float(item.get('amount') or 0) for item in self.items_json)
+            'invoice_generation_day': self.invoice_generation_day,
+            'due_day': self.due_day,
+            'next_invoice_date': self.next_invoice_date.isoformat() if self.next_invoice_date else None,
+            'next_due_date': next_due_date.isoformat() if next_due_date else None,
+            'items_json': self.items_json or [],
+            'total_amount': sum(float(item.get('amount') or 0) for item in (self.items_json or []))
         }
 
 class FinancialAuditLog(db.Model):
