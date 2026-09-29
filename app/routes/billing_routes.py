@@ -1,5 +1,5 @@
 import os
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, request, send_file, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from app.models import db
 from app.models.staff_model import Staff
@@ -235,6 +235,137 @@ def create_subscriptions():
     log_activity(actor, f"Created recurring plan '{plan_data.get('plan_name')}' ({cycle}) for {len(student_ids)} student(s)")
     db.session.commit()
     return jsonify({"message": "Recurring plans created successfully."}), 201
+
+
+def _parse_flex_date(val):
+    if not val:
+        return None
+    if isinstance(val, (date, datetime)):
+        return val if isinstance(val, date) else val.date()
+    s = str(val).split('T')[0].strip()
+    for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%B %d, %Y', '%d %B, %Y'):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+@billing_bp.route('/subscriptions/<int:sub_id>', methods=['PUT'])
+@jwt_required()
+def update_subscription(sub_id):
+    actor = get_actor()
+    sub = Subscription.query.get_or_404(sub_id)
+    data = request.get_json() or {}
+
+    if 'plan_name' in data and data['plan_name']:
+        sub.plan_name = data['plan_name'].strip()
+    if 'status' in data and data['status']:
+        sub.status = data['status'].strip()
+    if 'cycle' in data and data['cycle']:
+        sub.cycle = data['cycle'].strip()
+    if 'start_date' in data:
+        sd = _parse_flex_date(data['start_date'])
+        if sd:
+            sub.start_date = sd
+    if 'end_date' in data:
+        sub.end_date = _parse_flex_date(data['end_date'])
+    
+    # Handle schedule preset
+    schedule_preset = data.get('schedule_preset')
+    if schedule_preset == '1st':
+        sub.due_day = 1
+        sub.invoice_generation_day = 26
+    elif schedule_preset == '15th':
+        sub.due_day = 15
+        sub.invoice_generation_day = 10
+    else:
+        if 'due_day' in data and data['due_day'] is not None:
+            sub.due_day = int(data['due_day'])
+        if 'invoice_generation_day' in data and data['invoice_generation_day'] is not None:
+            sub.invoice_generation_day = int(data['invoice_generation_day'])
+
+    if 'next_invoice_date' in data:
+        nid = _parse_flex_date(data['next_invoice_date'])
+        if nid:
+            sub.next_invoice_date = nid
+
+    if 'items_json' in data and isinstance(data['items_json'], list):
+        sub.items_json = data['items_json']
+
+    db.session.commit()
+    log_activity(actor, f"Updated recurring plan '{sub.plan_name}' (ID: {sub.id})")
+    return jsonify({"message": "Recurring plan updated successfully.", "subscription": sub.to_dict()}), 200
+
+
+@billing_bp.route('/subscriptions/bulk-update', methods=['POST'])
+@jwt_required()
+def bulk_update_subscriptions():
+    actor = get_actor()
+    data = request.get_json() or {}
+    sub_ids = data.get('subscription_ids', [])
+    if not sub_ids:
+        return jsonify({"error": "No subscription IDs provided for bulk update."}), 400
+
+    schedule_preset = data.get('schedule_preset')
+    due_day = data.get('due_day')
+    invoice_generation_day = data.get('invoice_generation_day')
+
+    if schedule_preset == '1st':
+        due_day = 1
+        invoice_generation_day = 26
+    elif schedule_preset == '15th':
+        due_day = 15
+        invoice_generation_day = 10
+
+    next_invoice_date = _parse_flex_date(data.get('next_invoice_date'))
+    start_date = _parse_flex_date(data.get('start_date'))
+    update_end_date = data.get('update_end_date', False)
+    end_date = _parse_flex_date(data.get('end_date'))
+    status = data.get('status')
+    plan_name = data.get('plan_name')
+    cycle = data.get('cycle')
+
+    subs = Subscription.query.filter(Subscription.id.in_(sub_ids)).all()
+    updated_count = 0
+
+    for sub in subs:
+        if due_day is not None:
+            sub.due_day = int(due_day)
+        if invoice_generation_day is not None:
+            sub.invoice_generation_day = int(invoice_generation_day)
+        if next_invoice_date is not None:
+            sub.next_invoice_date = next_invoice_date
+        if start_date is not None:
+            sub.start_date = start_date
+        if update_end_date:
+            sub.end_date = end_date
+        if status:
+            sub.status = status
+        if plan_name:
+            sub.plan_name = plan_name
+        if cycle:
+            sub.cycle = cycle
+        updated_count += 1
+
+    db.session.commit()
+    log_activity(actor, f"Bulk updated dates/schedule for {updated_count} recurring plan(s)")
+    return jsonify({
+        "message": f"Successfully updated {updated_count} recurring plan(s).",
+        "updated_count": updated_count
+    }), 200
+
+
+@billing_bp.route('/subscriptions/<int:sub_id>', methods=['DELETE'])
+@jwt_required()
+def delete_subscription(sub_id):
+    actor = get_actor()
+    sub = Subscription.query.get_or_404(sub_id)
+    plan_name = sub.plan_name
+    db.session.delete(sub)
+    db.session.commit()
+    log_activity(actor, f"Deleted recurring plan '{plan_name}' (ID: {sub_id})")
+    return jsonify({"message": "Recurring plan deleted successfully."}), 200
 
 
 def log_financial_event(account_id, transaction_type, transaction_id, action, amount, status, actor_name, description):
@@ -867,7 +998,34 @@ def refund_payment(student_id, payment_id):
     max_refund = payment.amount - total_refunded
     if refund_amount > max_refund:
         return jsonify({"error": f"Refund amount exceeds the maximum refundable amount of ${max_refund:.2f}."}), 400
-        
+
+    # If the original payment was processed through Stripe, issue actual refund to customer via Stripe API
+    stripe_refund_id = None
+    charge_or_pi_id = payment.stripe_payment_intent_id or payment.stripe_charge_id
+    if charge_or_pi_id:
+        import uuid
+        from app.services import stripe_service
+        idempotency_key = request.headers.get('Idempotency-Key') or f"refund_{payment.id}_{uuid.uuid4()}"
+        amount_cents = int(round(refund_amount * 100))
+        try:
+            stripe_res = stripe_service.create_refund(
+                charge_id_or_payment_intent_id=charge_or_pi_id,
+                amount_in_cents=amount_cents,
+                reason="requested_by_customer",
+                metadata={"payment_id": str(payment.id), "student_id": str(student_id)},
+                idempotency_key=idempotency_key
+            )
+            stripe_refund_id = stripe_res.get('id') if isinstance(stripe_res, dict) else getattr(stripe_res, 'id', None)
+        except Exception as e:
+            current_app.logger.error(f"Stripe Refund API error: {e}")
+            return jsonify({"error": f"Stripe refund processing failed: {str(e)}"}), 500
+
+    # Mark original payment state
+    payment.is_refunded = True
+    payment.refund_amount = (payment.refund_amount or 0.0) + refund_amount
+    if (total_refunded + refund_amount) >= payment.amount:
+        payment.status = 'Refunded'
+
     refund_payment = Payment(
         account_id=account.id,
         invoice_id=payment.invoice_id,
@@ -875,14 +1033,16 @@ def refund_payment(student_id, payment_id):
         method='Refund',
         notes=f"Refund for Payment #{payment.id}. Note: {description}" + (f" | Staff Note: {staff_note}" if staff_note else ""),
         status='Success',
+        stripe_charge_id=stripe_refund_id,
+        stripe_payment_intent_id=payment.stripe_payment_intent_id,
         transaction_date=datetime.utcnow()
     )
-    
+
     if payment.invoice_id:
         invoice = Invoice.query.get(payment.invoice_id)
         if invoice and invoice.status == 'Paid':
             invoice.status = 'Sent'
-            
+
     db.session.add(refund_payment)
     log_activity(actor, f"Issued refund of ${refund_amount} for payment #{payment.id} for {student.first_name} {student.last_name}", refund_payment)
     actor_name = get_actor_display_name(actor)
