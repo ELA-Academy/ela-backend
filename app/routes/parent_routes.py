@@ -1129,6 +1129,101 @@ def admin_delete_parent(parent_id):
     db.session.commit()
     return jsonify({"message": "Parent account removed successfully."}), 200
 
+def _find_default_family_file():
+    candidates = [
+        os.path.join(os.getcwd(), 'Students_and_Family_-_Active_-_All_Rooms.xlsx'),
+        os.path.join(os.path.dirname(os.getcwd()), 'Students_and_Family_-_Active_-_All_Rooms.xlsx'),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'Students_and_Family_-_Active_-_All_Rooms.xlsx')),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'Students_and_Family_-_Active_-_All_Rooms.xlsx'))
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+def _extract_family_data_from_request(req):
+    from app.utils.family_importer import load_and_parse_family_file, parse_family_excel_file
+
+    if 'file' in req.files:
+        uploaded_file = req.files['file']
+        if uploaded_file.filename:
+            return load_and_parse_family_file(uploaded_file, uploaded_file.filename), uploaded_file.filename
+
+    # Fallback to local default file
+    data = req.get_json(silent=True) or {}
+    use_default = data.get('use_default_file') or req.form.get('use_default_file')
+    default_path = _find_default_family_file()
+    if (use_default or 'file' not in req.files) and default_path and os.path.isfile(default_path):
+        with open(default_path, 'rb') as f:
+            return parse_family_excel_file(f.read()), os.path.basename(default_path)
+
+    return None, None
+
+@parent_bp.route('/admin/preview-family-import', methods=['POST'])
+@jwt_required()
+def admin_preview_family_import():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration, Accounting, or IT Department access."}), 403
+
+    try:
+        from app.utils.family_importer import preview_family_import
+        students_data, filename = _extract_family_data_from_request(request)
+        if not students_data:
+            return jsonify({
+                "error": "No file was uploaded and default 'Students_and_Family_-_Active_-_All_Rooms.xlsx' could not be found."
+            }), 400
+
+        preview = preview_family_import(students_data)
+        preview['source_filename'] = filename
+        return jsonify(preview), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to preview import: {str(e)}"}), 500
+
+@parent_bp.route('/admin/import-families', methods=['POST'])
+@jwt_required()
+def admin_import_families():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration, Accounting, or IT Department access."}), 403
+
+    try:
+        from app.utils.family_importer import execute_family_import
+        students_data, filename = _extract_family_data_from_request(request)
+        if not students_data:
+            return jsonify({
+                "error": "No file was uploaded and default 'Students_and_Family_-_Active_-_All_Rooms.xlsx' could not be found."
+            }), 400
+
+        # Parse options
+        json_data = request.get_json(silent=True) or {}
+        form_data = request.form
+
+        def parse_bool(val, default=True):
+            if val is None:
+                return default
+            if isinstance(val, bool):
+                return val
+            return str(val).lower() in ('1', 'true', 'yes')
+
+        opts = {
+            'update_existing_students': parse_bool(json_data.get('update_existing_students', form_data.get('update_existing_students')), True),
+            'create_missing_students': parse_bool(json_data.get('create_missing_students', form_data.get('create_missing_students')), True),
+            'upgrade_dummy_parents': parse_bool(json_data.get('upgrade_dummy_parents', form_data.get('upgrade_dummy_parents')), True),
+            'cleanup_unmatched_dummy_parents': parse_bool(json_data.get('cleanup_unmatched_dummy_parents', form_data.get('cleanup_unmatched_dummy_parents')), True)
+        }
+
+        results = execute_family_import(students_data, options=opts, actor=actor)
+        results['source_filename'] = filename
+        return jsonify({
+            "message": "Student & Family Directory import completed successfully.",
+            "results": results
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to execute family import: {str(e)}"}), 500
+
+
 @parent_bp.route('/payments/<int:payment_id>/receipt', methods=['GET'])
 @jwt_required()
 def get_parent_payment_receipt(payment_id):
