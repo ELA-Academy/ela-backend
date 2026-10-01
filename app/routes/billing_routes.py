@@ -368,6 +368,24 @@ def delete_subscription(sub_id):
     return jsonify({"message": "Recurring plan deleted successfully."}), 200
 
 
+@billing_bp.route('/subscriptions/bulk-delete', methods=['POST'])
+@jwt_required()
+def bulk_delete_subscriptions():
+    actor = get_actor()
+    data = request.get_json() or {}
+    sub_ids = data.get('subscription_ids', [])
+    if not sub_ids:
+        return jsonify({"error": "No subscription IDs provided for bulk deletion."}), 400
+
+    deleted_count = Subscription.query.filter(Subscription.id.in_(sub_ids)).delete(synchronize_session=False)
+    db.session.commit()
+    log_activity(actor, f"Bulk deleted {deleted_count} recurring plan(s)")
+    return jsonify({
+        "message": f"Successfully deleted {deleted_count} recurring plan(s).",
+        "deleted_count": deleted_count
+    }), 200
+
+
 def log_financial_event(account_id, transaction_type, transaction_id, action, amount, status, actor_name, description):
     try:
         from app.models.financial_model import FinancialAuditLog
