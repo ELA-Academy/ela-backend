@@ -90,64 +90,41 @@ def parse_family_rows(rows_iterator):
     if header_idx is None:
         raise ValueError("Could not find header row containing 'First Name', 'Last Name', 'Dob'.")
 
-    # Build column map
+    # Build column map for the requested columns only
     col_map = {}
     for i, h in enumerate(headers):
         hl = h.lower().replace(" ", "").replace("_", "")
-        if hl == "id":
-            col_map['child_id'] = i
-        elif hl == "firstname":
+        # Student fields
+        if hl in ("firstname", "first_name", "studentfirstname"):
             col_map['first_name'] = i
-        elif hl == "lastname":
+        elif hl in ("lastname", "last_name", "studentlastname"):
             col_map['last_name'] = i
-        elif hl == "room":
+        elif hl in ("room", "grade", "gradelevel", "room[grade]"):
             col_map['room'] = i
-        elif hl == "tags":
-            col_map['tags'] = i
-        elif hl == "studentid":
-            col_map['student_id_number'] = i
         elif hl == "status":
             col_map['status'] = i
-        elif hl == "dob":
+        elif hl in ("dob", "dateofbirth", "dob[dateofbirth]"):
             col_map['dob'] = i
-        elif hl == "timeschedule":
-            col_map['time_schedule'] = i
         elif hl == "city":
             col_map['city'] = i
         elif hl == "state":
             col_map['state'] = i
-        elif hl == "zip":
+        elif hl in ("zip", "zipcode", "postalcode"):
             col_map['zip'] = i
-        elif hl == "country":
-            col_map['country'] = i
 
-        # Parents 1 to 4
-        for p_num in range(1, 5):
+        # Parents 1 and 2 only
+        for p_num in (1, 2):
             prefix = f"parent{p_num}"
-            if hl == f"{prefix}relation":
+            if hl in (f"{prefix}relation", f"p{p_num}relation"):
                 col_map[f'p{p_num}_relation'] = i
-            elif hl == f"{prefix}email":
+            elif hl in (f"{prefix}email", f"p{p_num}email"):
                 col_map[f'p{p_num}_email'] = i
-            elif hl == f"{prefix}familyid":
-                col_map[f'p{p_num}_family_id'] = i
-            elif hl == f"{prefix}firstname":
+            elif hl in (f"{prefix}firstname", f"p{p_num}firstname"):
                 col_map[f'p{p_num}_first_name'] = i
-            elif hl == f"{prefix}lastname":
+            elif hl in (f"{prefix}lastname", f"p{p_num}lastname"):
                 col_map[f'p{p_num}_last_name'] = i
-            elif hl in (f"{prefix}mobilephone", f"{prefix}phone"):
+            elif hl in (f"{prefix}mobilephone", f"{prefix}phone", f"{prefix}mobilenumber", f"p{p_num}mobilephone", f"p{p_num}phone"):
                 col_map[f'p{p_num}_phone'] = i
-            elif hl == f"{prefix}pin":
-                col_map[f'p{p_num}_pin'] = i
-
-        # Pickup 1
-        if hl == "pickup1relation":
-            col_map['pickup1_relation'] = i
-        elif hl == "pickup1firstname":
-            col_map['pickup1_first_name'] = i
-        elif hl == "pickup1lastname":
-            col_map['pickup1_last_name'] = i
-        elif hl in ("pickup1mobilephone", "pickup1phone"):
-            col_map['pickup1_phone'] = i
 
     parsed_students = []
 
@@ -165,8 +142,6 @@ def parse_family_rows(rows_iterator):
             continue
 
         room = str(get_val('room')).strip()
-        tags = str(get_val('tags')).strip()
-        st_id = str(get_val('student_id_number')).strip()
         status_val = str(get_val('status')).strip() or "Active"
         raw_dob = get_val('dob')
         dob = parse_dob(raw_dob)
@@ -174,20 +149,24 @@ def parse_family_rows(rows_iterator):
         city = str(get_val('city')).strip()
         state = str(get_val('state')).strip()
         zip_code = str(get_val('zip')).strip()
-        country = str(get_val('country')).strip()
 
         parents = []
-        for p_num in range(1, 5):
-            p_email = str(get_val(f'p{p_num}_email')).strip().lower()
+        seen_emails = set()
+
+        for p_num in (1, 2):
+            p_email = str(get_val(f'p{p_num}_email')).strip().lower()[:120]
             p_fn = str(get_val(f'p{p_num}_first_name')).strip()
             p_ln = str(get_val(f'p{p_num}_last_name')).strip()
-            p_phone = clean_phone(get_val(f'p{p_num}_phone'))
+            p_phone = clean_phone(get_val(f'p{p_num}_phone'))[:20]
             p_rel = str(get_val(f'p{p_num}_relation')).strip()
-            p_pin = str(get_val(f'p{p_num}_pin')).strip()
-            p_fam_id = str(get_val(f'p{p_num}_family_id')).strip()
+
+            # Deduplicate if Parent 1 and Parent 2 share the same email
+            if p_email:
+                if p_email in seen_emails:
+                    continue
+                seen_emails.add(p_email)
 
             if p_email or p_fn or p_ln:
-                # If first name contains both names and last name is blank, split
                 if p_fn and not p_ln and ' ' in p_fn:
                     parts = p_fn.split()
                     p_fn = parts[0]
@@ -199,29 +178,29 @@ def parse_family_rows(rows_iterator):
 
                 parents.append({
                     'index': p_num,
-                    'relation': p_rel or "Parent/Guardian",
+                    'relation': p_rel or ("Mother" if p_num == 1 else "Father"),
                     'email': p_email,
-                    'first_name': p_fn or "Parent",
-                    'last_name': p_ln or ln,
+                    'first_name': (p_fn or "Parent")[:100],
+                    'last_name': (p_ln or ln or "Guardian")[:100],
                     'phone': p_phone,
-                    'pin': p_pin or "2963",
-                    'family_id': p_fam_id
+                    'pin': "2963"
                 })
 
+        # Format address string
+        addr_parts = [p for p in [city, state, zip_code] if p]
+        addr_str = ", ".join(addr_parts)
+
         parsed_students.append({
-            'child_id': str(get_val('child_id')).strip(),
             'first_name': fn,
             'last_name': ln,
             'grade_level': room_to_grade(room),
             'room': room,
-            'tags': tags,
-            'student_id_number': st_id,
             'status': status_val.capitalize() if status_val.lower() == 'active' else 'Active',
             'date_of_birth': dob.isoformat() if dob else None,
             'city': city,
             'state': state,
             'zip': zip_code,
-            'country': country,
+            'address': addr_str,
             'parents': parents
         })
 
@@ -364,7 +343,7 @@ def execute_family_import(students_data, options=None, actor=None):
     update_existing = options.get('update_existing_students', True)
     create_missing = options.get('create_missing_students', True)
     upgrade_dummy_parents = options.get('upgrade_dummy_parents', True)
-    cleanup_dummy = options.get('cleanup_unmatched_dummy_parents', False)
+    cleanup_dummy = options.get('cleanup_unmatched_dummy_parents', True)
 
     today = date.today()
     results = {
@@ -402,32 +381,29 @@ def execute_family_import(students_data, options=None, actor=None):
         # 1. Student Provision / Update
         if student:
             if update_existing:
-                student.status = 'Active'
+                student.status = s_info.get('status') or 'Active'
                 if s_info.get('grade_level'):
                     student.grade_level = s_info['grade_level']
                 if dob:
                     student.date_of_birth = dob
-                if s_info.get('student_id_number'):
-                    student.student_id_number = s_info['student_id_number']
 
-                # Format address / notes
-                addr_parts = [s_info.get('city'), s_info.get('state'), s_info.get('zip')]
-                addr_str = ", ".join(p for p in addr_parts if p)
+                addr_str = s_info.get('address') or ""
                 if addr_str and ("Address:" not in (student.notes or "")):
                     student.notes = (student.notes or "") + f"\nAddress: {addr_str}"
 
                 results['students_updated'] += 1
         elif create_missing:
             # Create new student
+            addr_str = s_info.get('address') or ""
+            notes_str = f"Address: {addr_str}" if addr_str else ""
             student = Student(
-                first_name=fn,
-                last_name=ln,
+                first_name=fn[:100],
+                last_name=ln[:100],
                 grade_level=s_info.get('grade_level') or "Unassigned",
                 date_of_birth=dob,
-                status='Active',
-                student_id_number=s_info.get('student_id_number') or None,
+                status=s_info.get('status') or 'Active',
                 enrollment_date=today,
-                notes=f"Imported from Child & Family Directory. City: {s_info.get('city', '')}."
+                notes=notes_str
             )
             db.session.add(student)
             db.session.flush()

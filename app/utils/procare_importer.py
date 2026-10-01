@@ -417,36 +417,6 @@ def execute_procare_import(parsed_data, options=None, actor=None):
             db.session.add(fin_account)
             db.session.flush()
 
-            # Handle Parents
-            if p_names:
-                p_list = [p.strip() for p in p_names.split(',') if p.strip()]
-                # Deduplicate parent names
-                p_list_unique = []
-                for p in p_list:
-                    if p not in p_list_unique:
-                        p_list_unique.append(p)
-
-                for p_full in p_list_unique:
-                    p_parts = p_full.split()
-                    p_fn = p_parts[0] if p_parts else "Parent"
-                    p_ln = " ".join(p_parts[1:]) if len(p_parts) > 1 else ln
-                    clean_email = f"{p_fn.lower()}.{p_ln.lower().replace(' ', '')}.{fam_id.lower() or student.id}@parent.elaaschool.org"
-
-                    existing_parent = Parent.query.filter_by(email=clean_email).first()
-                    if not existing_parent:
-                        existing_parent = Parent(
-                            first_name=p_fn,
-                            last_name=p_ln,
-                            email=clean_email,
-                            phone="555-0100",
-                            is_active=True
-                        )
-                        db.session.add(existing_parent)
-                        db.session.flush()
-
-                    if existing_parent not in student.parents:
-                        student.parents.append(existing_parent)
-
             student_lookup[key] = student
             results['students_created'] += 1
 
