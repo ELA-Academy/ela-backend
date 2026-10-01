@@ -533,6 +533,50 @@ def send_batch_digests():
             db.session.rollback()
             print(f"[Digest Worker] Failed to send digest email: {e}")
 
+@click.command('wipe-students-parents', help='Wipes all students, parents, and linked billing/plan records while keeping staff and admin accounts intact.')
+@with_appcontext
+def wipe_students_parents_command():
+    from sqlalchemy import text
+    try:
+        click.echo("Wiping all student, parent, and linked billing/plan records...")
+        dialect = db.engine.dialect.name
+        if dialect == 'postgresql':
+            db.session.execute(text('''
+                TRUNCATE TABLE 
+                    invoice_items, 
+                    invoices, 
+                    payments, 
+                    credits, 
+                    subscriptions, 
+                    financial_audit_logs, 
+                    student_financial_accounts, 
+                    student_documents, 
+                    parent_payment_methods, 
+                    parent_student_association, 
+                    students, 
+                    parents 
+                RESTART IDENTITY CASCADE;
+            '''))
+        else:
+            db.session.execute(text('DELETE FROM invoice_items;'))
+            db.session.execute(text('DELETE FROM invoices;'))
+            db.session.execute(text('DELETE FROM payments;'))
+            db.session.execute(text('DELETE FROM credits;'))
+            db.session.execute(text('DELETE FROM subscriptions;'))
+            db.session.execute(text('DELETE FROM financial_audit_logs;'))
+            db.session.execute(text('DELETE FROM student_documents;'))
+            db.session.execute(text('DELETE FROM parent_payment_methods;'))
+            db.session.execute(text('DELETE FROM parent_student_association;'))
+            db.session.execute(text('DELETE FROM student_financial_accounts;'))
+            db.session.execute(text('DELETE FROM students;'))
+            db.session.execute(text('DELETE FROM parents;'))
+        db.session.commit()
+        click.echo("✓ Successfully wiped all students, parents, and linked billing records! Ready for fresh import testing.")
+    except Exception as e:
+        db.session.rollback()
+        click.echo(f"✗ Failed to wipe records: {e}")
+
 def register_commands(app):
     app.cli.add_command(generate_invoices_command)
     app.cli.add_command(process_notifications_command)
+    app.cli.add_command(wipe_students_parents_command)
