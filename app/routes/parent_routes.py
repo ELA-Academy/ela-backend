@@ -1192,7 +1192,7 @@ def admin_import_families():
         students_data, filename = _extract_family_data_from_request(request)
         if not students_data:
             return jsonify({
-                "error": "No file was uploaded and default 'Students_and_Family_-_Active_-_All_Rooms.xlsx' could not be found."
+                "error": "Please select an Excel (.xlsx, .xls) or CSV (.csv) file to import."
             }), 400
 
         # Parse options
