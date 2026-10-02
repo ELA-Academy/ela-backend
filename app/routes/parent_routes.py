@@ -1129,6 +1129,27 @@ def admin_delete_parent(parent_id):
     db.session.commit()
     return jsonify({"message": "Parent account removed successfully."}), 200
 
+@parent_bp.route('/admin/bulk-delete', methods=['POST'])
+@jwt_required()
+def admin_bulk_delete_parents():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration or IT Department access."}), 403
+
+    data = request.get_json() or {}
+    parent_ids = data.get('parent_ids', [])
+    if not parent_ids:
+        return jsonify({"error": "No parent IDs provided for bulk deletion."}), 400
+
+    parents = Parent.query.filter(Parent.id.in_(parent_ids)).all()
+    count = len(parents)
+    for p in parents:
+        db.session.delete(p)
+
+    db.session.commit()
+    log_activity(actor, f"Bulk deleted {count} parent account(s)")
+    return jsonify({"message": f"Successfully deleted {count} parent account(s).", "deleted_count": count}), 200
+
 def _find_default_family_file():
     candidates = [
         os.path.join(os.getcwd(), 'Students_and_Family_-_Active_-_All_Rooms.xlsx'),
