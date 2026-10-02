@@ -4,7 +4,8 @@ from app.models import db
 from app.models.lead_model import Lead
 from app.models.student_model import Student, Parent
 from app.models.student_document_model import StudentDocument
-from app.models.staff_model import Staff, SuperAdmin
+from app.models.staff_model import Staff
+from app.models.super_admin_model import SuperAdmin
 from app.models.activity_log_model import log_activity
 from datetime import date, datetime
 from app.routes.enrollment_routes import _perform_lead_conversion
