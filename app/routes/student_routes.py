@@ -173,13 +173,35 @@ def download_student_document(filename):
     return send_from_directory(docs_dir, filename, as_attachment=True)
 
 
+def get_admin_actor():
+    claims = get_jwt()
+    email = claims.get('sub') or get_jwt_identity()
+    role = claims.get('role')
+
+    if role == 'superadmin':
+        from app.models.super_admin_model import SuperAdmin
+        return SuperAdmin.query.filter_by(email=email).first()
+
+    if role == 'staff':
+        from app.models.staff_model import Staff
+        import re
+        staff = Staff.query.filter_by(email=email).first()
+        if staff and getattr(staff, 'is_active', True):
+            if getattr(staff, 'role', '') in ['Admin', 'SuperAdmin', 'Director', 'Principal', 'Accountant', 'Bursar']:
+                return staff
+            for dept in staff.departments:
+                clean = dept.name.strip().lower()
+                if re.search(r'\b(it|information technology|info tech|tech|administration|admin|accounting|finance|bursar|billing)\b', clean):
+                    return staff
+    return None
+
+
 @student_bp.route('/<int:student_id>', methods=['DELETE'])
 @jwt_required()
 def delete_student(student_id):
-    claims = get_jwt()
-    role = claims.get('role')
-    email = get_jwt_identity()
-    actor = SuperAdmin.query.filter_by(email=email).first() if role == 'superadmin' else Staff.query.filter_by(email=email).first()
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Administration, Accounting, or IT Department access."}), 403
 
     student = Student.query.get_or_404(student_id)
     student_name = f"{student.first_name} {student.last_name}"
@@ -202,10 +224,9 @@ def delete_student(student_id):
 @student_bp.route('/bulk-delete', methods=['POST'])
 @jwt_required()
 def bulk_delete_students():
-    claims = get_jwt()
-    role = claims.get('role')
-    email = get_jwt_identity()
-    actor = SuperAdmin.query.filter_by(email=email).first() if role == 'superadmin' else Staff.query.filter_by(email=email).first()
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Administration, Accounting, or IT Department access."}), 403
 
     data = request.get_json() or {}
     student_ids = data.get('student_ids', [])
@@ -233,13 +254,9 @@ def bulk_delete_students():
 @student_bp.route('/clean-slate', methods=['POST'])
 @jwt_required()
 def clean_slate_wipe():
-    claims = get_jwt()
-    role = claims.get('role')
-    email = get_jwt_identity()
-    actor = SuperAdmin.query.filter_by(email=email).first() if role == 'superadmin' else Staff.query.filter_by(email=email).first()
-
-    if role != 'superadmin' and getattr(actor, 'role', '') not in ['Admin', 'SuperAdmin', 'Director']:
-        return jsonify({"error": "Unauthorized. Only Super Administrators can perform a clean slate wipe."}), 403
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Administration, Accounting, or IT Department access."}), 403
 
     from sqlalchemy import text
     try:
