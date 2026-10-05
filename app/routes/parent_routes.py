@@ -905,7 +905,7 @@ from app.utils.email_otp import send_parent_invite_email
 
 def get_admin_actor():
     claims = get_jwt()
-    email = claims.get('sub')
+    email = claims.get('sub') or get_jwt_identity()
     role = claims.get('role')
     
     if role == 'superadmin':
@@ -916,9 +916,11 @@ def get_admin_actor():
         from app.models.staff_model import Staff
         staff = Staff.query.filter_by(email=email).first()
         if staff and getattr(staff, 'is_active', True):
+            if getattr(staff, 'role', '') in ['Admin', 'SuperAdmin', 'Director', 'Principal', 'Accountant', 'Bursar']:
+                return staff
             for dept in staff.departments:
                 clean = dept.name.strip().lower()
-                if re.search(r'\b(it|information technology|info tech|tech|administration|admin|accounting|finance|bursar)\b', clean):
+                if re.search(r'\b(it|information technology|info tech|tech|administration|admin|accounting|finance|bursar|billing)\b', clean):
                     return staff
     return None
 
@@ -1149,6 +1151,34 @@ def admin_bulk_delete_parents():
     db.session.commit()
     log_activity(actor, f"Bulk deleted {count} parent account(s)")
     return jsonify({"message": f"Successfully deleted {count} parent account(s).", "deleted_count": count}), 200
+
+@parent_bp.route('/admin/wipe-all', methods=['POST'])
+@jwt_required()
+def admin_wipe_all_parents():
+    actor = get_admin_actor()
+    if not actor:
+        return jsonify({"error": "Unauthorized. Requires Super Admin, Administration, Accounting, or IT Department access."}), 403
+
+    from sqlalchemy import text
+    try:
+        dialect = db.engine.dialect.name
+        if dialect == 'postgresql':
+            db.session.execute(text('''
+                DELETE FROM parent_payment_methods;
+                DELETE FROM parent_student_association;
+                DELETE FROM parents;
+            '''))
+        else:
+            db.session.execute(text('DELETE FROM parent_payment_methods;'))
+            db.session.execute(text('DELETE FROM parent_student_association;'))
+            db.session.execute(text('DELETE FROM parents;'))
+
+        db.session.commit()
+        log_activity(actor, "Wiped all parent accounts and family associations")
+        return jsonify({"message": "Successfully wiped all parent accounts. You can now import fresh family details from your spreadsheet."}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to wipe parent accounts: {str(e)}"}), 500
 
 def _find_default_family_file():
     candidates = [
