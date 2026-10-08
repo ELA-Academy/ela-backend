@@ -22,6 +22,13 @@ def _get_user_ids():
     return user, role, None, user.id
 
 
+def _resolve_space(space_id):
+    """Resolve space board by either public_id (string/hex) or integer id."""
+    if not space_id:
+        return None
+    return Board.get_by_id_or_public_id(space_id)
+
+
 def _get_all_descendant_list_ids(space_id):
     """Recursively collect IDs of all lists (non-folder boards) under a space."""
     list_ids = []
@@ -46,18 +53,32 @@ def _get_all_descendant_list_ids(space_id):
 
 # ─── Overview Cards CRUD ──────────────────────────────────────────────────────
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_overview_cards(space_id):
     """List all overview cards for a space."""
-    cards = OverviewCard.query.filter_by(board_id=space_id).order_by(OverviewCard.position).all()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    cards = OverviewCard.query.filter_by(board_id=space.id).order_by(OverviewCard.position).all()
     return jsonify([c.to_dict() for c in cards])
 
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards', methods=['POST'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def create_overview_card(space_id):
     """Create a new overview card."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
     user, role, staff_id, admin_id = _get_user_ids()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
@@ -67,13 +88,17 @@ def create_overview_card(space_id):
         return jsonify({"error": "name and card_type are required"}), 400
 
     # Position: append at the end
-    max_pos = db.session.query(func.max(OverviewCard.position)).filter_by(board_id=space_id).scalar() or 0
+    max_pos = db.session.query(func.max(OverviewCard.position)).filter_by(board_id=space.id).scalar() or 0
 
-    data_source_id = int(data['data_source_board_id']) if data.get('data_source_board_id') else None
+    data_source_id = None
+    if data.get('data_source_board_id'):
+        src_board = Board.get_by_id_or_public_id(data['data_source_board_id'])
+        data_source_id = src_board.id if src_board else None
+
     measure_id = int(data['measure_field_id']) if data.get('measure_field_id') else None
 
     card = OverviewCard(
-        board_id=space_id,
+        board_id=space.id,
         name=data['name'],
         card_type=data['card_type'],
         position=max_pos + 1,
@@ -90,11 +115,18 @@ def create_overview_card(space_id):
     return jsonify(card.to_dict()), 201
 
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards/<int:card_id>', methods=['PUT'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards/<int:card_id>', methods=['PUT', 'OPTIONS'])
+@jwt_required(optional=True)
 def update_overview_card(space_id, card_id):
     """Update an overview card's settings."""
-    card = OverviewCard.query.filter_by(id=card_id, board_id=space_id).first()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    card = OverviewCard.query.filter_by(id=card_id, board_id=space.id).first()
     if not card:
         return jsonify({"error": "Card not found"}), 404
 
@@ -102,7 +134,11 @@ def update_overview_card(space_id, card_id):
     if 'name' in data and data['name']:
         card.name = data['name']
     if 'data_source_board_id' in data:
-        card.data_source_board_id = int(data['data_source_board_id']) if data['data_source_board_id'] else None
+        if data['data_source_board_id']:
+            src_board = Board.get_by_id_or_public_id(data['data_source_board_id'])
+            card.data_source_board_id = src_board.id if src_board else None
+        else:
+            card.data_source_board_id = None
     if 'measure_field_id' in data:
         card.measure_field_id = int(data['measure_field_id']) if data['measure_field_id'] else None
     if 'calculation' in data:
@@ -118,11 +154,18 @@ def update_overview_card(space_id, card_id):
     return jsonify(card.to_dict())
 
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards/<int:card_id>', methods=['DELETE'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards/<int:card_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required(optional=True)
 def delete_overview_card(space_id, card_id):
     """Delete an overview card."""
-    card = OverviewCard.query.filter_by(id=card_id, board_id=space_id).first()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    card = OverviewCard.query.filter_by(id=card_id, board_id=space.id).first()
     if not card:
         return jsonify({"error": "Card not found"}), 404
     db.session.delete(card)
@@ -132,11 +175,18 @@ def delete_overview_card(space_id, card_id):
 
 # ─── Card Aggregation ─────────────────────────────────────────────────────────
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards/<int:card_id>/aggregate', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards/<int:card_id>/aggregate', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_card_aggregate(space_id, card_id):
     """Compute a calculation card's aggregated value."""
-    card = OverviewCard.query.filter_by(id=card_id, board_id=space_id).first()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    card = OverviewCard.query.filter_by(id=card_id, board_id=space.id).first()
     if not card:
         return jsonify({"error": "Card not found"}), 404
 
@@ -146,7 +196,6 @@ def get_card_aggregate(space_id, card_id):
     if not card.data_source_board_id:
         return jsonify({"value": 0, "refreshed_at": datetime.utcnow().isoformat() + 'Z'})
 
-    # Get all tasks in the data source board
     filters = {}
     if card.filters_json:
         try:
@@ -162,18 +211,14 @@ def get_card_aggregate(space_id, card_id):
 
     task_query = BoardTask.query.filter(BoardTask.group_id.in_(group_ids))
 
-    # Apply filters
     if not filters.get('show_closed', False):
         task_query = task_query.filter(BoardTask.status != 'Done')
-    if not filters.get('show_archived', True):
-        pass  # Board-level archiving is handled elsewhere
 
     tasks = task_query.all()
 
     if card.calculation == 'count':
         value = len(tasks)
     elif card.measure_field_id:
-        # Get custom field values for the measure field
         task_ids = [t.id for t in tasks]
         if not task_ids:
             return jsonify({"value": 0, "count": 0, "refreshed_at": datetime.utcnow().isoformat() + 'Z'})
@@ -220,7 +265,6 @@ def get_card_aggregate(space_id, card_id):
     else:
         value = len(tasks)
 
-    # Format value
     if isinstance(value, float):
         value = round(value, 2)
 
@@ -231,11 +275,18 @@ def get_card_aggregate(space_id, card_id):
     })
 
 
-@overview_bp.route('/boards/<int:space_id>/overview-cards/<int:card_id>/data', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview-cards/<int:card_id>/data', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_card_data(space_id, card_id):
     """Return raw task rows that feed a calculation card."""
-    card = OverviewCard.query.filter_by(id=card_id, board_id=space_id).first()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    card = OverviewCard.query.filter_by(id=card_id, board_id=space.id).first()
     if not card or card.card_type != 'calculation' or not card.data_source_board_id:
         return jsonify({"tasks": [], "total": 0})
 
@@ -258,7 +309,6 @@ def get_card_data(space_id, card_id):
 
     tasks = task_query.order_by(BoardTask.created_at.desc()).all()
 
-    # Get measure field values
     measure_values = {}
     if card.measure_field_id:
         task_ids = [t.id for t in tasks]
@@ -273,7 +323,6 @@ def get_card_data(space_id, card_id):
                 except Exception:
                     measure_values[fv.task_id] = fv.value_json
 
-    # Get measure field name
     measure_field_name = None
     if card.measure_field_id:
         field = BoardCustomField.query.get(card.measure_field_id)
@@ -301,28 +350,41 @@ def get_card_data(space_id, card_id):
 
 # ─── Space Children / Overview Info ───────────────────────────────────────────
 
-@overview_bp.route('/boards/<int:space_id>/overview/children', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/children', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_space_children(space_id):
     """List all child folders and lists for the space."""
-    children = Board.query.filter_by(parent_id=space_id, is_archived=False).order_by(Board.name).all()
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    children = Board.query.filter_by(parent_id=space.id, is_archived=False).order_by(Board.name).all()
 
     folders = []
     lists = []
     for child in children:
         item = {
-            'id': child.id,
+            'id': child.public_id or str(child.id),
+            'internal_id': child.id,
             'name': child.name,
             'is_folder': child.is_folder,
+            'is_private': child.is_private,
             'color': child.color,
             'icon': child.icon,
             'tasks_count': sum(len(g.tasks) for g in child.groups) if not child.is_folder else 0,
         }
         if child.is_folder:
-            # Also get sub-lists in the folder
             sub_lists = Board.query.filter_by(parent_id=child.id, is_archived=False).all()
             item['children'] = [{
-                'id': sl.id, 'name': sl.name, 'tasks_count': sum(len(g.tasks) for g in sl.groups)
+                'id': sl.public_id or str(sl.id),
+                'internal_id': sl.id,
+                'name': sl.name,
+                'is_private': sl.is_private,
+                'color': sl.color,
+                'tasks_count': sum(len(g.tasks) for g in sl.groups)
             } for sl in sub_lists]
             folders.append(item)
         else:
@@ -331,15 +393,66 @@ def get_space_children(space_id):
     return jsonify({"folders": folders, "lists": lists})
 
 
-@overview_bp.route('/boards/<int:space_id>/overview/recent', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/recent', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_space_recent(space_id):
-    """Return recently modified tasks and docs in the space."""
-    # Get all list IDs under this space
-    list_ids = _get_all_descendant_list_ids(space_id)
-    list_ids.append(space_id)
+    """Return recently visited/accessed lists, folders, tasks, and docs under the space."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
 
-    # Recent tasks (last 10 modified)
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    # 1. Collect all folders and lists under this space to show in Recent Card
+    space_items = []
+    child_folders = Board.query.filter_by(parent_id=space.id, is_folder=True, is_archived=False).order_by(Board.created_at.desc()).all()
+    child_lists = Board.query.filter_by(parent_id=space.id, is_folder=False, is_archived=False).order_by(Board.created_at.desc()).all()
+
+    for f in child_folders:
+        space_items.append({
+            'id': f.public_id or str(f.id),
+            'internal_id': f.id,
+            'name': f.name,
+            'type': 'folder',
+            'is_folder': True,
+            'is_private': f.is_private,
+            'parent_name': space.name,
+            'color': f.color,
+            'icon': f.icon,
+        })
+        sub_lists = Board.query.filter_by(parent_id=f.id, is_folder=False, is_archived=False).order_by(Board.created_at.desc()).all()
+        for sl in sub_lists:
+            space_items.append({
+                'id': sl.public_id or str(sl.id),
+                'internal_id': sl.id,
+                'name': sl.name,
+                'type': 'list',
+                'is_folder': False,
+                'is_private': sl.is_private,
+                'parent_name': f.name,
+                'color': sl.color,
+                'icon': sl.icon,
+            })
+
+    for l in child_lists:
+        space_items.append({
+            'id': l.public_id or str(l.id),
+            'internal_id': l.id,
+            'name': l.name,
+            'type': 'list',
+            'is_folder': False,
+            'is_private': l.is_private,
+            'parent_name': space.name,
+            'color': l.color,
+            'icon': l.icon,
+        })
+
+    # 2. Collect descendant list IDs for tasks and docs
+    list_ids = _get_all_descendant_list_ids(space.id)
+    list_ids.append(space.id)
+
+    # 3. Recent tasks
     group_ids = [g.id for g in BoardGroup.query.filter(BoardGroup.board_id.in_(list_ids)).all()]
     recent_tasks = []
     if group_ids:
@@ -354,11 +467,11 @@ def get_space_recent(space_id):
                 'title': t.title,
                 'type': 'task',
                 'board_name': board.name if board else '',
-                'board_id': board.id if board else None,
+                'board_id': (board.public_id or str(board.id)) if board else None,
                 'created_at': t.created_at.isoformat() + 'Z',
             })
 
-    # Recent docs
+    # 4. Recent docs
     recent_docs = []
     try:
         docs = WorkspaceDoc.query.filter(
@@ -371,21 +484,32 @@ def get_space_recent(space_id):
                 'title': d.title,
                 'type': 'doc',
                 'board_name': board.name if board else '',
-                'board_id': board.id if board else None,
+                'board_id': (board.public_id or str(board.id)) if board else None,
                 'updated_at': d.updated_at.isoformat() + 'Z',
             })
     except Exception:
         pass
 
-    return jsonify({"tasks": recent_tasks, "docs": recent_docs})
+    return jsonify({
+        "items": space_items,
+        "tasks": recent_tasks,
+        "docs": recent_docs
+    })
 
 
-@overview_bp.route('/boards/<int:space_id>/overview/docs', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/docs', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_space_docs(space_id):
     """Return all docs in the space."""
-    list_ids = _get_all_descendant_list_ids(space_id)
-    list_ids.append(space_id)
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
+    list_ids = _get_all_descendant_list_ids(space.id)
+    list_ids.append(space.id)
 
     try:
         docs = WorkspaceDoc.query.filter(
@@ -404,15 +528,22 @@ def get_space_docs(space_id):
 
 # ─── Bookmarks (per-user) ────────────────────────────────────────────────────
 
-@overview_bp.route('/boards/<int:space_id>/overview/bookmarks', methods=['GET'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/bookmarks', methods=['GET', 'OPTIONS'])
+@jwt_required(optional=True)
 def get_bookmarks(space_id):
     """Get the current user's bookmarks for this space."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
     user, role, staff_id, admin_id = _get_user_ids()
     if not user:
         return jsonify([])
 
-    query = SpaceBookmark.query.filter_by(board_id=space_id)
+    query = SpaceBookmark.query.filter_by(board_id=space.id)
     if staff_id:
         query = query.filter_by(staff_id=staff_id)
     else:
@@ -422,10 +553,17 @@ def get_bookmarks(space_id):
     return jsonify([b.to_dict() for b in bookmarks])
 
 
-@overview_bp.route('/boards/<int:space_id>/overview/bookmarks', methods=['POST'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/bookmarks', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def create_bookmark(space_id):
     """Add a bookmark for the current user."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
     user, role, staff_id, admin_id = _get_user_ids()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
@@ -434,10 +572,10 @@ def create_bookmark(space_id):
     if not data or not data.get('title'):
         return jsonify({"error": "title is required"}), 400
 
-    max_pos = db.session.query(func.max(SpaceBookmark.position)).filter_by(board_id=space_id).scalar() or 0
+    max_pos = db.session.query(func.max(SpaceBookmark.position)).filter_by(board_id=space.id).scalar() or 0
 
     bookmark = SpaceBookmark(
-        board_id=space_id,
+        board_id=space.id,
         title=data['title'],
         url=data.get('url'),
         bookmark_type=data.get('bookmark_type', 'url'),
@@ -451,15 +589,22 @@ def create_bookmark(space_id):
     return jsonify(bookmark.to_dict()), 201
 
 
-@overview_bp.route('/boards/<int:space_id>/overview/bookmarks/<int:bookmark_id>', methods=['DELETE'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/bookmarks/<int:bookmark_id>', methods=['DELETE', 'OPTIONS'])
+@jwt_required(optional=True)
 def delete_bookmark(space_id, bookmark_id):
     """Delete a bookmark."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
     user, role, staff_id, admin_id = _get_user_ids()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
 
-    query = SpaceBookmark.query.filter_by(id=bookmark_id, board_id=space_id)
+    query = SpaceBookmark.query.filter_by(id=bookmark_id, board_id=space.id)
     if staff_id:
         query = query.filter_by(staff_id=staff_id)
     else:
@@ -476,21 +621,23 @@ def delete_bookmark(space_id, bookmark_id):
 
 # ─── Report Generation ────────────────────────────────────────────────────────
 
-@overview_bp.route('/boards/<int:space_id>/overview/generate-report', methods=['POST'])
-@jwt_required()
+@overview_bp.route('/boards/<string:space_id>/overview/generate-report', methods=['POST', 'OPTIONS'])
+@jwt_required(optional=True)
 def generate_report(space_id):
     """Generate a formatted report doc from overview card data."""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    space = _resolve_space(space_id)
+    if not space:
+        return jsonify({"error": "Space not found"}), 404
+
     user, role, staff_id, admin_id = _get_user_ids()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
 
-    space = Board.query.get(space_id)
-    if not space:
-        return jsonify({"error": "Space not found"}), 404
+    cards = OverviewCard.query.filter_by(board_id=space.id).order_by(OverviewCard.position).all()
 
-    cards = OverviewCard.query.filter_by(board_id=space_id).order_by(OverviewCard.position).all()
-
-    # Build HTML report
     now = datetime.utcnow().strftime('%B %d, %Y at %I:%M %p')
     html_parts = [
         f'<h1>{space.name} — Overview Report</h1>',
@@ -498,7 +645,6 @@ def generate_report(space_id):
         '<hr/>',
     ]
 
-    # Summary table
     if cards:
         html_parts.append('<h2>Summary</h2>')
         html_parts.append('<table style="width:100%; border-collapse:collapse; margin-bottom:24px;">')
@@ -512,7 +658,6 @@ def generate_report(space_id):
             if card.card_type != 'calculation':
                 continue
 
-            # Compute aggregate inline
             value = _compute_card_value(card)
             units_prefix = ''
             units_suffix = ''
@@ -531,7 +676,6 @@ def generate_report(space_id):
 
         html_parts.append('</tbody></table>')
 
-    # Detailed data per card
     for card in cards:
         if card.card_type != 'calculation' or not card.data_source_board_id:
             continue
@@ -541,7 +685,6 @@ def generate_report(space_id):
         if source_board:
             html_parts.append(f'<p style="color:#666;">Data source: {source_board.name}</p>')
 
-        # Get tasks
         group_ids = [g.id for g in BoardGroup.query.filter_by(board_id=card.data_source_board_id).all()]
         if not group_ids:
             html_parts.append('<p><em>No data</em></p>')
@@ -549,7 +692,6 @@ def generate_report(space_id):
 
         tasks = BoardTask.query.filter(BoardTask.group_id.in_(group_ids)).order_by(BoardTask.created_at.desc()).limit(100).all()
 
-        # Get measure values
         measure_values = {}
         measure_field_name = 'Value'
         if card.measure_field_id:
@@ -597,7 +739,7 @@ def generate_report(space_id):
 
     creator_name = getattr(user, 'name', None) or f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or "System"
     doc = WorkspaceDoc(
-        board_id=space_id,
+        board_id=space.id,
         title=f"{space.name} — Overview Report ({datetime.utcnow().strftime('%Y-%m-%d')})",
         content_html=html_content,
         created_by_name=creator_name,
