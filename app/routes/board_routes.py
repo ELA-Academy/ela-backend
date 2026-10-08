@@ -1119,7 +1119,9 @@ def create_task_update(task_id):
             try:
                 from app.utils.ms_graph_email import is_ms_graph_configured, send_email_via_graph_background, get_department_sender_email, format_task_comment_email
                 sender_dept_email = get_department_sender_email(actor)
-                email_html = format_task_comment_email(actor.name, task.title, content, board.name)
+                board_ref = board.public_id or board.id
+                task_url = f"https://app.elaaschool.org/admin/boards/{board_ref}?taskId={task.id}"
+                email_html = format_task_comment_email(actor.name, task.title, content, board.name, task_url=task_url)
                 
                 # Collect unique recipient emails & CC emails
                 recipient_emails = set()

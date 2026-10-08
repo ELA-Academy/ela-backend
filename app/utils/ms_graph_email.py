@@ -230,33 +230,108 @@ def get_dept_email_from_dept(dept):
         return dept.email
     return match_department_to_email(dept.name)
 
-def format_task_comment_email(sender_name, task_title, comment_content, board_name, frontend_url=None):
-    """Generate a styled HTML email body for a task comment sent via email."""
+def _format_email_body_content(content):
+    """Ensure email body maintains proper paragraphs, line breaks, and links across all mail clients."""
+    if not content:
+        return ""
+    import re
+    # Check if content already contains HTML structure
+    has_html = bool(re.search(r'<(p|div|table|ul|ol|li|h[1-6]|br)[\s>/]', content, re.IGNORECASE))
+    if has_html:
+        return f'<div style="font-size: 14px; line-height: 1.6; color: #1e293b;">{content}</div>'
+
+    # Split paragraphs by double newline for plain text
+    paras = str(content).replace('\r\n', '\n').replace('\r', '\n').split('\n\n')
+    formatted_paras = []
+    for p in paras:
+        p_clean = p.strip()
+        if not p_clean:
+            continue
+        # Convert internal single newlines to <br/>
+        p_with_br = p_clean.replace('\n', '<br/>')
+        # Autolink raw URLs
+        p_with_links = re.sub(
+            r'(https?://[^\s<]+)',
+            r'<a href="\1" style="color: #2563eb; text-decoration: underline;" target="_blank">\1</a>',
+            p_with_br
+        )
+        formatted_paras.append(f'<p style="margin: 0 0 14px 0; font-size: 14px; line-height: 1.6; color: #1e293b;">{p_with_links}</p>')
+
+    return '\n'.join(formatted_paras)
+
+
+def format_task_comment_email(sender_name, task_title, comment_content, board_name, frontend_url=None, task_url=None):
+    """Generate a clean, professional executive HTML email body for a task email communication."""
     import os
-    base_url = frontend_url or os.getenv('FRONTEND_URL', 'http://localhost:5173')
-    return f"""
-    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 20px 24px; border-radius: 12px 12px 0 0;">
-            <h2 style="color: #ffffff; margin: 0; font-size: 18px; font-weight: 600;">💬 Task Email Discussion</h2>
+    base_url = frontend_url or os.getenv('FRONTEND_URL', 'https://app.elaaschool.org')
+    formatted_body = _format_email_body_content(comment_content)
+
+    content_lower = (comment_content or "").lower()
+    already_has_sig = (
+        'ela academy administration' in content_lower or
+        'exceptional learning' in content_lower or
+        '323-282' in content_lower or
+        'elaaschool.org' in content_lower
+    )
+
+    task_link_html = ""
+    if task_url:
+        task_link_html = f"""
+        <div style="margin: 16px 0;">
+            <a href="{task_url}" style="color: #2563eb; font-size: 13px; text-decoration: underline;" target="_blank">{task_url}</a>
         </div>
-        <div style="background: #ffffff; padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px;">
-            <div style="margin-bottom: 16px;">
-                <span style="display: inline-block; background: #f1f5f9; color: #475569; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;">{board_name}</span>
-            </div>
-            <h3 style="margin: 0 0 12px 0; color: #0f172a; font-size: 16px;">📋 {task_title}</h3>
-            <div style="background: #f8fafc; border-left: 4px solid #3b82f6; padding: 16px; border-radius: 0 8px 8px 0; margin: 16px 0;">
-                <p style="margin: 0 0 8px 0; font-size: 12px; color: #64748b; font-weight: 600;">
-                    {sender_name} wrote:
-                </p>
-                <p style="margin: 0; color: #334155; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">{comment_content}</p>
-            </div>
-            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-            <p style="margin: 0; font-size: 12px; color: #94a3b8; text-align: center;">
-                Sent via ELA Academy Workspace Email Communication
-            </p>
-        </div>
-    </div>
-    """
+        """
+
+    signature_html = ""
+    if not already_has_sig:
+        signature_html = f"""
+        <table border="0" cellpadding="0" cellspacing="0" style="margin-top: 24px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b;">
+            <tr>
+                <td>
+                    <div style="font-size: 15px; font-weight: 700; color: #1e3a8a; font-family: 'Times New Roman', Georgia, serif;">
+                        ELA Academy Administration
+                    </div>
+                    <div style="font-size: 12.5px; color: #334155; margin-top: 2px;">
+                        Exceptional Learning & Arts Academy
+                    </div>
+                    <div style="font-size: 12.5px; color: #334155; margin-top: 2px;">
+                        Phone #: <a href="tel:3232823522" style="color: #2563eb; text-decoration: none;">323-282-ELAA (3522)</a>
+                    </div>
+                    <div style="font-size: 12.5px; margin-top: 2px;">
+                        <a href="https://www.elaaschool.org" style="color: #2563eb; text-decoration: underline;" target="_blank">www.elaaschool.org</a>
+                    </div>
+                    <div style="margin-top: 14px;">
+                        <img src="https://app.elaaschool.org/images/ELA-logo.png" alt="ELA Academy Logo" width="160" style="display: block; border-radius: 8px; border: 0; max-width: 100%; height: auto;" />
+                    </div>
+                    <div style="margin-top: 12px; font-size: 11px; font-style: italic; color: #64748b; font-family: Georgia, serif;">
+                        &ldquo;Tell me and I forget, teach me and I may remember, involve me and I learn.&rdquo; &mdash; Benjamin Franklin
+                    </div>
+                </td>
+            </tr>
+        </table>
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed; background-color: #ffffff; padding: 20px 0;">
+        <tr>
+            <td align="left">
+                <div style="max-width: 640px; margin: 0 auto; padding: 24px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #1e293b;">
+                    {formatted_body}
+                    {task_link_html}
+                    {signature_html}
+                </div>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
 
 def format_submitter_confirmation_email(form_name, submitter_name, answers_table_html, school_name="Ela Academy"):
     """Generate executive styled HTML email confirmation for form submitters."""
