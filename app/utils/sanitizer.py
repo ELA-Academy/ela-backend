@@ -8,7 +8,8 @@ def sanitize_dict(data, exclude_keys=None):
     if exclude_keys is None:
         exclude_keys = {
             'password', 'confirm_password', 'current_password', 'new_password', 
-            'token', 'device_id', 'description_html', 'content_html', 'notes_html'
+            'token', 'device_id', 'description_html', 'content_html', 'notes_html',
+            'content', 'message', 'body', 'html', 'email_html', 'html_content'
         }
 
     if isinstance(data, str):

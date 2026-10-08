@@ -231,25 +231,36 @@ def get_dept_email_from_dept(dept):
     return match_department_to_email(dept.name)
 
 def _format_email_body_content(content):
-    """Ensure email body maintains proper paragraphs, line breaks, and links across all mail clients."""
+    """Ensure email body maintains proper HTML structure, tables, and links across all mail clients."""
     if not content:
         return ""
     import re
-    # Check if content already contains HTML structure
-    has_html = bool(re.search(r'<(p|div|table|ul|ol|li|h[1-6]|br)[\s>/]', content, re.IGNORECASE))
-    if has_html:
-        return f'<div style="font-size: 14px; line-height: 1.6; color: #1e293b;">{content}</div>'
+    import html
 
-    # Split paragraphs by double newline for plain text
-    paras = str(content).replace('\r\n', '\n').replace('\r', '\n').split('\n\n')
+    # Strip dangerous executable scripts/iframes while keeping rich email formatting
+    clean_content = str(content)
+    clean_content = re.sub(r'<\s*script[^>]*>[\s\S]*?<\s*/\s*script\s*>', '', clean_content, flags=re.IGNORECASE)
+    clean_content = re.sub(r'<\s*iframe[^>]*>[\s\S]*?<\s*/\s*iframe\s*>', '', clean_content, flags=re.IGNORECASE)
+
+    # If content has escaped tag entities like &lt;table or &lt;div, unescape them so they render as actual HTML
+    if '&lt;' in clean_content and '&gt;' in clean_content:
+        test_unescaped = html.unescape(clean_content)
+        if re.search(r'<(p|div|table|tbody|thead|tr|td|th|ul|ol|li|h[1-6]|br|span|img|b|i|strong|em|a|font|hr)[\s>/]', test_unescaped, re.IGNORECASE):
+            clean_content = test_unescaped
+
+    # Check if content contains HTML markup
+    has_html = bool(re.search(r'<(p|div|table|tbody|thead|tr|td|th|ul|ol|li|h[1-6]|br|span|img|b|i|strong|em|a|font|hr)[\s>/]', clean_content, re.IGNORECASE))
+    if has_html:
+        return f'<div style="font-size: 14px; line-height: 1.6; color: #1e293b;">{clean_content}</div>'
+
+    # Plain text: convert paragraphs and newlines
+    paras = clean_content.replace('\r\n', '\n').replace('\r', '\n').split('\n\n')
     formatted_paras = []
     for p in paras:
         p_clean = p.strip()
         if not p_clean:
             continue
-        # Convert internal single newlines to <br/>
         p_with_br = p_clean.replace('\n', '<br/>')
-        # Autolink raw URLs
         p_with_links = re.sub(
             r'(https?://[^\s<]+)',
             r'<a href="\1" style="color: #2563eb; text-decoration: underline;" target="_blank">\1</a>',
