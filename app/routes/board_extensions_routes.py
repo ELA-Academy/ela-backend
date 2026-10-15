@@ -178,23 +178,17 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
         email_html_submitter = format_submitter_confirmation_email(form.name, sub_name, answers_table)
         email_html_internal = format_department_notification_email(form.name, sub_name, submitter_email, task.title, answers_table)
 
-        internal_recipients = set()
-        submitter_recipients = set()
+        # Extract form settings
+        settings = {}
+        if isinstance(form_struct, list):
+            for item in form_struct:
+                if isinstance(item, dict) and item.get('type') == 'settings':
+                    settings = item
+                    break
+        elif isinstance(form_struct, dict):
+            settings = form_struct.get('settings', {})
 
-        if submitter_email and '@' in submitter_email:
-            submitter_recipients.add(submitter_email.strip())
-
-        # 1. Form Creator
-        if form.creator_staff_id:
-            c_staff = Staff.query.get(form.creator_staff_id)
-            if c_staff and c_staff.email:
-                internal_recipients.add(c_staff.email)
-        if form.creator_super_admin_id:
-            c_admin = SuperAdmin.query.get(form.creator_super_admin_id)
-            if c_admin and c_admin.email:
-                internal_recipients.add(c_admin.email)
-
-        # 2. Target Department / Creator's Department
+        # Resolve department / creator's default email
         dept = None
         if getattr(form, 'target_department_id', None):
             dept = Department.query.get(form.target_department_id)
@@ -202,17 +196,6 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
             c_staff = Staff.query.get(form.creator_staff_id)
             if c_staff and c_staff.departments:
                 dept = c_staff.departments[0]
-
-        if dept:
-            if getattr(dept, 'email', None):
-                internal_recipients.add(dept.email)
-            for m in dept.staff_members:
-                if m.email:
-                    internal_recipients.add(m.email)
-
-        # Dispatch emails using department email sender
-        subject_internal = f"[Form Response] {form.name} — {sub_name}"
-        subject_submitter = f"Confirmation: Your submission for '{form.name}'"
 
         sender_dept_email = None
         if dept and getattr(dept, 'email', None):
@@ -222,17 +205,68 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
             if c_staff:
                 sender_dept_email = get_department_sender_email(c_staff)
 
+        # 1. Internal Notification Recipients
+        internal_recipients = set()
+        configured_emails = settings.get('notification_emails') or []
+        if isinstance(configured_emails, str):
+            configured_emails = [e.strip() for e in configured_emails.split(',') if e.strip()]
+
+        valid_configured = [e.strip() for e in configured_emails if e and '@' in e]
+
+        if valid_configured:
+            for email in valid_configured:
+                internal_recipients.add(email)
+        else:
+            # Default recipient: Department or Admin email or form creator
+            if dept and getattr(dept, 'email', None):
+                internal_recipients.add(dept.email)
+            elif form.creator_staff_id:
+                c_staff = Staff.query.get(form.creator_staff_id)
+                if c_staff and c_staff.email:
+                    internal_recipients.add(c_staff.email)
+            elif form.creator_super_admin_id:
+                c_admin = SuperAdmin.query.get(form.creator_super_admin_id)
+                if c_admin and c_admin.email:
+                    internal_recipients.add(c_admin.email)
+            else:
+                from app.utils.ms_graph_email import DEFAULT_SENDER
+                internal_recipients.add(DEFAULT_SENDER)
+
+            # Only notify all department staff members if explicitly configured in settings
+            if settings.get('notify_all_dept_members', False) and dept:
+                for m in dept.staff_members:
+                    if m.email:
+                        internal_recipients.add(m.email)
+
+        # 2. Submitter Confirmation Email
+        send_confirmation = settings.get('send_confirmation', True)
+        if str(send_confirmation).lower() in ('false', '0'):
+            send_confirmation = False
+
+        submitter_recipients = set()
+        if send_confirmation and submitter_email and '@' in submitter_email:
+            submitter_recipients.add(submitter_email.strip())
+
+        from app.utils.ms_graph_email import DEFAULT_SENDER
+        confirmation_sender = settings.get('confirmation_sender_email')
+        if not confirmation_sender or '@' not in str(confirmation_sender):
+            confirmation_sender = sender_dept_email or DEFAULT_SENDER
+
+        # Dispatch emails
+        subject_internal = f"[Form Response] {form.name} — {sub_name}"
+        subject_submitter = f"Confirmation: Your submission for '{form.name}'"
+
         if internal_recipients:
             if is_ms_graph_configured():
-                send_email_via_graph_background(subject_internal, list(internal_recipients), email_html_internal, sender_email=sender_dept_email)
+                send_email_via_graph_background(subject_internal, list(internal_recipients), email_html_internal, sender_email=sender_dept_email or confirmation_sender)
             else:
-                send_email_in_background(subject_internal, list(internal_recipients), {"html_content": email_html_internal, "message": email_html_internal}, sender_email=sender_dept_email)
+                send_email_in_background(subject_internal, list(internal_recipients), {"html_content": email_html_internal, "message": email_html_internal}, sender_email=sender_dept_email or confirmation_sender)
 
         if submitter_recipients:
             if is_ms_graph_configured():
-                send_email_via_graph_background(subject_submitter, list(submitter_recipients), email_html_submitter, sender_email=sender_dept_email)
+                send_email_via_graph_background(subject_submitter, list(submitter_recipients), email_html_submitter, sender_email=confirmation_sender)
             else:
-                send_email_in_background(subject_submitter, list(submitter_recipients), {"html_content": email_html_submitter, "message": email_html_submitter}, sender_email=sender_dept_email)
+                send_email_in_background(subject_submitter, list(submitter_recipients), {"html_content": email_html_submitter, "message": email_html_submitter}, sender_email=confirmation_sender)
     except Exception as e:
         print("Failed to dispatch form response emails:", e)
 
@@ -695,6 +729,11 @@ def create_board_form(board_id):
     name = data.get('name')
     description = data.get('description')
     form_structure = data.get('form_structure') # list of questions
+    settings_data = data.get('settings')
+    if settings_data and isinstance(form_structure, list):
+        has_settings = any(isinstance(item, dict) and item.get('type') == 'settings' for item in form_structure)
+        if not has_settings:
+            form_structure.append({"id": "settings", "type": "settings", **settings_data})
     header_image_url = data.get('header_image_url')
 
     if not name or not form_structure:
@@ -728,6 +767,11 @@ def update_board_form(form_id):
     name = data.get('name')
     description = data.get('description')
     form_structure = data.get('form_structure')
+    settings_data = data.get('settings')
+    if form_structure is not None and isinstance(form_structure, list) and settings_data:
+        updated_structure = [item for item in form_structure if not (isinstance(item, dict) and item.get('type') == 'settings')]
+        updated_structure.append({"id": "settings", "type": "settings", **settings_data})
+        form_structure = updated_structure
     header_image_url = data.get('header_image_url')
     is_active = data.get('is_active')
 
@@ -745,6 +789,68 @@ def update_board_form(form_id):
     db.session.commit()
     log_activity(actor, f"Updated workspace form: '{form.name}' in board '{board.name}'")
     return jsonify(form.to_dict()), 200
+
+@board_extensions_bp.route('/forms/available-emails', methods=['GET'])
+@jwt_required()
+def get_available_form_emails():
+    actor, role = get_actor()
+    from app.models.department_model import Department
+    from app.models.staff_model import Staff
+    from app.models.super_admin_model import SuperAdmin
+    from app.utils.ms_graph_email import ALLOWED_SENDERS
+
+    result = []
+    seen = set()
+
+    # 1. Official Department mailboxes
+    for key, email in ALLOWED_SENDERS.items():
+        clean = email.strip().lower()
+        if clean not in seen:
+            seen.add(clean)
+            result.append({
+                "label": f"{key.upper()} Department ({email})",
+                "email": email,
+                "category": "Department Mailbox",
+                "is_admin": True
+            })
+
+    departments = Department.query.filter_by(is_active=True).all()
+    for d in departments:
+        if d.email and d.email.strip().lower() not in seen:
+            seen.add(d.email.strip().lower())
+            result.append({
+                "label": f"{d.name} ({d.email})",
+                "email": d.email.strip(),
+                "category": "Department Mailbox",
+                "is_admin": True
+            })
+
+    # 2. Super Administrators
+    superadmins = SuperAdmin.query.all()
+    for sa in superadmins:
+        if sa.email and sa.email.strip().lower() not in seen:
+            seen.add(sa.email.strip().lower())
+            result.append({
+                "label": f"{sa.name or 'Admin'} ({sa.email})",
+                "email": sa.email.strip(),
+                "category": "Administrator",
+                "is_admin": True
+            })
+
+    # 3. Staff members
+    staff_members = Staff.query.filter_by(is_active=True).all()
+    for st in staff_members:
+        if st.email and st.email.strip().lower() not in seen:
+            seen.add(st.email.strip().lower())
+            depts = ", ".join([dept.name for dept in st.departments]) if st.departments else "Staff"
+            result.append({
+                "label": f"{st.name} — {depts} ({st.email})",
+                "email": st.email.strip(),
+                "category": "Staff Member",
+                "is_admin": False
+            })
+
+    return jsonify(result), 200
 
 @board_extensions_bp.route('/forms/<int:form_id>', methods=['DELETE'])
 @jwt_required()
