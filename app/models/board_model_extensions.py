@@ -92,6 +92,16 @@ class BoardFormConfig(db.Model):
                 struct = json.loads(self.form_structure_json)
             except:
                 pass
+
+        settings = {}
+        if isinstance(struct, list):
+            for item in struct:
+                if isinstance(item, dict) and item.get('type') == 'settings':
+                    settings = item
+                    break
+        elif isinstance(struct, dict):
+            settings = struct.get('settings', {})
+
         from app.models.board_model import Board
         board = Board.query.get(self.board_id)
         board_uuid = board.public_id if board else self.board_id
@@ -101,6 +111,7 @@ class BoardFormConfig(db.Model):
             'name': self.name,
             'description': self.description,
             'form_structure': struct,
+            'settings': settings,
             'is_active': self.is_active,
             'header_image_url': self.header_image_url,
             'creator_staff_id': self.creator_staff_id,
