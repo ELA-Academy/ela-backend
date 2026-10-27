@@ -53,7 +53,8 @@ def create_staff():
     if Staff.query.filter_by(email=email).first():
         return jsonify({"error": "Email already in use"}), 409
 
-    new_staff = Staff(name=name, email=email)
+    role = data.get('role', 'staff')
+    new_staff = Staff(name=name, email=email, role=role)
     
     is_invite = False
     if not password:
@@ -136,6 +137,8 @@ def update_staff(id):
     staff.email = data.get('email', staff.email)
     if 'is_active' in data:
         staff.is_active = bool(data['is_active'])
+    if 'role' in data:
+        staff.role = data['role']
 
     if 'department_ids' in data:
         staff.departments.clear()
