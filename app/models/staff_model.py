@@ -14,6 +14,7 @@ class Staff(db.Model):
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
+    role = db.Column(db.String(50), default='staff', nullable=True) # 'staff' or 'teacher'
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -47,6 +48,7 @@ class Staff(db.Model):
             'id': self.id,
             'name': self.name,
             'email': self.email,
+            'role': getattr(self, 'role', 'staff') or 'staff',
             'is_active': self.is_active,
             'department_ids': [d.id for d in self.departments],
             'department_names': [d.name for d in self.departments],
