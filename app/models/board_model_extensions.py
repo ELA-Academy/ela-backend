@@ -102,6 +102,8 @@ class BoardFormConfig(db.Model):
         elif isinstance(struct, dict):
             settings = struct.get('settings', {})
 
+        background_image_url = settings.get('background_image_url') or ''
+
         from app.models.board_model import Board
         board = Board.query.get(self.board_id)
         board_uuid = board.public_id if board else self.board_id
@@ -114,6 +116,7 @@ class BoardFormConfig(db.Model):
             'settings': settings,
             'is_active': self.is_active,
             'header_image_url': self.header_image_url,
+            'background_image_url': background_image_url,
             'creator_staff_id': self.creator_staff_id,
             'creator_super_admin_id': self.creator_super_admin_id,
             'target_department_id': self.target_department_id,
