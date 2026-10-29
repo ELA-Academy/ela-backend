@@ -169,12 +169,13 @@ def login():
             return jsonify({"msg": "Invalid credentials"}), 401
 
         clear_failed_attempts(email)
+        staff_role = getattr(staff_member, 'role', 'staff') or 'staff'
         additional_claims = {
             "id": staff_member.id,
             "name": staff_member.name,
             "departmentNames": [d.name for d in staff_member.departments],
             "dashboardRoutes": [d.dashboard_route for d in staff_member.departments if d.dashboard_route],
-            "role": "staff"
+            "role": staff_role
         }
 
         # Check 30-day Remembered Device
@@ -196,7 +197,7 @@ def login():
         login_otp_record = LoginOTP(
             email=staff_member.email,
             otp=otp,
-            role="staff",
+            role=staff_role,
             claims=additional_claims,
             expiry=datetime.utcnow() + timedelta(minutes=10)
         )
@@ -206,7 +207,7 @@ def login():
         print(f"=== [OTP LOG] Staff '{staff_member.email}' OTP: {otp} ===")
         send_otp_email(mail, staff_member.email, otp)
 
-        return jsonify({"otp_required": True, "email": staff_member.email, "role": "staff"}), 200
+        return jsonify({"otp_required": True, "email": staff_member.email, "role": staff_role}), 200
 
     # 3. Parent check
     parent_member = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(email)).first()

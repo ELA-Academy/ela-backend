@@ -729,7 +729,10 @@ def create_board_form(board_id):
     name = data.get('name')
     description = data.get('description')
     form_structure = data.get('form_structure') # list of questions
-    settings_data = data.get('settings')
+    settings_data = data.get('settings') or {}
+    background_image_url = data.get('background_image_url')
+    if background_image_url is not None:
+        settings_data['background_image_url'] = background_image_url
     if settings_data and isinstance(form_structure, list):
         has_settings = any(isinstance(item, dict) and item.get('type') == 'settings' for item in form_structure)
         if not has_settings:
@@ -768,6 +771,11 @@ def update_board_form(form_id):
     description = data.get('description')
     form_structure = data.get('form_structure')
     settings_data = data.get('settings')
+    background_image_url = data.get('background_image_url')
+    if background_image_url is not None:
+        if settings_data is None:
+            settings_data = {}
+        settings_data['background_image_url'] = background_image_url
     if form_structure is not None and isinstance(form_structure, list) and settings_data:
         updated_structure = [item for item in form_structure if not (isinstance(item, dict) and item.get('type') == 'settings')]
         updated_structure.append({"id": "settings", "type": "settings", **settings_data})
@@ -1166,13 +1174,25 @@ def upload_public_form_file():
 @board_extensions_bp.route('/public/forms/<int:form_id>', methods=['GET'])
 def get_public_form_details(form_id):
     form = BoardFormConfig.query.get_or_404(form_id)
+    struct = json.loads(form.form_structure_json) if form.form_structure_json else []
+    settings = {}
+    if isinstance(struct, list):
+        for item in struct:
+            if isinstance(item, dict) and item.get('type') == 'settings':
+                settings = item
+                break
+    elif isinstance(struct, dict):
+        settings = struct.get('settings', {})
+
     return jsonify({
         "id": form.id,
         "board_id": form.board_id,
         "name": form.name,
         "description": form.description,
         "header_image_url": form.header_image_url,
-        "form_structure": json.loads(form.form_structure_json) if form.form_structure_json else []
+        "background_image_url": settings.get("background_image_url", ""),
+        "settings": settings,
+        "form_structure": struct
     }), 200
 
 @board_extensions_bp.route('/public/forms/submit/<int:form_id>', methods=['POST'])

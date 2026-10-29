@@ -48,6 +48,7 @@ def ensure_runtime_schema_updates():
 
     if inspector.has_table('staff'):
         add_column_if_missing('staff', 'notification_preferences', 'TEXT NULL')
+        add_column_if_missing('staff', 'role', "VARCHAR(50) NULL DEFAULT 'staff'")
 
     if inspector.has_table('conversations'):
         add_column_if_missing('conversations', 'conversation_type', "VARCHAR(50) NOT NULL DEFAULT 'direct'")
