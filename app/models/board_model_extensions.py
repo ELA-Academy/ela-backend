@@ -1,4 +1,5 @@
 import json
+import uuid
 from app.models import db
 from datetime import datetime
 
@@ -72,6 +73,7 @@ class BoardFormConfig(db.Model):
     __tablename__ = 'board_form_configs'
 
     id = db.Column(db.Integer, primary_key=True)
+    uuid = db.Column(db.String(64), unique=True, default=lambda: str(uuid.uuid4()), nullable=True)
     board_id = db.Column(db.Integer, db.ForeignKey('boards.id', ondelete='CASCADE'), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text, nullable=True)
@@ -84,6 +86,23 @@ class BoardFormConfig(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     target_department = db.relationship('Department')
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+
+    @classmethod
+    def get_by_id_or_uuid(cls, identifier):
+        if not identifier:
+            return None
+        clean_id = str(identifier).strip()
+        found = cls.query.filter_by(uuid=clean_id).first()
+        if found:
+            return found
+        if clean_id.isdigit():
+            return cls.query.get(int(clean_id))
+        return None
 
     def to_dict(self):
         struct = []
@@ -107,8 +126,17 @@ class BoardFormConfig(db.Model):
         from app.models.board_model import Board
         board = Board.query.get(self.board_id)
         board_uuid = board.public_id if board else self.board_id
+
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
         return {
             'id': self.id,
+            'uuid': self.uuid,
             'board_id': board_uuid,
             'name': self.name,
             'description': self.description,

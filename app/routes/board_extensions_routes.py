@@ -757,11 +757,13 @@ def create_board_form(board_id):
     log_activity(actor, f"Created workspace form: '{name}' in board '{board.name}'")
     return jsonify(form.to_dict()), 201
 
-@board_extensions_bp.route('/forms/<int:form_id>', methods=['PUT'])
+@board_extensions_bp.route('/forms/<string:form_id>', methods=['PUT'])
 @jwt_required()
 def update_board_form(form_id):
     actor, role = get_actor()
-    form = BoardFormConfig.query.get_or_404(form_id)
+    form = BoardFormConfig.get_by_id_or_uuid(form_id)
+    if not form:
+        return jsonify({"error": "Form not found"}), 404
     board = Board.query.get_or_404(form.board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
@@ -860,11 +862,13 @@ def get_available_form_emails():
 
     return jsonify(result), 200
 
-@board_extensions_bp.route('/forms/<int:form_id>', methods=['DELETE'])
+@board_extensions_bp.route('/forms/<string:form_id>', methods=['DELETE'])
 @jwt_required()
 def delete_board_form(form_id):
     actor, role = get_actor()
-    form = BoardFormConfig.query.get_or_404(form_id)
+    form = BoardFormConfig.get_by_id_or_uuid(form_id)
+    if not form:
+        return jsonify({"error": "Form not found"}), 404
     board = Board.query.get_or_404(form.board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
@@ -874,12 +878,14 @@ def delete_board_form(form_id):
     log_activity(actor, f"Deleted form '{form.name}' from board '{board.name}'")
     return jsonify({"message": "Form deleted"}), 200
 
-@board_extensions_bp.route('/forms/submit/<int:form_id>', methods=['POST'])
+@board_extensions_bp.route('/forms/submit/<string:form_id>', methods=['POST'])
 @jwt_required()
 def submit_form_response(form_id):
     try:
         actor, role = get_actor()
-        form = BoardFormConfig.query.get_or_404(form_id)
+        form = BoardFormConfig.get_by_id_or_uuid(form_id)
+        if not form:
+            return jsonify({"error": "Form not found"}), 404
         board = Board.query.get_or_404(form.board_id)
 
         data = request.get_json() or {}
@@ -1171,9 +1177,11 @@ def upload_public_form_file():
 # 2b. Public Ingestion Forms APIs (No Auth required)
 # ==========================================
 
-@board_extensions_bp.route('/public/forms/<int:form_id>', methods=['GET'])
+@board_extensions_bp.route('/public/forms/<string:form_id>', methods=['GET'])
 def get_public_form_details(form_id):
-    form = BoardFormConfig.query.get_or_404(form_id)
+    form = BoardFormConfig.get_by_id_or_uuid(form_id)
+    if not form:
+        return jsonify({"error": "Form not found"}), 404
     struct = json.loads(form.form_structure_json) if form.form_structure_json else []
     settings = {}
     if isinstance(struct, list):
@@ -1185,7 +1193,8 @@ def get_public_form_details(form_id):
         settings = struct.get('settings', {})
 
     return jsonify({
-        "id": form.id,
+        "id": form.uuid or form.id,
+        "uuid": form.uuid,
         "board_id": form.board_id,
         "name": form.name,
         "description": form.description,
@@ -1195,10 +1204,12 @@ def get_public_form_details(form_id):
         "form_structure": struct
     }), 200
 
-@board_extensions_bp.route('/public/forms/submit/<int:form_id>', methods=['POST'])
+@board_extensions_bp.route('/public/forms/submit/<string:form_id>', methods=['POST'])
 def submit_public_form_response(form_id):
     try:
-        form = BoardFormConfig.query.get_or_404(form_id)
+        form = BoardFormConfig.get_by_id_or_uuid(form_id)
+        if not form:
+            return jsonify({"error": "Form not found"}), 404
         board = Board.query.get_or_404(form.board_id)
 
         data = request.get_json() or {}
@@ -1468,11 +1479,13 @@ def submit_public_form_response(form_id):
         traceback.print_exc()
         return jsonify({"error": f"Failed to process form submission: {str(e)}"}), 500
 
-@board_extensions_bp.route('/forms/<int:form_id>/responses', methods=['GET'])
+@board_extensions_bp.route('/forms/<string:form_id>/responses', methods=['GET'])
 @jwt_required()
 def get_form_responses(form_id):
     actor, role = get_actor()
-    form = BoardFormConfig.query.get_or_404(form_id)
+    form = BoardFormConfig.get_by_id_or_uuid(form_id)
+    if not form:
+        return jsonify({"error": "Form not found"}), 404
     board = Board.query.get_or_404(form.board_id)
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
