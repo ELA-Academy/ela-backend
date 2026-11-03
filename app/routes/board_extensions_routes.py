@@ -152,7 +152,7 @@ def dispatch_form_response_emails(form, task, response_data, form_struct, submit
         rows_html = []
         for question in form_struct:
             qtype = question.get('type', '')
-            if qtype in ('welcome', 'thankyou'):
+            if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
             qid = str(question.get('id'))
             label = question.get('label') or f"Field {qid}"
@@ -932,7 +932,7 @@ def submit_form_response(form_id):
             if answer is None or str(answer).strip() == '':
                 continue
 
-            if qtype in ('welcome', 'thankyou'):
+            if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
 
             if qtype == 'file' or mapping == 'file':
@@ -992,7 +992,7 @@ def submit_form_response(form_id):
                     new_field_type = 'currency'
                 elif qtype == 'date':
                     new_field_type = 'date'
-                elif qtype in ('select', 'dropdown', 'choice'):
+                elif qtype in ('select', 'dropdown', 'choice', 'multiple_choice'):
                     new_field_type = 'dropdown'
 
                 config_data = None
@@ -1031,7 +1031,7 @@ def submit_form_response(form_id):
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
         for question in form_struct:
             qtype = question.get('type', '')
-            if qtype in ('welcome', 'thankyou'):
+            if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
             qid = str(question.get('id'))
             label = question.get('label') or f"Field {qid}"
@@ -1248,7 +1248,7 @@ def submit_public_form_response(form_id):
             if answer is None or str(answer).strip() == '':
                 continue
 
-            if qtype in ('welcome', 'thankyou'):
+            if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
 
             if qtype == 'file' or mapping == 'file':
@@ -1308,7 +1308,7 @@ def submit_public_form_response(form_id):
                     new_field_type = 'currency'
                 elif qtype == 'date':
                     new_field_type = 'date'
-                elif qtype in ('select', 'dropdown', 'choice'):
+                elif qtype in ('select', 'dropdown', 'choice', 'multiple_choice'):
                     new_field_type = 'dropdown'
 
                 config_data = None
@@ -1347,7 +1347,7 @@ def submit_public_form_response(form_id):
         submission_notes = [f"<h3>📋 Form Submission Details ({form.name})</h3>", "<ul>"]
         for question in form_struct:
             qtype = question.get('type', '')
-            if qtype in ('welcome', 'thankyou'):
+            if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
             qid = str(question.get('id'))
             label = question.get('label') or f"Field {qid}"
