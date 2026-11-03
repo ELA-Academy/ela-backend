@@ -113,10 +113,21 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('conversation_participants', 'is_following', 'BOOLEAN NOT NULL DEFAULT TRUE')
 
     if inspector.has_table('board_form_configs'):
+        add_column_if_missing('board_form_configs', 'uuid', 'VARCHAR(64) NULL')
         add_column_if_missing('board_form_configs', 'header_image_url', 'VARCHAR(500) NULL')
         add_column_if_missing('board_form_configs', 'creator_staff_id', 'INTEGER NULL')
         add_column_if_missing('board_form_configs', 'creator_super_admin_id', 'INTEGER NULL')
         add_column_if_missing('board_form_configs', 'target_department_id', 'INTEGER NULL')
+        try:
+            from app.models.board_model_extensions import BoardFormConfig
+            import uuid
+            missing_uuids = BoardFormConfig.query.filter((BoardFormConfig.uuid == None) | (BoardFormConfig.uuid == '')).all()
+            if missing_uuids:
+                for item in missing_uuids:
+                    item.uuid = str(uuid.uuid4())
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
 
     if inspector.has_table('board_task_assignees'):
         add_column_if_missing('board_task_assignees', 'department_id', 'INTEGER NULL')
