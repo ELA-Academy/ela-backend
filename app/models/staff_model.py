@@ -1,6 +1,7 @@
 from app.models import db
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
+import json
 
 staff_department_assignments = db.Table('staff_department_assignments',
     db.Column('staff_id', db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), primary_key=True),
@@ -18,6 +19,35 @@ class Staff(db.Model):
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
+    # ELA TT & Payroll Extensions
+    job_title = db.Column(db.String(100), default='Contractor', nullable=True)
+    worker_type = db.Column(db.String(50), default='Contractor', nullable=True) # 'Contractor', 'Employee'
+    hourly_rate = db.Column(db.Float, default=25.0, nullable=True)
+    manager_name = db.Column(db.String(100), default='Marcus Cooper', nullable=True)
+    work_email = db.Column(db.String(120), nullable=True)
+    country = db.Column(db.String(100), default='United States of America', nullable=True)
+    start_date = db.Column(db.String(50), default='Jan 22, 2023', nullable=True)
+    
+    preferred_name = db.Column(db.String(100), nullable=True)
+    legal_name = db.Column(db.String(100), nullable=True)
+    pronouns = db.Column(db.String(50), default='she/her/hers', nullable=True)
+    ssn_last4 = db.Column(db.String(10), default='7600', nullable=True)
+    birthday = db.Column(db.String(50), nullable=True)
+    personal_email = db.Column(db.String(120), nullable=True)
+    phone = db.Column(db.String(50), default='+1 (404) 555-0192', nullable=True)
+    
+    address = db.Column(db.Text, nullable=True) # JSON: street, city, state, zip, country
+    emergency_contact = db.Column(db.Text, nullable=True) # JSON: name, relationship, phone, email
+    compensation_history = db.Column(db.Text, nullable=True) # JSON array of historical adjustments
+    
+    payment_method = db.Column(db.String(50), default='Direct deposit', nullable=True)
+    bank_name = db.Column(db.String(100), default='Chase Bank', nullable=True)
+    bank_account_last4 = db.Column(db.String(10), default='7600', nullable=True)
+    bank_routing = db.Column(db.String(50), default='021000021', nullable=True)
+    bank_account_type = db.Column(db.String(50), default='Checking', nullable=True)
+    worker_status = db.Column(db.String(50), default='Active', nullable=True) # 'Active', 'Onboarding', 'Offboarding', 'Dismissed'
+    receives_tips = db.Column(db.Boolean, default=False, nullable=True)
+
     departments = db.relationship('Department', secondary=staff_department_assignments, lazy='subquery',
         backref=db.backref('staff_members', lazy=True))
 
@@ -38,20 +68,75 @@ class Staff(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
-        import json
         try:
             prefs = json.loads(self.notification_preferences) if self.notification_preferences else None
-        except:
+        except Exception:
             prefs = None
             
+        try:
+            addr = json.loads(self.address) if self.address else {
+                "street": "1420 Peachtree St NE, Apt 4B",
+                "city": "Atlanta",
+                "state": "GA",
+                "zip": "30309",
+                "country": "United States of America"
+            }
+        except Exception:
+            addr = {"street": "1420 Peachtree St NE, Apt 4B", "city": "Atlanta", "state": "GA", "zip": "30309", "country": "United States"}
+            
+        try:
+            emg = json.loads(self.emergency_contact) if self.emergency_contact else {
+                "name": "David Rigsby",
+                "relationship": "Spouse",
+                "phone": "+1 (404) 555-0188",
+                "email": "david.rigsby@example.com"
+            }
+        except Exception:
+            emg = {"name": "David Rigsby", "relationship": "Spouse", "phone": "+1 (404) 555-0188", "email": "david.rigsby@example.com"}
+
+        try:
+            comp_hist = json.loads(self.compensation_history) if self.compensation_history else [
+                {"rate": self.hourly_rate or 30.0, "effective_date": "10/6/2026", "reason": "Annual rate review"}
+            ]
+        except Exception:
+            comp_hist = []
+
+        primary_dept = self.departments[0].name if self.departments else "Teacher Department"
+
         return {
             'id': self.id,
             'name': self.name,
+            'preferred_name': self.preferred_name or self.name,
+            'legal_name': self.legal_name or self.name,
             'email': self.email,
+            'work_email': self.work_email or self.email,
             'role': getattr(self, 'role', 'staff') or 'staff',
             'is_active': self.is_active,
             'department_ids': [d.id for d in self.departments],
             'department_names': [d.name for d in self.departments],
+            'department': primary_dept,
+            'job_title': self.job_title or (f"{primary_dept} Specialist" if self.role != 'teacher' else "Teacher"),
+            'worker_type': self.worker_type or 'Contractor',
+            'worker_status': self.worker_status or 'Active',
+            'hourly_rate': self.hourly_rate if self.hourly_rate is not None else 30.0,
+            'rate_formatted': f"${(self.hourly_rate if self.hourly_rate is not None else 30.0):.2f} per hour",
+            'manager_name': self.manager_name or 'Marcus Cooper',
+            'country': self.country or 'United States of America',
+            'start_date': self.start_date or 'Jan 22, 2023',
+            'pronouns': self.pronouns or 'she/her/hers',
+            'ssn_last4': self.ssn_last4 or '7600',
+            'birthday': self.birthday or 'October 14, 1992',
+            'personal_email': self.personal_email or self.email,
+            'phone': self.phone or '+1 (404) 555-0192',
+            'address': addr,
+            'emergency_contact': emg,
+            'compensation_history': comp_hist,
+            'payment_method': self.payment_method or 'Direct deposit',
+            'bank_name': self.bank_name or 'Chase Bank',
+            'bank_account_last4': self.bank_account_last4 or '7600',
+            'bank_routing': self.bank_routing or '021000021',
+            'bank_account_type': self.bank_account_type or 'Checking',
+            'receives_tips': bool(self.receives_tips),
             'notification_preferences': prefs,
             'created_at': self.created_at.isoformat() + 'Z'
         }

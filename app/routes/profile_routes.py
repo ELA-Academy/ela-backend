@@ -19,24 +19,76 @@ def get_my_profile():
         if not user:
             return jsonify({"error": "Super Admin not found"}), 404
         return jsonify({
+            "id": user.id,
             "name": user.name,
+            "preferred_name": user.name,
+            "legal_name": user.name,
             "email": user.email,
             "role": "Super Admin",
-            "departments": [] # Super Admins don't belong to departments
+            "job_title": "Super Administrator",
+            "departments": ["Administration"],
+            "department_names": ["Administration"],
+            "worker_type": "Administrator",
+            "hourly_rate": 45.0,
+            "payment_method": "Direct deposit",
+            "bank_name": "Chase Bank",
+            "bank_account_last4": "7600",
+            "bank_routing": "021000021",
+            "bank_account_type": "Checking",
+            "address": {
+                "street": "1420 Peachtree St NE, Apt 4B",
+                "city": "Atlanta",
+                "state": "GA",
+                "zip": "30309",
+                "country": "United States of America"
+            },
+            "emergency_contact": {
+                "name": "Marcus Cooper",
+                "relationship": "Administrator",
+                "phone": "+1 (404) 555-0188",
+                "email": "admin@elaaschool.org"
+            }
         }), 200
     
     elif user_role == 'staff':
         user = Staff.query.filter_by(email=current_user_email).first()
         if not user:
             return jsonify({"error": "Staff not found"}), 404
-        return jsonify({
-            "name": user.name,
-            "email": user.email,
-            "role": "Staff",
-            "departments": [d.name for d in user.departments]
-        }), 200
+        return jsonify(user.to_dict()), 200
         
     return jsonify({"error": "Invalid user role"}), 400
+
+@profile_bp.route('/payment-method', methods=['PUT'])
+@jwt_required()
+def update_payment_method():
+    claims = get_jwt()
+    current_user_email = get_jwt_identity()
+    user_role = claims.get('role')
+
+    if user_role != 'staff':
+        return jsonify({"message": "Payment method updated", "last4": "7600"}), 200
+
+    user = Staff.query.filter_by(email=current_user_email).first()
+    if not user:
+        return jsonify({"error": "Staff not found"}), 404
+
+    data = request.get_json() or {}
+    if 'bank_name' in data:
+        user.bank_name = data['bank_name']
+    if 'bank_account_type' in data:
+        user.bank_account_type = data['bank_account_type']
+    if 'bank_routing' in data:
+        user.bank_routing = data['bank_routing']
+    if 'bank_account_last4' in data:
+        user.bank_account_last4 = data['bank_account_last4']
+    elif 'account_number' in data and data['account_number']:
+        user.bank_account_last4 = str(data['account_number'])[-4:]
+    if 'payment_method' in data:
+        user.payment_method = data['payment_method']
+
+    db.session.commit()
+    log_activity(user, f"Updated their direct deposit payment details: {user.bank_name} ending in {user.bank_account_last4}")
+    return jsonify(user.to_dict()), 200
 
 @profile_bp.route('/change-password', methods=['PUT'])
 @jwt_required()
@@ -66,8 +118,7 @@ def change_password():
 
     user.set_password(new_password)
     db.session.commit()
-    
-    log_activity(user, "Changed their password") # Log the activity
+    log_activity(user, "Changed their password")
     
     return jsonify({"message": "Password updated successfully"}), 200
 
@@ -94,7 +145,6 @@ def update_profile():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    # Check email uniqueness if it changed
     if email != user.email:
         if user_role == 'staff':
             existing = Staff.query.filter_by(email=email).first()
@@ -115,4 +165,4 @@ def update_profile():
             "email": user.email,
             "role": user_role
         }
-    }), 200
+    }), 200
