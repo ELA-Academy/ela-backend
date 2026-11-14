@@ -14,6 +14,7 @@ def register_blueprints(app):
     app.register_blueprint(board_bp, url_prefix="/api/boards")
     from .board_extensions_routes import board_extensions_bp
     app.register_blueprint(board_extensions_bp, url_prefix="/api/board-extensions")
+    app.register_blueprint(board_extensions_bp, url_prefix="/api/board_extensions", name="board_extensions_compat_bp")
     from .overview_routes import overview_bp
     app.register_blueprint(overview_bp, url_prefix="/api")
 
