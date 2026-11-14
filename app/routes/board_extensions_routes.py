@@ -85,7 +85,7 @@ def format_ans_html(ans, label="", qtype=""):
         url = ans.get('file_url', '')
         filename = ans.get('filename') or 'View File'
         if url:
-            is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+            is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in url.lower() or any(url.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif'))
             link_html = f'<a href="{url}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{filename} 🔗</a>'
             if is_img:
                 link_html += f'<br/><a href="{url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{url}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
@@ -98,7 +98,7 @@ def format_ans_html(ans, label="", qtype=""):
     s_ans = str(ans).strip()
     if s_ans.startswith('/static/') or s_ans.startswith('http://') or s_ans.startswith('https://'):
         fname = s_ans.split('/')[-1]
-        is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'))
+        is_img = qtype == 'signature' or 'signature' in label.lower() or 'signature' in s_ans.lower() or any(s_ans.lower().endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif'))
         link_html = f'<a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="color: #673de6; font-weight: 600; text-decoration: underline;">{fname} 🔗</a>'
         if is_img:
             link_html += f'<br/><a href="{s_ans}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 6px;"><img src="{s_ans}" alt="{label}" style="max-height: 100px; max-width: 250px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px; background-color: #ffffff; display: block;" /></a>'
@@ -941,13 +941,17 @@ def submit_form_response(form_id):
             if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
 
-            if qtype == 'file' or mapping == 'file':
+            if qtype in ('file', 'signature') or mapping in ('file', 'signature') or (isinstance(answer, dict) and 'file_url' in answer):
                 if isinstance(answer, dict) and 'file_url' in answer:
                     file_attachments.append(answer)
                 elif isinstance(answer, list):
                     for f_item in answer:
                         if isinstance(f_item, dict) and 'file_url' in f_item:
                             file_attachments.append(f_item)
+                        elif isinstance(f_item, str) and (f_item.startswith('/static/') or f_item.startswith('http')):
+                            file_attachments.append({'filename': os.path.basename(f_item), 'file_url': f_item})
+                elif isinstance(answer, str) and (answer.startswith('/static/') or answer.startswith('http')):
+                    file_attachments.append({'filename': os.path.basename(answer), 'file_url': answer})
 
             # 1. Smart Title detection
             if not extracted_title:
@@ -1082,17 +1086,24 @@ def submit_form_response(form_id):
         # Save File Attachments
         for att in file_attachments:
             if isinstance(att, dict) and 'file_url' in att:
-                attachment = BoardTaskAttachment(
-                    task_id=task.id,
-                    filename=att.get('filename', 'Form File'),
-                    file_path=att['file_url'],
-                    uploaded_by_name='Form Submitter'
-                )
-                db.session.add(attachment)
+                try:
+                    att_url = str(att.get('file_url', '')).strip()
+                    if not att_url:
+                        continue
+                    fname = str(att.get('filename') or os.path.basename(att_url) or 'Form File')[:250]
+                    attachment = BoardTaskAttachment(
+                        task_id=task.id,
+                        filename=fname,
+                        file_path=att_url[:490],
+                        uploaded_by_name=actor.name if actor else 'Form Submitter'
+                    )
+                    db.session.add(attachment)
+                except Exception as att_err:
+                    print(f"Error saving BoardTaskAttachment: {att_err}")
 
         # Save Form Response
         response_record = BoardFormResponse(
-            form_id=form_id,
+            form_id=form.id,
             response_json=json.dumps(response_data),
             created_task_id=task.id
         )
@@ -1262,13 +1273,17 @@ def submit_public_form_response(form_id):
             if qtype in ('welcome', 'thankyou', 'settings', 'section'):
                 continue
 
-            if qtype == 'file' or mapping == 'file':
+            if qtype in ('file', 'signature') or mapping in ('file', 'signature') or (isinstance(answer, dict) and 'file_url' in answer):
                 if isinstance(answer, dict) and 'file_url' in answer:
                     file_attachments.append(answer)
                 elif isinstance(answer, list):
                     for f_item in answer:
                         if isinstance(f_item, dict) and 'file_url' in f_item:
                             file_attachments.append(f_item)
+                        elif isinstance(f_item, str) and (f_item.startswith('/static/') or f_item.startswith('http')):
+                            file_attachments.append({'filename': os.path.basename(f_item), 'file_url': f_item})
+                elif isinstance(answer, str) and (answer.startswith('/static/') or answer.startswith('http')):
+                    file_attachments.append({'filename': os.path.basename(answer), 'file_url': answer})
 
             # 1. Smart Title detection
             if not extracted_title:
@@ -1401,13 +1416,20 @@ def submit_public_form_response(form_id):
         # Save File Attachments
         for att in file_attachments:
             if isinstance(att, dict) and 'file_url' in att:
-                attachment = BoardTaskAttachment(
-                    task_id=task.id,
-                    filename=att.get('filename', 'Form File'),
-                    file_path=att['file_url'],
-                    uploaded_by_name='Form Submitter'
-                )
-                db.session.add(attachment)
+                try:
+                    att_url = str(att.get('file_url', '')).strip()
+                    if not att_url:
+                        continue
+                    fname = str(att.get('filename') or os.path.basename(att_url) or 'Form File')[:250]
+                    attachment = BoardTaskAttachment(
+                        task_id=task.id,
+                        filename=fname,
+                        file_path=att_url[:490],
+                        uploaded_by_name='Form Submitter'
+                    )
+                    db.session.add(attachment)
+                except Exception as att_err:
+                    print(f"Error saving BoardTaskAttachment: {att_err}")
 
         # Auto Assign Task to Form Creator
         if form.creator_staff_id or form.creator_super_admin_id:
@@ -1422,7 +1444,7 @@ def submit_public_form_response(form_id):
                 db.session.add(assignee)
 
         response_record = BoardFormResponse(
-            form_id=form_id,
+            form_id=form.id,
             response_json=json.dumps(response_data),
             created_task_id=task.id
         )
@@ -1490,7 +1512,7 @@ def get_form_responses(form_id):
     if not ensure_board_access(board, actor, role):
         return jsonify({"error": "Forbidden"}), 403
 
-    responses = BoardFormResponse.query.filter_by(form_id=form_id).order_by(BoardFormResponse.created_at.desc()).all()
+    responses = BoardFormResponse.query.filter_by(form_id=form.id).order_by(BoardFormResponse.created_at.desc()).all()
     return jsonify([r.to_dict() for r in responses]), 200
 
 
