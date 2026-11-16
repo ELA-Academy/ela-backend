@@ -52,7 +52,23 @@ def _get_current_user():
         return staff, 'staff'
     admin = SuperAdmin.query.filter_by(email=email).first()
     if admin:
-        return admin, 'superadmin'
+        # Auto-provision a Staff profile for SuperAdmin so they can log hours,
+        # set timezone, sign documents, and use /time-tracking identically to staff.
+        staff = Staff(
+            name=getattr(admin, 'name', None) or email.split('@')[0],
+            email=admin.email,
+            work_email=admin.email,
+            personal_email=admin.email,
+            role='staff',
+            job_title='Administrator',
+            worker_type='Employee',
+            worker_status='Active',
+            is_active=True,
+        )
+        staff.set_password(uuid.uuid4().hex)
+        db.session.add(staff)
+        db.session.commit()
+        return staff, 'staff'
     return None, None
 
 
@@ -233,18 +249,6 @@ def get_my_time_entries():
         days_since_sunday = (today.weekday() + 1) % 7
         week_start = today - timedelta(days=days_since_sunday)
     week_end = week_start + timedelta(days=6)
-
-    if role == 'superadmin':
-        # SuperAdmin previewing employee portal
-        return jsonify({
-            'week_start': week_start.isoformat(),
-            'week_end': week_end.isoformat(),
-            'entries': [],
-            'is_locked': False,
-            'timezone': 'Eastern Time (US & Canada) (EDT, GMT-4)',
-            'settings': settings.to_dict(),
-            'weeks_summary': [],
-        }), 200
 
     assign = _get_or_create_assignment(user.id)
     entries = TimeEntry.query.filter(
