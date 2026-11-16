@@ -73,6 +73,10 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('staff', 'bank_account_type', "VARCHAR(50) NULL DEFAULT 'Checking'")
         add_column_if_missing('staff', 'worker_status', "VARCHAR(50) NULL DEFAULT 'Active'")
         add_column_if_missing('staff', 'receives_tips', "BOOLEAN NULL DEFAULT FALSE")
+        add_column_if_missing('staff', 'supervisor_name', "VARCHAR(100) NULL")
+        add_column_if_missing('staff', 'dismissed_effective_date', "VARCHAR(50) NULL")
+        add_column_if_missing('staff', 'dismissal_reason', "TEXT NULL")
+        add_column_if_missing('staff', 'checkin_schedule', "VARCHAR(50) NULL")
 
     if inspector.has_table('conversations'):
         add_column_if_missing('conversations', 'conversation_type', "VARCHAR(50) NOT NULL DEFAULT 'direct'")
@@ -214,6 +218,17 @@ def init_db(app):
         from app.models.overview_card_model import OverviewCard, SpaceBookmark
         from app.models.generated_report_model import GeneratedReport
         from app.models.student_document_model import StudentDocument
+        from app.models.payroll_models import (
+            TimeTrackingSettings,
+            StaffTimeTrackingAssignment,
+            TimeEntry,
+            PayrollRun,
+            PayrollPaymentItem,
+            HRDocument,
+            StaffDocumentAssignment,
+            PerformanceGoal,
+            PerformanceReview,
+        )
         
         try:
             db.create_all()
