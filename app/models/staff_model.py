@@ -47,6 +47,10 @@ class Staff(db.Model):
     bank_account_type = db.Column(db.String(50), default='Checking', nullable=True)
     worker_status = db.Column(db.String(50), default='Active', nullable=True) # 'Active', 'Onboarding', 'Offboarding', 'Dismissed'
     receives_tips = db.Column(db.Boolean, default=False, nullable=True)
+    supervisor_name = db.Column(db.String(100), nullable=True)
+    dismissed_effective_date = db.Column(db.String(50), nullable=True)
+    dismissal_reason = db.Column(db.Text, nullable=True)
+    checkin_schedule = db.Column(db.String(50), nullable=True)  # e.g. '30,60,90'
 
     departments = db.relationship('Department', secondary=staff_department_assignments, lazy='subquery',
         backref=db.backref('staff_members', lazy=True))
@@ -137,6 +141,10 @@ class Staff(db.Model):
             'bank_routing': self.bank_routing or '021000021',
             'bank_account_type': self.bank_account_type or 'Checking',
             'receives_tips': bool(self.receives_tips),
+            'supervisor_name': self.supervisor_name or self.manager_name or 'Marcus Cooper',
+            'dismissed_effective_date': self.dismissed_effective_date,
+            'dismissal_reason': self.dismissal_reason,
+            'checkin_schedule': self.checkin_schedule,
             'notification_preferences': prefs,
             'created_at': self.created_at.isoformat() + 'Z'
         }

@@ -59,3 +59,5 @@ def register_blueprints(app):
     app.register_blueprint(stripe_webhook_bp, url_prefix="/api/stripe")
     from .report_routes import report_bp
     app.register_blueprint(report_bp)
+    from .payroll_routes import payroll_bp
+    app.register_blueprint(payroll_bp, url_prefix="/api/payroll")
