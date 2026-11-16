@@ -657,6 +657,8 @@ def get_admin_timesheets():
         'end_date': end_date.isoformat(),
         'active_on_time_tracking': active_count,
         'last_synced_at': settings.last_synced_at.isoformat() if settings.last_synced_at else None,
+        'last_synced_start': settings.last_synced_start.isoformat() if settings.last_synced_start else None,
+        'last_synced_end': settings.last_synced_end.isoformat() if settings.last_synced_end else None,
         'timesheets': timesheets,
     }), 200
 
@@ -792,11 +794,15 @@ def admin_sync_timesheets():
 
     settings = _get_or_create_settings()
     settings.last_synced_at = datetime.utcnow()
+    settings.last_synced_start = start_date
+    settings.last_synced_end = end_date
     db.session.commit()
     log_activity(actor, f"Synced {len(entries)} time entries for {start_date} to {end_date}")
     return jsonify({
         'synced_count': len(entries),
         'last_synced_at': settings.last_synced_at.isoformat(),
+        'last_synced_start': settings.last_synced_start.isoformat(),
+        'last_synced_end': settings.last_synced_end.isoformat(),
     }), 200
 
 
@@ -849,7 +855,14 @@ def preview_payroll_run():
             continue
 
         hours = round(unpaid_mins / 60.0, 2)
+        is_emp = w_type == 'employee'
+        if is_emp and hours == 0:
+            # Employees (like Marcus) default to 80h for a 2-week pay period and admin adjusts down
+            hours = 80.0
         rate = float(s.hourly_rate or 25.0)
+        regular_pay = round(hours * rate, 2)
+        emp_taxes = round(regular_pay * 0.13396, 2) if is_emp else 0.0
+        comp_taxes = round(regular_pay * 0.0765, 2) if is_emp else 0.0
         rows.append({
             'staff_id': s.id,
             'staff_name': s.name,
@@ -861,12 +874,14 @@ def preview_payroll_run():
             'payment_method': s.payment_method or ('Direct deposit' if is_us else 'Check'),
             'hourly_rate': rate,
             'hours_worked': hours,
-            'regular_pay': round(hours * rate, 2),
+            'regular_pay': regular_pay,
+            'employee_taxes': emp_taxes,
+            'company_taxes': comp_taxes,
             'bonus': 0.0,
             'reimbursement': 0.0,
             'memo': '',
             'invoice_number': str(inv_num).zfill(3),
-            'selected': hours > 0,
+            'selected': hours > 0 or is_emp,
         })
         inv_num += 1
 
@@ -922,8 +937,12 @@ def submit_payroll_run():
         bonus = float(row.get('bonus', 0))
         reimbursement = float(row.get('reimbursement', 0))
         regular_pay = round(hours * rate, 2)
-        net_pay = round(regular_pay + bonus + reimbursement, 2)
-        if net_pay <= 0:
+        gross_taxable = regular_pay + bonus
+        is_emp = (staff.worker_type or 'Contractor').lower() == 'employee'
+        emp_taxes = round(gross_taxable * 0.13396, 2) if is_emp else 0.0
+        comp_taxes = round(gross_taxable * 0.0765, 2) if is_emp else 0.0
+        net_pay = round(gross_taxable - emp_taxes + reimbursement, 2)
+        if regular_pay + bonus + reimbursement <= 0:
             continue
 
         inv_str = str(row.get('invoice_number') or str(settings.next_invoice_number).zfill(3))
@@ -947,12 +966,14 @@ def submit_payroll_run():
             regular_pay=regular_pay,
             bonus=bonus,
             reimbursement=reimbursement,
+            employee_taxes=emp_taxes,
+            company_taxes=comp_taxes,
             memo=(row.get('memo') or '').strip(),
             net_pay=net_pay,
             status='paid',
         )
         db.session.add(item)
-        total_amount += net_pay
+        total_amount += round(gross_taxable + reimbursement + comp_taxes, 2)
         paid_staff_ids.append(staff.id)
 
     run.total_amount = round(total_amount, 2)

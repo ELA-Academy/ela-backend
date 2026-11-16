@@ -16,6 +16,8 @@ class TimeTrackingSettings(db.Model):
     kiosk_enabled = db.Column(db.Boolean, default=False, nullable=False)
     non_us_tracking_enabled = db.Column(db.Boolean, default=True, nullable=False)
     last_synced_at = db.Column(db.DateTime, nullable=True)
+    last_synced_start = db.Column(db.Date, nullable=True)
+    last_synced_end = db.Column(db.Date, nullable=True)
     next_invoice_number = db.Column(db.Integer, default=72, nullable=False)
     bank_account_label = db.Column(db.String(150), default='Cooper Galvis Checking •••• 4821', nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -36,6 +38,8 @@ class TimeTrackingSettings(db.Model):
             'kiosk_enabled': self.kiosk_enabled,
             'non_us_tracking_enabled': self.non_us_tracking_enabled,
             'last_synced_at': self.last_synced_at.isoformat() if self.last_synced_at else None,
+            'last_synced_start': self.last_synced_start.isoformat() if self.last_synced_start else None,
+            'last_synced_end': self.last_synced_end.isoformat() if self.last_synced_end else None,
             'next_invoice_number': self.next_invoice_number,
             'bank_account_label': self.bank_account_label,
         }
@@ -158,6 +162,8 @@ class PayrollPaymentItem(db.Model):
     regular_pay = db.Column(db.Float, default=0.0, nullable=False)
     bonus = db.Column(db.Float, default=0.0, nullable=False)
     reimbursement = db.Column(db.Float, default=0.0, nullable=False)
+    employee_taxes = db.Column(db.Float, default=0.0, nullable=False)
+    company_taxes = db.Column(db.Float, default=0.0, nullable=False)
     memo = db.Column(db.Text, nullable=True)
     net_pay = db.Column(db.Float, default=0.0, nullable=False)
     status = db.Column(db.String(20), default='paid', nullable=False)
@@ -180,6 +186,8 @@ class PayrollPaymentItem(db.Model):
             'regular_pay': round(self.regular_pay, 2),
             'bonus': round(self.bonus, 2),
             'reimbursement': round(self.reimbursement, 2),
+            'employee_taxes': round(getattr(self, 'employee_taxes', 0.0) or 0.0, 2),
+            'company_taxes': round(getattr(self, 'company_taxes', 0.0) or 0.0, 2),
             'memo': self.memo or '',
             'net_pay': round(self.net_pay, 2),
             'status': self.status,

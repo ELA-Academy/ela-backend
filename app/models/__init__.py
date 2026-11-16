@@ -78,6 +78,14 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('staff', 'dismissal_reason', "TEXT NULL")
         add_column_if_missing('staff', 'checkin_schedule', "VARCHAR(50) NULL")
 
+    if inspector.has_table('time_tracking_settings'):
+        add_column_if_missing('time_tracking_settings', 'last_synced_start', 'DATE NULL')
+        add_column_if_missing('time_tracking_settings', 'last_synced_end', 'DATE NULL')
+
+    if inspector.has_table('payroll_payment_items'):
+        add_column_if_missing('payroll_payment_items', 'employee_taxes', 'FLOAT NOT NULL DEFAULT 0')
+        add_column_if_missing('payroll_payment_items', 'company_taxes', 'FLOAT NOT NULL DEFAULT 0')
+
     if inspector.has_table('conversations'):
         add_column_if_missing('conversations', 'conversation_type', "VARCHAR(50) NOT NULL DEFAULT 'direct'")
         add_column_if_missing('conversations', 'name', 'VARCHAR(150) NULL')
