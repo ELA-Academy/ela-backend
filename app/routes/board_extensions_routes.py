@@ -1848,10 +1848,23 @@ def global_search():
 
     like_query = f"%{q}%"
 
-    # Tasks
-    tasks = BoardTask.query.filter(
-        BoardTask.title.ilike(like_query) | BoardTask.notes.ilike(like_query)
-    ).limit(10).all()
+    # Tasks (search title, notes, and all spreadsheet custom field values like phones/emails)
+    cf_matching_task_ids = [
+        row[0] for row in db.session.query(TaskCustomFieldValue.task_id).filter(
+            TaskCustomFieldValue.value_json.ilike(like_query)
+        ).distinct().all()
+    ]
+    task_filter = (
+        BoardTask.title.ilike(like_query) |
+        BoardTask.notes.ilike(like_query) |
+        BoardTask.category.ilike(like_query) |
+        BoardTask.tags.ilike(like_query)
+    )
+    if cf_matching_task_ids:
+        task_filter = task_filter | BoardTask.id.in_(cf_matching_task_ids)
+
+    tasks_all = BoardTask.query.filter(task_filter).all()
+    tasks = [t for t in tasks_all if t.group and ensure_board_access(t.group.board, actor, role)][:15]
 
     # Boards/Spaces (filters based on access if private)
     boards_query = Board.query.filter(
