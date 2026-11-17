@@ -202,7 +202,7 @@ def init_db(app):
         from app.models.subsidy_transaction_model import SubsidyTransaction, SubsidyPaymentDistribution
         
         # Workspace Collaboration Models
-        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, BoardMilestone
+        from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
         from app.models.task_update_model import TaskUpdate, TaskUpdateReply, TaskUpdateLike, CommentReaction
         from app.models.announcement_model import Announcement
         from app.models.board_model_extensions import (

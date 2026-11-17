@@ -565,6 +565,31 @@ class WorkspaceDoc(db.Model):
         }
 
 
+class WorkspaceDocTemplate(db.Model):
+    __tablename__ = 'workspace_doc_templates'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.String(500), nullable=True)
+    category = db.Column(db.String(100), default='Custom', nullable=True)
+    content_html = db.Column(db.Text, default='', nullable=False)
+    created_by_name = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'category': self.category or 'Custom',
+            'content_html': self.content_html,
+            'created_by_name': self.created_by_name,
+            'created_at': self.created_at.isoformat() + 'Z',
+            'updated_at': self.updated_at.isoformat() + 'Z'
+        }
+
+
 class WorkspaceDocComment(db.Model):
     __tablename__ = 'workspace_doc_comments'
 
