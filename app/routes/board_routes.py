@@ -6,7 +6,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, BoardMilestone
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -2006,6 +2006,7 @@ def create_workspace_doc(board_id):
         title=title,
         content_html=data.get('content_html', ''),
         created_by_name=actor.name,
+        is_public=bool(data.get('is_public', True)),
     )
     db.session.add(doc)
     db.session.commit()
@@ -2128,6 +2129,161 @@ def get_all_workspace_docs():
         result.append(d_dict)
 
     return jsonify(result), 200
+
+
+@board_bp.route('/docs/<int:doc_id>/duplicate', methods=['POST'])
+@jwt_required()
+def duplicate_workspace_doc(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+
+    if not doc_is_accessible(doc, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json(silent=True) or {}
+    target_board_id = doc.board_id
+    if data.get('board_id'):
+        target_board = Board.get_by_id_or_public_id(data.get('board_id'))
+        if not target_board:
+            return jsonify({'error': 'Target space not found'}), 404
+        if not board_is_accessible(target_board, actor, role):
+            return jsonify({'error': 'Forbidden'}), 403
+        target_board_id = target_board.id
+
+    new_title = (data.get('title') or '').strip() or f"{doc.title} (Copy)"
+    copy_doc = WorkspaceDoc(
+        board_id=target_board_id,
+        title=new_title,
+        content_html=doc.content_html or '',
+        created_by_name=actor.name,
+        is_public=doc.is_public,
+        shared_user_ids=doc.shared_user_ids,
+        shared_dept_ids=doc.shared_dept_ids,
+    )
+    db.session.add(copy_doc)
+    db.session.commit()
+
+    d_dict = copy_doc.to_dict()
+    d_dict['location_name'] = copy_doc.board.name if copy_doc.board else 'Unknown Space'
+    return jsonify(d_dict), 201
+
+
+@board_bp.route('/docs/<int:doc_id>/save-as-template', methods=['POST'])
+@jwt_required()
+def save_doc_as_template(doc_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = WorkspaceDoc.query.get(doc_id)
+    if not doc:
+        return jsonify({'error': 'Document not found'}), 404
+
+    if not doc_is_accessible(doc, actor, role):
+        return jsonify({'error': 'Forbidden'}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip() or doc.title
+    description = (data.get('description') or '').strip() or f"Saved from \"{doc.title}\""
+    category = (data.get('category') or '').strip() or 'Custom'
+    content_html = data.get('content_html') if 'content_html' in data else (doc.content_html or '')
+
+    template = WorkspaceDocTemplate(
+        name=name,
+        description=description,
+        category=category,
+        content_html=content_html,
+        created_by_name=actor.name,
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(template.to_dict()), 201
+
+
+@board_bp.route('/doc-templates', methods=['GET'])
+@jwt_required()
+def get_doc_templates():
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    templates = WorkspaceDocTemplate.query.order_by(WorkspaceDocTemplate.created_at.desc()).all()
+    return jsonify([t.to_dict() for t in templates]), 200
+
+
+@board_bp.route('/doc-templates', methods=['POST'])
+@jwt_required()
+def create_doc_template():
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Template name is required'}), 400
+
+    template = WorkspaceDocTemplate(
+        name=name,
+        description=(data.get('description') or '').strip() or None,
+        category=(data.get('category') or '').strip() or 'Custom',
+        content_html=data.get('content_html', ''),
+        created_by_name=actor.name,
+    )
+    db.session.add(template)
+    db.session.commit()
+    return jsonify(template.to_dict()), 201
+
+
+@board_bp.route('/doc-templates/<int:template_id>', methods=['PUT'])
+@jwt_required()
+def update_doc_template(template_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    template = WorkspaceDocTemplate.query.get(template_id)
+    if not template:
+        return jsonify({'error': 'Template not found'}), 404
+
+    data = request.get_json() or {}
+    if 'name' in data:
+        name = (data.get('name') or '').strip()
+        if name:
+            template.name = name
+    if 'description' in data:
+        template.description = (data.get('description') or '').strip() or None
+    if 'category' in data:
+        template.category = (data.get('category') or '').strip() or 'Custom'
+    if 'content_html' in data:
+        template.content_html = data.get('content_html', '')
+
+    db.session.commit()
+    return jsonify(template.to_dict()), 200
+
+
+@board_bp.route('/doc-templates/<int:template_id>', methods=['DELETE'])
+@jwt_required()
+def delete_doc_template(template_id):
+    actor, role = get_actor()
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    template = WorkspaceDocTemplate.query.get(template_id)
+    if not template:
+        return jsonify({'error': 'Template not found'}), 404
+
+    if role != 'superadmin' and template.created_by_name != actor.name:
+        return jsonify({'error': 'Forbidden'}), 403
+
+    db.session.delete(template)
+    db.session.commit()
+    return jsonify({'message': 'Document template deleted'}), 200
 
 
 # ─── Workspace Documents Comments & Sharing ───────────────────────────
