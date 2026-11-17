@@ -1493,25 +1493,50 @@ def import_procare_plans():
         'import_presets': True,
         'create_missing_students': True,
         'import_subscriptions': True,
-        'all_students': False
+        'all_students': False,
+        'schedule_preset': '1st',
+        'due_day': 1,
+        'invoice_generation_day': 26,
+        'next_invoice_date': None
     }
 
     parsed_data = None
+
+    def _apply_schedule_options(source_dict):
+        if 'schedule_preset' in source_dict and source_dict['schedule_preset']:
+            options['schedule_preset'] = str(source_dict['schedule_preset']).strip()
+        if 'due_day' in source_dict and source_dict['due_day'] not in (None, ''):
+            try:
+                options['due_day'] = int(source_dict['due_day'])
+            except (ValueError, TypeError):
+                pass
+        elif options['schedule_preset'] == '15th':
+            options['due_day'] = 15
+            options['invoice_generation_day'] = 10
+        if 'invoice_generation_day' in source_dict and source_dict['invoice_generation_day'] not in (None, ''):
+            try:
+                options['invoice_generation_day'] = int(source_dict['invoice_generation_day'])
+            except (ValueError, TypeError):
+                pass
+        if 'next_invoice_date' in source_dict and source_dict['next_invoice_date']:
+            options['next_invoice_date'] = str(source_dict['next_invoice_date']).strip()
 
     if 'file' in request.files and request.files['file'].filename:
         f = request.files['file']
         parsed_data = load_and_parse_file(f, f.filename)
         # Check form fields for options
-        for opt_key in options.keys():
+        for opt_key in ('import_templates', 'import_presets', 'create_missing_students', 'import_subscriptions', 'all_students'):
             if opt_key in request.form:
                 val = request.form[opt_key].lower() in ['true', '1', 'yes']
                 options[opt_key] = val
+        _apply_schedule_options(request.form)
     elif request.is_json:
         data = request.get_json() or {}
         # Client can pass custom options
-        for opt_key in options.keys():
+        for opt_key in ('import_templates', 'import_presets', 'create_missing_students', 'import_subscriptions', 'all_students'):
             if opt_key in data:
                 options[opt_key] = bool(data[opt_key])
+        _apply_schedule_options(data)
 
         # If client passes pre-parsed data:
         if 'parsed_data' in data:
@@ -1572,4 +1597,74 @@ def import_procare_plans():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": f"Error importing Procare data: {str(e)}"}), 500
+
+
+@billing_bp.route('/export-procare-plans', methods=['GET'])
+@jwt_required()
+def export_procare_plans():
+    """Exports all active recurring tuition plans in a Procare-compatible Excel (.xlsx) format."""
+    import io
+    import openpyxl
+    from flask import send_file
+
+    subs = Subscription.query.filter_by(status='Active').all()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Tuition Plans"
+
+    headers = [
+        "Student Name", "Room", "Plan Name", "Plan Status",
+        "Plan Cycle", "Plan Start", "Plan End", "Item", "Amount", "Total Amount"
+    ]
+    ws.append(headers)
+
+    for sub in subs:
+        student = sub.account.student if sub.account else None
+        if not student:
+            continue
+        student_name = f"{student.last_name}, {student.first_name}"
+        room = student.grade_level or ""
+        start_str = sub.start_date.strftime("%Y-%m-%d") if sub.start_date else ""
+        end_str = sub.end_date.strftime("%Y-%m-%d") if sub.end_date else ""
+
+        items = sub.items_json or []
+        total_amt = 0.0
+        for it in items:
+            amt = float(it.get('amount') or it.get('value') or 0.0)
+            if it.get('type') == 'Discount' and amt > 0:
+                amt = -amt
+            total_amt += amt
+
+        if not items:
+            ws.append([
+                student_name, room, sub.plan_name, sub.status,
+                sub.cycle, start_str, end_str, "Tuition", 0.0, 0.0
+            ])
+        else:
+            for idx, it in enumerate(items):
+                amt = float(it.get('amount') or it.get('value') or 0.0)
+                if it.get('type') == 'Discount' and amt > 0:
+                    amt = -amt
+                ws.append([
+                    student_name,
+                    room,
+                    sub.plan_name,
+                    sub.status,
+                    sub.cycle,
+                    start_str,
+                    end_str,
+                    it.get('description') or 'Tuition Item',
+                    round(amt, 2),
+                    round(total_amt, 2) if idx == 0 else ""
+                ])
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return send_file(
+        output,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="ELA_Tuition_Plans_Procare_Export.xlsx"
+    )
 
