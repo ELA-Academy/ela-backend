@@ -1033,42 +1033,88 @@ def onboard_staff_member():
     _seed_default_documents_if_empty()
 
     data = request.get_json(silent=True) or {}
+    staff_id = data.get('staff_id')
     first_name = (data.get('first_name') or '').strip()
     middle_initial = (data.get('middle_initial') or '').strip()
     last_name = (data.get('last_name') or '').strip()
     full_name = data.get('name') or ' '.join(p for p in [first_name, middle_initial, last_name] if p)
     email = (data.get('personal_email') or data.get('email') or '').strip()
 
-    if not full_name or not email:
-        return jsonify({'error': 'Name and email are required'}), 400
-    if Staff.query.filter_by(email=email).first():
-        return jsonify({'error': 'A team member with this email already exists'}), 409
-
     country = data.get('country') or 'United States of America'
     is_us = 'united states' in country.lower() or country.upper() in ('US', 'USA')
     payment_method = data.get('payment_method') or ('Direct deposit' if is_us else 'Check')
 
-    new_staff = Staff(
-        name=full_name,
-        preferred_name=(data.get('preferred_name') or first_name or full_name).strip(),
-        legal_name=full_name,
-        email=email,
-        personal_email=email,
-        work_email=(data.get('work_email') or email).strip(),
-        role='teacher' if 'teacher' in (data.get('job_title') or '').lower() else 'staff',
-        job_title=data.get('job_title') or 'Teacher',
-        worker_type=data.get('worker_type') or 'Contractor',
-        worker_status='Onboarding' if data.get('send_invite', True) else 'Active',
-        hourly_rate=float(data.get('hourly_rate') or 25.0),
-        manager_name=data.get('manager_name') or 'Marcus Cooper',
-        supervisor_name=data.get('supervisor_name') or 'Marcus Cooper',
-        country=country,
-        start_date=data.get('start_date') or date.today().strftime('%b %d, %Y'),
-        payment_method=payment_method,
-        checkin_schedule=data.get('checkin_schedule') or '30,60,90',
-        is_active=True,
-    )
-    new_staff.set_password(data.get('password') or uuid.uuid4().hex)
+    existing_staff = None
+    if staff_id:
+        existing_staff = Staff.query.get(staff_id)
+    elif email and data.get('update_existing'):
+        existing_staff = Staff.query.filter_by(email=email).first()
+
+    if existing_staff:
+        target_staff = existing_staff
+        if full_name:
+            target_staff.name = full_name
+            target_staff.legal_name = full_name
+        if data.get('preferred_name'):
+            target_staff.preferred_name = data['preferred_name'].strip()
+        if email:
+            target_staff.personal_email = email
+        if data.get('work_email'):
+            target_staff.work_email = data['work_email'].strip()
+        if data.get('job_title'):
+            target_staff.job_title = data['job_title'].strip()
+            if 'teacher' in target_staff.job_title.lower() and target_staff.role != 'admin':
+                target_staff.role = 'teacher'
+        if data.get('worker_type'):
+            target_staff.worker_type = data['worker_type']
+        if data.get('hourly_rate') not in (None, ''):
+            target_staff.hourly_rate = float(data['hourly_rate'])
+        if 'receives_tips' in data:
+            target_staff.receives_tips = bool(data['receives_tips'])
+        if data.get('manager_name'):
+            target_staff.manager_name = data['manager_name']
+        if data.get('supervisor_name'):
+            target_staff.supervisor_name = data['supervisor_name']
+        if data.get('start_date'):
+            target_staff.start_date = data['start_date']
+        if data.get('checkin_schedule'):
+            target_staff.checkin_schedule = data['checkin_schedule']
+        target_staff.country = country
+        target_staff.payment_method = payment_method
+        target_staff.worker_status = 'Onboarding' if data.get('send_invite') else 'Active'
+        target_staff.is_active = True
+        is_new_record = False
+    else:
+        if not full_name or not email:
+            return jsonify({'error': 'Name and email are required'}), 400
+        if Staff.query.filter_by(email=email).first():
+            return jsonify({'error': 'A team member with this email already exists'}), 409
+
+        target_staff = Staff(
+            name=full_name,
+            preferred_name=(data.get('preferred_name') or first_name or full_name).strip(),
+            legal_name=full_name,
+            email=email,
+            personal_email=email,
+            work_email=(data.get('work_email') or email).strip(),
+            role='teacher' if 'teacher' in (data.get('job_title') or '').lower() else 'staff',
+            job_title=data.get('job_title') or 'Teacher',
+            worker_type=data.get('worker_type') or 'Contractor',
+            worker_status='Onboarding' if data.get('send_invite', True) else 'Active',
+            hourly_rate=float(data.get('hourly_rate') or 25.0),
+            receives_tips=bool(data.get('receives_tips', False)),
+            manager_name=data.get('manager_name') or 'Marcus Cooper',
+            supervisor_name=data.get('supervisor_name') or 'Marcus Cooper',
+            country=country,
+            start_date=data.get('start_date') or date.today().strftime('%b %d, %Y'),
+            payment_method=payment_method,
+            checkin_schedule=data.get('checkin_schedule') or '30,60,90',
+            is_active=True,
+        )
+        target_staff.set_password(data.get('password') or uuid.uuid4().hex)
+        db.session.add(target_staff)
+        db.session.flush()
+        is_new_record = True
 
     # Department assignment (select or create new)
     dept_id = data.get('department_id')
@@ -1079,38 +1125,46 @@ def onboard_staff_member():
             dept = Department(name=new_dept_name)
             db.session.add(dept)
             db.session.flush()
-        new_staff.departments.append(dept)
+        if dept not in target_staff.departments:
+            target_staff.departments.append(dept)
     elif dept_id:
         dept = Department.query.get(dept_id)
-        if dept:
-            new_staff.departments.append(dept)
+        if dept and dept not in target_staff.departments:
+            target_staff.departments.append(dept)
 
-    db.session.add(new_staff)
-    db.session.flush()
+    # Auto-assign time tracking (everyone tracks time!)
+    existing_assign = StaffTimeTrackingAssignment.query.filter_by(staff_id=target_staff.id).first()
+    if existing_assign:
+        existing_assign.is_assigned = bool(data.get('assign_time_tracking', True))
+    else:
+        db.session.add(StaffTimeTrackingAssignment(
+            staff_id=target_staff.id,
+            is_assigned=bool(data.get('assign_time_tracking', True)),
+        ))
 
-    # Auto-assign time tracking (Caitlin's rule: everyone tracks time!)
-    assign = StaffTimeTrackingAssignment(
-        staff_id=new_staff.id,
-        is_assigned=bool(data.get('assign_time_tracking', True)),
-    )
-    db.session.add(assign)
-
-    # Assign selected documents (plus auto-W9 for US contractors or future_hires_rule)
-    doc_ids = set(data.get('document_ids') or [])
+    # Assign selected documents (plus auto-W9 / future_hires_rule when no explicit list was overridden)
+    explicit_doc_ids = data.get('document_ids')
+    doc_ids = set(explicit_doc_ids or [])
+    use_auto_rules = (explicit_doc_ids is None) or bool(data.get('apply_auto_doc_rules', False))
     active_docs = HRDocument.query.filter_by(status='active').all()
     for doc in active_docs:
         auto_match = (
             doc.id in doc_ids
-            or doc.future_hires_rule == 'all'
-            or (doc.future_hires_rule == 'us' and is_us)
-            or (doc.future_hires_rule == 'non_us' and not is_us)
+            or (use_auto_rules and (
+                doc.future_hires_rule == 'all'
+                or (doc.future_hires_rule == 'us' and is_us)
+                or (doc.future_hires_rule == 'non_us' and not is_us)
+            ))
         )
         if auto_match:
-            db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=new_staff.id))
+            already = StaffDocumentAssignment.query.filter_by(document_id=doc.id, staff_id=target_staff.id).first()
+            if not already:
+                db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=target_staff.id))
 
     db.session.commit()
-    log_activity(actor, f"Onboarded '{new_staff.name}' ({new_staff.worker_type})", new_staff)
-    return jsonify(new_staff.to_dict()), 201
+    action_verb = "Onboarded" if is_new_record else "Updated payroll profile for"
+    log_activity(actor, f"{action_verb} '{target_staff.name}' ({target_staff.worker_type})", target_staff)
+    return jsonify(target_staff.to_dict()), 201 if is_new_record else 200
 
 
 @payroll_bp.route('/admin/people/<int:staff_id>/dismiss', methods=['POST'])
@@ -1190,8 +1244,26 @@ def create_admin_document():
         uploaded_by=getattr(actor, 'name', 'Cooper Galvis Enterprises LLC'),
     )
     db.session.add(doc)
+    db.session.flush()
+
+    assigned_count = 0
+    if doc.status == 'active' and data.get('assign_to_existing'):
+        rule = doc.future_hires_rule or 'all'
+        active_staff = Staff.query.filter(Staff.worker_status != 'Dismissed').all()
+        for st in active_staff:
+            st_country = (st.country or 'United States of America').lower()
+            st_is_us = 'united states' in st_country or st_country in ('us', 'usa')
+            if rule == 'us' and not st_is_us:
+                continue
+            if rule == 'non_us' and st_is_us:
+                continue
+            db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=st.id))
+            assigned_count += 1
+
     db.session.commit()
-    return jsonify(doc.to_dict()), 201
+    res_dict = doc.to_dict()
+    res_dict['assigned_count'] = assigned_count
+    return jsonify(res_dict), 201
 
 
 @payroll_bp.route('/admin/documents/<int:doc_id>', methods=['PUT'])
