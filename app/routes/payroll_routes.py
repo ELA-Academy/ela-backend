@@ -167,7 +167,7 @@ def _send_document_notification_email(staff, doc, assignment_id, is_reminder=Fal
       <td align="center">
         <table width="100%" cellpadding="0" cellspacing="0" style="max-width:580px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
           <tr>
-            <td style="background:#0f766e;padding:24px 32px;color:#ffffff;">
+            <td style="background:#2563eb;padding:24px 32px;color:#ffffff;">
               <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.08em;opacity:0.85;">ELA Academy HR &amp; Payroll</div>
               <h1 style="margin:6px 0 0 0;font-size:20px;font-weight:700;">{doc.title}</h1>
             </td>
@@ -177,13 +177,13 @@ def _send_document_notification_email(staff, doc, assignment_id, is_reminder=Fal
               <p style="margin:0 0 14px 0;font-size:15px;">Hello {staff.name},</p>
               <p style="margin:0 0 22px 0;font-size:14px;line-height:1.6;color:#475569;">{intro}</p>
               <div style="margin:24px 0;">
-                <a href="{doc_link}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:8px;">
+                <a href="{doc_link}" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:8px;">
                   Review &amp; Sign Document
                 </a>
               </div>
               <p style="margin:0;font-size:12px;color:#64748b;">
                 Or open this link in your browser:<br/>
-                <a href="{doc_link}" style="color:#0f766e;">{doc_link}</a>
+                <a href="{doc_link}" style="color:#2563eb;">{doc_link}</a>
               </p>
             </td>
           </tr>
@@ -1235,9 +1235,9 @@ def onboard_staff_member():
             is_assigned=bool(data.get('assign_time_tracking', True)),
         ))
 
-    # Assign selected documents (plus auto-W9 / future_hires_rule when no explicit list was overridden)
+    # Assign selected documents and dispatch email + in-app notifications
     explicit_doc_ids = data.get('document_ids')
-    doc_ids = set(explicit_doc_ids or [])
+    doc_ids = {int(x) for x in (explicit_doc_ids or []) if str(x).isdigit()}
     use_auto_rules = (explicit_doc_ids is None) or bool(data.get('apply_auto_doc_rules', False))
     active_docs = HRDocument.query.filter_by(status='active').all()
     for doc in active_docs:
@@ -1250,9 +1250,7 @@ def onboard_staff_member():
             ))
         )
         if auto_match:
-            already = StaffDocumentAssignment.query.filter_by(document_id=doc.id, staff_id=target_staff.id).first()
-            if not already:
-                db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=target_staff.id))
+            _assign_document_to_staff(doc, [target_staff.id], send_emails=True)
 
     db.session.commit()
     action_verb = "Onboarded" if is_new_record else "Updated payroll profile for"
