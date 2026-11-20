@@ -77,6 +77,19 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('staff', 'dismissed_effective_date', "VARCHAR(50) NULL")
         add_column_if_missing('staff', 'dismissal_reason', "TEXT NULL")
         add_column_if_missing('staff', 'checkin_schedule', "VARCHAR(50) NULL")
+        add_column_if_missing('staff', 'expected_hours', "VARCHAR(50) NULL")
+        add_column_if_missing('staff', 'substituting_pay', "FLOAT NULL")
+        add_column_if_missing('staff', 'tutoring_pay', "FLOAT NULL")
+        add_column_if_missing('staff', 'training_pay', "FLOAT NULL")
+        add_column_if_missing('staff', 'us_holiday_bonuses', "VARCHAR(100) NULL")
+        add_column_if_missing('staff', 'winter_break_bonuses', "VARCHAR(100) NULL")
+        add_column_if_missing('staff', 'spring_break_bonuses', "VARCHAR(100) NULL")
+
+    if inspector.has_table('hr_documents'):
+        add_column_if_missing('hr_documents', 'file_path', 'VARCHAR(500) NULL')
+        add_column_if_missing('hr_documents', 'document_scope', "VARCHAR(30) NOT NULL DEFAULT 'team'")
+        add_column_if_missing('hr_documents', 'target_hire_types', 'TEXT NULL')
+        add_column_if_missing('hr_documents', 'admin_field_values', 'TEXT NULL')
 
     if inspector.has_table('time_tracking_settings'):
         add_column_if_missing('time_tracking_settings', 'last_synced_start', 'DATE NULL')
@@ -234,6 +247,7 @@ def init_db(app):
             PayrollPaymentItem,
             HRDocument,
             StaffDocumentAssignment,
+            PayrollAdminAccess,
             PerformanceGoal,
             PerformanceReview,
         )

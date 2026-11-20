@@ -52,6 +52,15 @@ class Staff(db.Model):
     dismissal_reason = db.Column(db.Text, nullable=True)
     checkin_schedule = db.Column(db.String(50), nullable=True)  # e.g. '30,60,90'
 
+    # Payment Enumeration Fields (Spreadsheet columns)
+    expected_hours = db.Column(db.String(50), nullable=True)
+    substituting_pay = db.Column(db.Float, nullable=True)
+    tutoring_pay = db.Column(db.Float, nullable=True)
+    training_pay = db.Column(db.Float, nullable=True)
+    us_holiday_bonuses = db.Column(db.String(100), nullable=True)
+    winter_break_bonuses = db.Column(db.String(100), nullable=True)
+    spring_break_bonuses = db.Column(db.String(100), nullable=True)
+
     departments = db.relationship('Department', secondary=staff_department_assignments, lazy='subquery',
         backref=db.backref('staff_members', lazy=True))
 
@@ -113,7 +122,7 @@ class Staff(db.Model):
             'preferred_name': self.preferred_name or self.name,
             'legal_name': self.legal_name or self.name,
             'email': self.email,
-            'work_email': self.work_email or self.email,
+            'work_email': self.work_email if self.work_email is not None else (self.email or ''),
             'role': getattr(self, 'role', 'staff') or 'staff',
             'is_active': self.is_active,
             'department_ids': [d.id for d in self.departments],
@@ -130,7 +139,7 @@ class Staff(db.Model):
             'pronouns': self.pronouns or 'she/her/hers',
             'ssn_last4': self.ssn_last4 or '7600',
             'birthday': self.birthday or 'October 14, 1992',
-            'personal_email': self.personal_email or self.email,
+            'personal_email': self.personal_email or '',
             'phone': self.phone or '+1 (404) 555-0192',
             'address': addr,
             'emergency_contact': emg,
@@ -145,6 +154,13 @@ class Staff(db.Model):
             'dismissed_effective_date': self.dismissed_effective_date,
             'dismissal_reason': self.dismissal_reason,
             'checkin_schedule': self.checkin_schedule,
+            'expected_hours': self.expected_hours or '',
+            'substituting_pay': self.substituting_pay,
+            'tutoring_pay': self.tutoring_pay,
+            'training_pay': self.training_pay,
+            'us_holiday_bonuses': self.us_holiday_bonuses or '',
+            'winter_break_bonuses': self.winter_break_bonuses or '',
+            'spring_break_bonuses': self.spring_break_bonuses or '',
             'notification_preferences': prefs,
             'created_at': self.created_at.isoformat() + 'Z'
         }

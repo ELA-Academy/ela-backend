@@ -1,7 +1,9 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_from_directory, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from werkzeug.utils import secure_filename
 from datetime import datetime, date, timedelta
 import json
+import os
 import re
 import uuid
 
@@ -18,31 +20,185 @@ from app.models.payroll_models import (
     PayrollPaymentItem,
     HRDocument,
     StaffDocumentAssignment,
+    PayrollAdminAccess,
     PerformanceGoal,
     PerformanceReview,
 )
+from app.utils.ms_graph_email import send_email_via_graph_background
 
 payroll_bp = Blueprint('payroll', __name__)
 
+ALL_PAYROLL_FEATURES = [
+    {'key': 'pay', 'label': 'Run Payroll & Pay History', 'category': 'Monetary (Accounting)'},
+    {'key': 'money', 'label': 'Money & Bank Accounts', 'category': 'Monetary (Accounting)'},
+    {'key': 'taxes', 'label': 'Taxes & Compliance', 'category': 'Monetary (Accounting)'},
+    {'key': 'payment_enumeration', 'label': 'Payment Enumeration', 'category': 'Monetary (Accounting)'},
+    {'key': 'people', 'label': 'People & Staff Info', 'category': 'HR & Operations'},
+    {'key': 'time_attendance', 'label': 'Time & Attendance', 'category': 'HR & Operations'},
+    {'key': 'documents', 'label': 'Documents & E-Signatures', 'category': 'HR & Operations'},
+    {'key': 'performance', 'label': 'Performance Reviews', 'category': 'HR & Operations'},
+    {'key': 'cumulative_pay', 'label': 'Cumulative Pay Tracking', 'category': 'HR & Reports'},
+    {'key': 'reports', 'label': 'Payroll Reports', 'category': 'HR & Reports'},
+]
 
-def _is_hr_or_admin_dept(name):
-    if not name:
-        return False
-    clean = name.strip().lower()
-    return bool(re.search(r'\b(it|information technology|info tech|tech|accounting|admin|administration|human resource|hr|payroll)\b', clean))
+ALL_FEATURE_KEYS = [f['key'] for f in ALL_PAYROLL_FEATURES]
+
+DEFAULT_BLOCKED_BY_ROLE = {
+    'accounting_admin': ['documents', 'performance'],
+    'hr_admin': ['pay', 'money', 'taxes'],
+    'custom': [],
+}
+
+LEGACY_MOCK_DOC_TITLES = {
+    'Taxpayer Identification (Form W-9)',
+    'Alternate Authorized Payment Form',
+    '2026 Pay Schedule',
+    '2026 Pay Schedule International',
+    'ELA Academy Employee Handbook',
+    'ELA Academy Student Handbook',
+}
 
 
-def _get_admin_actor():
+def _clear_legacy_mock_documents():
+    """Remove previously seeded mock documents that have no uploaded PDF and no signed records."""
+    try:
+        mock_docs = HRDocument.query.filter(
+            HRDocument.title.in_(LEGACY_MOCK_DOC_TITLES),
+            HRDocument.file_path.is_(None),
+        ).all()
+        removed = 0
+        for doc in mock_docs:
+            has_signed = any(
+                a.signed_at is not None or a.status in ('Signed', 'Submitted', 'Acknowledged')
+                for a in (doc.assignments or [])
+            )
+            if not has_signed:
+                db.session.delete(doc)
+                removed += 1
+        if removed:
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"[Payroll] Mock doc cleanup skipped: {e}")
+
+
+def _get_super_admin_actor():
+    email = get_jwt_identity()
+    return SuperAdmin.query.filter_by(email=email).first()
+
+
+def _get_payroll_access_info():
     email = get_jwt_identity()
     admin = SuperAdmin.query.filter_by(email=email).first()
     if admin:
-        return admin
+        return admin, {
+            'has_access': True,
+            'is_superadmin': True,
+            'access_role': 'superadmin',
+            'blocked_features': [],
+            'allowed_features': list(ALL_FEATURE_KEYS),
+        }
+
     staff = Staff.query.filter_by(email=email).first()
     if staff and getattr(staff, 'is_active', True):
-        for dept in staff.departments:
-            if _is_hr_or_admin_dept(dept.name):
-                return staff
-    return None
+        access = PayrollAdminAccess.query.filter_by(staff_id=staff.id, is_active=True).first()
+        if access:
+            blocked = access.to_dict().get('blocked_features', [])
+            return staff, {
+                'has_access': True,
+                'is_superadmin': False,
+                'access_role': access.access_role,
+                'blocked_features': blocked,
+                'allowed_features': [k for k in ALL_FEATURE_KEYS if k not in blocked],
+            }
+    return None, {
+        'has_access': False,
+        'is_superadmin': False,
+        'access_role': None,
+        'blocked_features': list(ALL_FEATURE_KEYS),
+        'allowed_features': [],
+    }
+
+
+def _get_admin_actor(feature=None):
+    actor, info = _get_payroll_access_info()
+    if not actor or not info.get('has_access'):
+        return None
+    if feature and not info.get('is_superadmin') and feature in info.get('blocked_features', []):
+        return None
+    return actor
+
+
+def _get_staff_notification_emails(staff):
+    if not staff:
+        return []
+    candidates = [staff.work_email, staff.personal_email, staff.email]
+    seen = set()
+    result = []
+    for addr in candidates:
+        clean = (addr or '').strip()
+        if clean and '@' in clean and clean.lower() not in seen:
+            seen.add(clean.lower())
+            result.append(clean)
+    return result
+
+
+def _send_document_notification_email(staff, doc, assignment_id, is_reminder=False):
+    recipients = _get_staff_notification_emails(staff)
+    if not recipients:
+        return False
+    frontend_url = os.getenv('FRONTEND_URL', current_app.config.get('FRONTEND_URL', 'https://staging-app.elaaschool.org')).rstrip('/')
+    doc_link = f"{frontend_url}/time-tracking/documents/{assignment_id}"
+    subject = (
+        f"Reminder: Please Review & Sign \"{doc.title}\""
+        if is_reminder
+        else f"Action Required: New Document \"{doc.title}\""
+    )
+    intro = (
+        f"This is a friendly reminder from HR to review and sign <strong>{doc.title}</strong>."
+        if is_reminder
+        else f"A new document <strong>{doc.title}</strong> has been added to your ELA Academy account and requires your review and signature."
+    )
+    html = f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1e293b;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:580px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+          <tr>
+            <td style="background:#0f766e;padding:24px 32px;color:#ffffff;">
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.08em;opacity:0.85;">ELA Academy HR &amp; Payroll</div>
+              <h1 style="margin:6px 0 0 0;font-size:20px;font-weight:700;">{doc.title}</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:28px 32px;">
+              <p style="margin:0 0 14px 0;font-size:15px;">Hello {staff.name},</p>
+              <p style="margin:0 0 22px 0;font-size:14px;line-height:1.6;color:#475569;">{intro}</p>
+              <div style="margin:24px 0;">
+                <a href="{doc_link}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;padding:12px 24px;border-radius:8px;">
+                  Review &amp; Sign Document
+                </a>
+              </div>
+              <p style="margin:0;font-size:12px;color:#64748b;">
+                Or open this link in your browser:<br/>
+                <a href="{doc_link}" style="color:#0f766e;">{doc_link}</a>
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+    try:
+        send_email_via_graph_background(subject, recipients, html, sender_email='hr@ela-academy.org')
+        return True
+    except Exception as e:
+        print(f"[Payroll Document Email Error] {e}")
+        return False
 
 
 def _get_current_user():
@@ -90,95 +246,8 @@ def _get_or_create_settings():
 
 
 def _seed_default_documents_if_empty():
-    if HRDocument.query.count() > 0:
-        return
-    defaults = [
-        HRDocument(
-            title='Taxpayer Identification (Form W-9)',
-            category='Tax Documents',
-            description='Request for Taxpayer Identification Number and Certification for US independent contractors.',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=True,
-            fillable_fields=json.dumps([
-                {'key': 'legal_name', 'label': 'Full Legal Name', 'type': 'text', 'required': True},
-                {'key': 'tax_classification', 'label': 'Federal Tax Classification', 'type': 'select', 'options': ['Individual/sole proprietor', 'Single-member LLC', 'C Corporation', 'S Corporation', 'Partnership'], 'required': True},
-                {'key': 'tin_last4', 'label': 'SSN or EIN (Last 4 digits)', 'type': 'text', 'required': True},
-                {'key': 'address', 'label': 'Mailing Address', 'type': 'text', 'required': True},
-            ]),
-            future_hires_rule='us',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-        HRDocument(
-            title='Alternate Authorized Payment Form',
-            category='Payroll & Payment',
-            description='Submit your preferred international or alternate payout method (Remitly, Brebe, Wise, Direct Bank Draft, or ACH).',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=True,
-            fillable_fields=json.dumps([
-                {'key': 'payout_platform', 'label': 'Payment Platform / Method', 'type': 'select', 'options': ['Remitly', 'Brebe (Colombia)', 'Wise / Bank Draft', 'US Direct Deposit (ACH)'], 'required': True},
-                {'key': 'account_holder', 'label': 'Account Holder Full Name', 'type': 'text', 'required': True},
-                {'key': 'bank_or_wallet', 'label': 'Bank Name or Mobile Wallet / Phone', 'type': 'text', 'required': True},
-                {'key': 'account_or_routing', 'label': 'Account Number / Routing / IBAN', 'type': 'text', 'required': True},
-                {'key': 'country', 'label': 'Recipient Country', 'type': 'text', 'required': True},
-            ]),
-            future_hires_rule='all',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-        HRDocument(
-            title='2026 Pay Schedule',
-            category='Pay Schedules',
-            description='Bi-weekly pay periods, timesheet submission deadlines, and Friday pay dates for US contractors and employees (2026).',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=False,
-            content_body='2026 Pay Schedule (US Contractors & Employees)\n\nPay Periods run Sunday through Saturday (2-week cycles). Timesheets must be submitted by Monday 10:00 AM following the close of the pay period. Payroll is finalized on Wednesday/Thursday and disbursed every other Friday.',
-            future_hires_rule='us',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-        HRDocument(
-            title='2026 Pay Schedule International',
-            category='Pay Schedules',
-            description='Bi-weekly pay periods and international Remitly / bank transfer disbursement schedule for non-US contractors (2026).',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=False,
-            content_body='2026 International Pay Schedule\n\nInternational contractors log hours on the same 2-week cycle. Payments are processed via Remitly, Brebe, or direct bank draft following timesheet verification.',
-            future_hires_rule='non_us',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-        HRDocument(
-            title='ELA Academy Employee Handbook',
-            category='Company Policies',
-            description='Staff standards of conduct, class time-logging expectations, and school operating procedures.',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=False,
-            content_body='ELA Academy Employee & Contractor Handbook\n\n1. Time Tracking: All teachers must log whole-hour blocks per class taught with the class name and grade level in the shift note.\n2. Workdays: Standard instructional days are Monday through Friday.\n3. Communication: Notify your department supervisor at least 24 hours before any schedule change.',
-            future_hires_rule='all',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-        HRDocument(
-            title='ELA Academy Student Handbook',
-            category='Company Policies',
-            description='School-wide student expectations and classroom guidelines for instructors.',
-            doc_type='shared',
-            status='active',
-            requires_signature=True,
-            is_fillable=False,
-            future_hires_rule='all',
-            uploaded_by='Cooper Galvis Enterprises LLC',
-        ),
-    ]
-    for doc in defaults:
-        db.session.add(doc)
-    db.session.commit()
+    # Mock documents removed per ELA HR requirements. Clear legacy unuploaded mock rows if present.
+    _clear_legacy_mock_documents()
 
 
 def _parse_hhmm_to_minutes(hhmm):
@@ -434,17 +503,37 @@ def get_my_pay_history():
     return jsonify({'payments': [i.to_dict() for i in items]}), 200
 
 
+@payroll_bp.route('/my-access', methods=['GET'])
+@jwt_required()
+def get_my_payroll_access():
+    _, info = _get_payroll_access_info()
+    return jsonify(info), 200
+
+
 @payroll_bp.route('/my/documents', methods=['GET'])
 @jwt_required()
 def get_my_documents():
     user, role = _get_current_user()
     if not user:
         return jsonify({'error': 'Unauthorized'}), 401
-    _seed_default_documents_if_empty()
+    _clear_legacy_mock_documents()
     if role != 'staff':
         return jsonify({'documents': []}), 200
     assignments = StaffDocumentAssignment.query.filter_by(staff_id=user.id).order_by(StaffDocumentAssignment.assigned_at.desc()).all()
     return jsonify({'documents': [a.to_dict() for a in assignments]}), 200
+
+
+@payroll_bp.route('/my/documents/<int:assignment_id>', methods=['GET'])
+@jwt_required()
+def get_my_document_detail(assignment_id):
+    user, role = _get_current_user()
+    if not user or role != 'staff':
+        return jsonify({'error': 'Unauthorized'}), 403
+    assignment = StaffDocumentAssignment.query.filter_by(id=assignment_id, staff_id=user.id).first_or_404()
+    if not assignment.viewed_at:
+        assignment.viewed_at = datetime.utcnow()
+        db.session.commit()
+    return jsonify(assignment.to_dict()), 200
 
 
 @payroll_bp.route('/my/documents/<int:assignment_id>/sign', methods=['POST'])
@@ -454,12 +543,16 @@ def sign_my_document(assignment_id):
     if not user or role != 'staff':
         return jsonify({'error': 'Unauthorized'}), 403
     assignment = StaffDocumentAssignment.query.filter_by(id=assignment_id, staff_id=user.id).first_or_404()
+    # IMMUTABLE ONCE SIGNED: neither staff nor admin can edit a signed document
+    if assignment.signed_at is not None or assignment.status in ('Signed', 'Submitted', 'Acknowledged'):
+        return jsonify({'error': 'This document has already been signed and cannot be edited.'}), 403
+
     data = request.get_json(silent=True) or {}
     assignment.signature_name = (data.get('signature_name') or user.name).strip()
     if 'filled_data' in data:
         assignment.filled_data = json.dumps(data['filled_data'])
     assignment.signed_at = datetime.utcnow()
-    assignment.status = 'Submitted' if assignment.document and assignment.document.is_fillable else 'Signed'
+    assignment.status = 'Signed'
     db.session.commit()
     return jsonify(assignment.to_dict()), 200
 
@@ -813,8 +906,8 @@ def admin_sync_timesheets():
 @payroll_bp.route('/admin/pay/preview', methods=['GET'])
 @jwt_required()
 def preview_payroll_run():
-    if not _get_admin_actor():
-        return jsonify({'error': 'Unauthorized'}), 401
+    if not _get_admin_actor('pay'):
+        return jsonify({'error': 'Unauthorized'}), 403
 
     settings = _get_or_create_settings()
     worker_group = request.args.get('worker_group', 'all')  # 'us_contractor' | 'non_us_contractor' | 'employee' | 'all'
@@ -895,9 +988,9 @@ def preview_payroll_run():
 @payroll_bp.route('/admin/pay/run', methods=['POST'])
 @jwt_required()
 def submit_payroll_run():
-    actor = _get_admin_actor()
+    actor = _get_admin_actor('pay')
     if not actor:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized'}), 403
 
     settings = _get_or_create_settings()
     data = request.get_json(silent=True) or {}
@@ -1201,15 +1294,109 @@ def reactivate_staff_member(staff_id):
 
 
 # ==============================================================================
-# 5. ADMIN DOCUMENTS (/api/payroll/admin/documents/*)
+# 5. ADMIN DOCUMENTS (/api/payroll/admin/documents/*) & PDF FILE SERVING
 # ==============================================================================
+
+def _payroll_docs_dir():
+    base = os.path.join(current_app.root_path, 'static', 'documents', 'payroll')
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _assign_document_to_staff(doc, staff_ids, send_emails=True):
+    existing_sids = {a.staff_id for a in StaffDocumentAssignment.query.filter_by(document_id=doc.id).all()}
+    added = 0
+    newly_created = []
+    for sid in staff_ids:
+        if sid in existing_sids:
+            continue
+        st = Staff.query.get(sid)
+        if not st or (st.worker_status or 'Active').lower() == 'dismissed':
+            continue
+        assignment = StaffDocumentAssignment(document_id=doc.id, staff_id=st.id)
+        db.session.add(assignment)
+        newly_created.append((st, assignment))
+        _create_staff_notification(
+            st.id,
+            f"New document assigned: {doc.title}",
+            f"Please review and sign '{doc.title}'.",
+        )
+        added += 1
+    db.session.flush()
+    if send_emails:
+        for st, assignment in newly_created:
+            _send_document_notification_email(st, doc, assignment.id, is_reminder=False)
+    return added
+
+
+@payroll_bp.route('/documents/<int:doc_id>/file', methods=['GET'])
+def serve_payroll_document_file(doc_id):
+    # Support standard Authorization header or ?token= for PDF.js / iframe preview
+    from flask_jwt_extended import verify_jwt_in_request, decode_token
+    auth_ok = False
+    try:
+        verify_jwt_in_request(optional=True)
+        if get_jwt_identity():
+            auth_ok = True
+    except Exception:
+        pass
+    if not auth_ok:
+        tok = request.args.get('token')
+        if tok:
+            try:
+                decode_token(tok)
+                auth_ok = True
+            except Exception:
+                pass
+    if not auth_ok:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    doc = HRDocument.query.get_or_404(doc_id)
+    if not doc.file_path:
+        return jsonify({'error': 'No PDF file attached to this document'}), 404
+    directory = _payroll_docs_dir()
+    filename = os.path.basename(doc.file_path)
+    return send_from_directory(directory, filename, mimetype='application/pdf')
+
+
+@payroll_bp.route('/admin/documents/upload', methods=['POST'])
+@jwt_required()
+def upload_payroll_document_pdf():
+    actor = _get_admin_actor('documents')
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'error': 'Empty filename'}), 400
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Only .pdf files are supported'}), 400
+
+    # Enforce 10MB limit
+    f.seek(0, os.SEEK_END)
+    size = f.tell()
+    f.seek(0)
+    if size > 10 * 1024 * 1024:
+        return jsonify({'error': 'File must be less than 10MB'}), 400
+
+    original_name = secure_filename(f.filename)
+    stored_name = f"{uuid.uuid4().hex}_{original_name}"
+    dest = os.path.join(_payroll_docs_dir(), stored_name)
+    f.save(dest)
+    return jsonify({
+        'file_name': f.filename,
+        'file_path': stored_name,
+        'size_bytes': size,
+    }), 201
+
 
 @payroll_bp.route('/admin/documents', methods=['GET'])
 @jwt_required()
 def get_admin_documents():
-    if not _get_admin_actor():
-        return jsonify({'error': 'Unauthorized'}), 401
-    _seed_default_documents_if_empty()
+    if not _get_admin_actor('documents'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    _clear_legacy_mock_documents()
     docs = HRDocument.query.order_by(HRDocument.created_at.desc()).all()
     artifacts = StaffDocumentAssignment.query.order_by(StaffDocumentAssignment.assigned_at.desc()).all()
     return jsonify({
@@ -1218,47 +1405,114 @@ def get_admin_documents():
     }), 200
 
 
+@payroll_bp.route('/admin/documents/<int:doc_id>', methods=['GET'])
+@jwt_required()
+def get_admin_document_detail(doc_id):
+    if not _get_admin_actor('documents'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    doc = HRDocument.query.get_or_404(doc_id)
+    data = doc.to_dict()
+    data['assignments'] = [a.to_dict() for a in (doc.assignments or [])]
+    return jsonify(data), 200
+
+
+@payroll_bp.route('/admin/documents/assignments/<int:assignment_id>', methods=['GET'])
+@jwt_required()
+def get_admin_assignment_detail(assignment_id):
+    if not _get_admin_actor('documents'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    assignment = StaffDocumentAssignment.query.get_or_404(assignment_id)
+    return jsonify(assignment.to_dict()), 200
+
+
+@payroll_bp.route('/admin/documents/staff/<int:staff_id>', methods=['GET'])
+@jwt_required()
+def get_staff_documents_for_admin(staff_id):
+    if not _get_admin_actor('people'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    _clear_legacy_mock_documents()
+    assignments = StaffDocumentAssignment.query.filter_by(staff_id=staff_id).order_by(StaffDocumentAssignment.assigned_at.desc()).all()
+    return jsonify({'documents': [a.to_dict() for a in assignments]}), 200
+
+
+@payroll_bp.route('/admin/documents/staff/<int:staff_id>/remind-all', methods=['POST'])
+@jwt_required()
+def remind_all_staff_documents(staff_id):
+    actor = _get_admin_actor('documents')
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 403
+    staff = Staff.query.get_or_404(staff_id)
+    pending = StaffDocumentAssignment.query.filter(
+        StaffDocumentAssignment.staff_id == staff.id,
+        StaffDocumentAssignment.signed_at.is_(None),
+        ~StaffDocumentAssignment.status.in_(['Signed', 'Submitted', 'Acknowledged']),
+    ).all()
+    count = 0
+    for assignment in pending:
+        assignment.last_reminded_at = datetime.utcnow()
+        if assignment.document:
+            _create_staff_notification(
+                staff.id,
+                f"Reminder: Please sign '{assignment.document.title}'",
+                f"HR sent a reminder to review and sign '{assignment.document.title}'.",
+            )
+            _send_document_notification_email(staff, assignment.document, assignment.id, is_reminder=True)
+            count += 1
+    db.session.commit()
+    return jsonify({'reminded_count': count}), 200
+
+
 @payroll_bp.route('/admin/documents', methods=['POST'])
 @jwt_required()
 def create_admin_document():
-    actor = _get_admin_actor()
+    actor = _get_admin_actor('documents')
     if not actor:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized'}), 403
     data = request.get_json(silent=True) or {}
     title = (data.get('title') or '').strip()
     if not title:
         return jsonify({'error': 'Document title is required'}), 400
 
+    fields = data.get('fillable_fields') or []
     doc = HRDocument(
         title=title,
         category=data.get('category') or 'Company Policies',
         description=(data.get('description') or '').strip(),
         doc_type=data.get('doc_type') or 'shared',
-        status=data.get('status') or 'active',
+        status=data.get('status') or 'draft',
         file_name=data.get('file_name'),
+        file_path=data.get('file_path'),
         content_body=data.get('content_body') or '',
         requires_signature=bool(data.get('requires_signature', True)),
-        is_fillable=bool(data.get('is_fillable', False)),
-        fillable_fields=json.dumps(data.get('fillable_fields') or []),
+        is_fillable=bool(data.get('is_fillable', len(fields) > 0)),
+        fillable_fields=json.dumps(fields),
+        admin_field_values=json.dumps(data.get('admin_field_values') or {}),
+        document_scope=data.get('document_scope') or 'team',
         future_hires_rule=data.get('future_hires_rule') or 'none',
+        target_hire_types=json.dumps(data.get('target_hire_types') or []),
+        target_department_ids=json.dumps(data.get('target_department_ids') or []),
         uploaded_by=getattr(actor, 'name', 'Cooper Galvis Enterprises LLC'),
     )
     db.session.add(doc)
     db.session.flush()
 
     assigned_count = 0
-    if doc.status == 'active' and data.get('assign_to_existing'):
-        rule = doc.future_hires_rule or 'all'
-        active_staff = Staff.query.filter(Staff.worker_status != 'Dismissed').all()
-        for st in active_staff:
-            st_country = (st.country or 'United States of America').lower()
-            st_is_us = 'united states' in st_country or st_country in ('us', 'usa')
-            if rule == 'us' and not st_is_us:
-                continue
-            if rule == 'non_us' and st_is_us:
-                continue
-            db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=st.id))
-            assigned_count += 1
+    if doc.status == 'active':
+        target_sids = set(data.get('staff_ids') or [])
+        assign_mode = data.get('assign_mode') or ('all_current' if data.get('assign_to_existing') else 'none')
+        if assign_mode == 'all_current':
+            for st in Staff.query.filter(Staff.worker_status != 'Dismissed').all():
+                target_sids.add(st.id)
+        elif assign_mode == 'specific_current':
+            dept_ids = data.get('current_department_ids') or []
+            if dept_ids:
+                for d in Department.query.filter(Department.id.in_(dept_ids)).all():
+                    for st in d.staff_members:
+                        target_sids.add(st.id)
+        elif assign_mode == 'individual' and data.get('individual_staff_id'):
+            target_sids.add(int(data['individual_staff_id']))
+        if target_sids:
+            assigned_count = _assign_document_to_staff(doc, target_sids, send_emails=True)
 
     db.session.commit()
     res_dict = doc.to_dict()
@@ -1269,30 +1523,76 @@ def create_admin_document():
 @payroll_bp.route('/admin/documents/<int:doc_id>', methods=['PUT'])
 @jwt_required()
 def update_admin_document(doc_id):
-    if not _get_admin_actor():
-        return jsonify({'error': 'Unauthorized'}), 401
+    if not _get_admin_actor('documents'):
+        return jsonify({'error': 'Unauthorized'}), 403
     doc = HRDocument.query.get_or_404(doc_id)
     data = request.get_json(silent=True) or {}
-    for field in ('title', 'category', 'description', 'status', 'content_body', 'future_hires_rule'):
+
+    signed_count = StaffDocumentAssignment.query.filter(
+        StaffDocumentAssignment.document_id == doc.id,
+        db.or_(
+            StaffDocumentAssignment.signed_at.isnot(None),
+            StaffDocumentAssignment.status.in_(['Signed', 'Submitted', 'Acknowledged']),
+        ),
+    ).count()
+
+    # If already signed by anyone, block editing the document content/fields/file (only allow archiving)
+    restricted_fields = ('title', 'file_name', 'file_path', 'content_body', 'fillable_fields', 'admin_field_values', 'requires_signature')
+    if signed_count > 0 and any(f in data for f in restricted_fields):
+        return jsonify({'error': 'This document has signed records and cannot be edited.'}), 403
+
+    for field in ('title', 'category', 'description', 'status', 'content_body', 'file_name', 'file_path', 'document_scope', 'future_hires_rule'):
         if field in data:
             setattr(doc, field, data[field])
     if 'requires_signature' in data:
         doc.requires_signature = bool(data['requires_signature'])
+    if 'fillable_fields' in data:
+        doc.fillable_fields = json.dumps(data['fillable_fields'] or [])
+        doc.is_fillable = len(data['fillable_fields'] or []) > 0
+    if 'admin_field_values' in data:
+        doc.admin_field_values = json.dumps(data['admin_field_values'] or {})
+    if 'target_hire_types' in data:
+        doc.target_hire_types = json.dumps(data['target_hire_types'] or [])
+    if 'target_department_ids' in data:
+        doc.target_department_ids = json.dumps(data['target_department_ids'] or [])
+
+    assigned_count = 0
+    if doc.status == 'active' and data.get('send_now'):
+        target_sids = set(data.get('staff_ids') or [])
+        assign_mode = data.get('assign_mode') or 'none'
+        if assign_mode == 'all_current':
+            for st in Staff.query.filter(Staff.worker_status != 'Dismissed').all():
+                target_sids.add(st.id)
+        elif assign_mode == 'specific_current':
+            dept_ids = data.get('current_department_ids') or []
+            if dept_ids:
+                for d in Department.query.filter(Department.id.in_(dept_ids)).all():
+                    for st in d.staff_members:
+                        target_sids.add(st.id)
+        elif assign_mode == 'individual' and data.get('individual_staff_id'):
+            target_sids.add(int(data['individual_staff_id']))
+        if target_sids:
+            assigned_count = _assign_document_to_staff(doc, target_sids, send_emails=True)
+
     db.session.commit()
-    return jsonify(doc.to_dict()), 200
+    res_dict = doc.to_dict()
+    res_dict['assigned_count'] = assigned_count
+    return jsonify(res_dict), 200
 
 
 @payroll_bp.route('/admin/documents/<int:doc_id>/recipients', methods=['POST'])
 @jwt_required()
 def update_document_recipients(doc_id):
-    actor = _get_admin_actor()
+    actor = _get_admin_actor('documents')
     if not actor:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized'}), 403
     doc = HRDocument.query.get_or_404(doc_id)
     data = request.get_json(silent=True) or {}
 
     if 'future_hires_rule' in data:
         doc.future_hires_rule = data['future_hires_rule']
+    if 'target_hire_types' in data:
+        doc.target_hire_types = json.dumps(data['target_hire_types'] or [])
     dept_ids = data.get('department_ids') or []
     staff_ids = set(data.get('staff_ids') or [])
 
@@ -1303,14 +1603,7 @@ def update_document_recipients(doc_id):
             for s in d.staff_members:
                 staff_ids.add(s.id)
 
-    existing_sids = {a.staff_id for a in StaffDocumentAssignment.query.filter_by(document_id=doc.id).all()}
-    added = 0
-    for sid in staff_ids:
-        if sid not in existing_sids:
-            db.session.add(StaffDocumentAssignment(document_id=doc.id, staff_id=sid))
-            _create_staff_notification(sid, f"New document assigned: {doc.title}", f"Please review and sign/acknowledge '{doc.title}'.")
-            added += 1
-
+    added = _assign_document_to_staff(doc, staff_ids, send_emails=True)
     db.session.commit()
     return jsonify({'document': doc.to_dict(), 'added_recipients': added}), 200
 
@@ -1318,17 +1611,21 @@ def update_document_recipients(doc_id):
 @payroll_bp.route('/admin/documents/assignments/<int:assignment_id>/remind', methods=['POST'])
 @jwt_required()
 def remind_document_assignment(assignment_id):
-    actor = _get_admin_actor()
+    actor = _get_admin_actor('documents')
     if not actor:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized'}), 403
     assignment = StaffDocumentAssignment.query.get_or_404(assignment_id)
+    if assignment.signed_at is not None or assignment.status in ('Signed', 'Submitted', 'Acknowledged'):
+        return jsonify({'error': 'Document is already signed.'}), 400
     assignment.last_reminded_at = datetime.utcnow()
     title = assignment.document.title if assignment.document else 'Document'
     _create_staff_notification(
         assignment.staff_id,
         f"Reminder: Please sign '{title}'",
-        f"HR sent a reminder to review and sign/acknowledge '{title}'.",
+        f"HR sent a reminder to review and sign '{title}'.",
     )
+    if assignment.staff and assignment.document:
+        _send_document_notification_email(assignment.staff, assignment.document, assignment.id, is_reminder=True)
     db.session.commit()
     return jsonify(assignment.to_dict()), 200
 
@@ -1356,6 +1653,97 @@ def report_contractor_payments():
 
     items = query.order_by(PayrollRun.pay_date.desc()).all()
     return jsonify({'rows': [i.to_dict() for i in items]}), 200
+
+
+@payroll_bp.route('/admin/reports/cumulative-pay', methods=['GET'])
+@jwt_required()
+def report_cumulative_pay():
+    if not _get_admin_actor('cumulative_pay'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    preset = request.args.get('preset', '6_months')
+    start_str = request.args.get('start_date')
+    end_str = request.args.get('end_date')
+    staff_id = request.args.get('staff_id')
+    department_id = request.args.get('department_id')
+
+    today = date.today()
+    if start_str and end_str:
+        start_date = _parse_date(start_str)
+        end_date = _parse_date(end_str)
+    elif preset == '4_weeks':
+        end_date = today
+        start_date = today - timedelta(weeks=4)
+    elif preset == '3_months':
+        end_date = today
+        start_date = today - timedelta(days=90)
+    elif preset == '6_months':
+        end_date = today
+        start_date = today - timedelta(days=182)
+    elif preset == '12_months':
+        end_date = today
+        start_date = today - timedelta(days=365)
+    elif preset == 'ytd':
+        end_date = today
+        start_date = date(today.year, 1, 1)
+    else:
+        end_date = today
+        start_date = today - timedelta(days=182)
+
+    query = PayrollPaymentItem.query.join(PayrollRun).filter(
+        PayrollRun.pay_date >= start_date,
+        PayrollRun.pay_date <= end_date,
+    )
+    if staff_id and staff_id != 'all':
+        query = query.filter(PayrollPaymentItem.staff_id == int(staff_id))
+
+    items = query.order_by(PayrollRun.pay_date.desc()).all()
+    staff_map = {s.id: s for s in Staff.query.all()}
+
+    dept_filter_id = int(department_id) if (department_id and department_id != 'all') else None
+
+    grouped = {}
+    for item in items:
+        st = staff_map.get(item.staff_id)
+        if dept_filter_id:
+            if not st or dept_filter_id not in [d.id for d in st.departments]:
+                continue
+        row = grouped.setdefault(item.staff_id, {
+            'staff_id': item.staff_id,
+            'staff_name': item.staff_name,
+            'department': st.departments[0].name if (st and st.departments) else '-',
+            'worker_type': item.worker_type,
+            'pay_runs_count': 0,
+            'total_hours': 0.0,
+            'total_regular_pay': 0.0,
+            'total_bonus': 0.0,
+            'total_reimbursement': 0.0,
+            'total_net_pay': 0.0,
+            'last_pay_date': None,
+        })
+        row['pay_runs_count'] += 1
+        row['total_hours'] = round(row['total_hours'] + float(item.hours_worked or 0), 2)
+        row['total_regular_pay'] = round(row['total_regular_pay'] + float(item.regular_pay or 0), 2)
+        row['total_bonus'] = round(row['total_bonus'] + float(item.bonus or 0), 2)
+        row['total_reimbursement'] = round(row['total_reimbursement'] + float(item.reimbursement or 0), 2)
+        row['total_net_pay'] = round(row['total_net_pay'] + float(item.net_pay or 0), 2)
+        pd_iso = item.payroll_run.pay_date.isoformat() if (item.payroll_run and item.payroll_run.pay_date) else None
+        if pd_iso and (not row['last_pay_date'] or pd_iso > row['last_pay_date']):
+            row['last_pay_date'] = pd_iso
+
+    rows = sorted(grouped.values(), key=lambda r: r['total_net_pay'], reverse=True)
+    for r in rows:
+        r['avg_per_run'] = round(r['total_net_pay'] / r['pay_runs_count'], 2) if r['pay_runs_count'] else 0.0
+
+    return jsonify({
+        'start_date': start_date.isoformat(),
+        'end_date': end_date.isoformat(),
+        'preset': preset,
+        'rows': rows,
+        'grand_total_net_pay': round(sum(r['total_net_pay'] for r in rows), 2),
+        'grand_total_hours': round(sum(r['total_hours'] for r in rows), 2),
+        'staff_paid_count': len(rows),
+    }), 200
 
 
 # ==============================================================================
@@ -1422,3 +1810,187 @@ def create_performance_review():
     db.session.add(review)
     db.session.commit()
     return jsonify(review.to_dict()), 201
+
+
+# ==============================================================================
+# 8. SUPER ADMIN CO-ADMIN ACCESS & FEATURE BLOCKING (/api/payroll/admin/access*)
+# ==============================================================================
+
+@payroll_bp.route('/admin/access', methods=['GET'])
+@jwt_required()
+def get_payroll_access_list():
+    super_admin = _get_super_admin_actor()
+    if not super_admin:
+        return jsonify({'error': 'Only Super Admin can manage payroll co-admin access.'}), 403
+
+    co_admins = PayrollAdminAccess.query.order_by(PayrollAdminAccess.created_at.desc()).all()
+    all_staff = Staff.query.filter(Staff.is_active == True).order_by(Staff.name.asc()).all()
+    return jsonify({
+        'co_admins': [a.to_dict() for a in co_admins],
+        'staff': [
+            {
+                'id': s.id,
+                'name': s.name,
+                'email': s.email,
+                'job_title': s.job_title or '',
+                'department_names': [d.name for d in s.departments],
+            }
+            for s in all_staff
+        ],
+        'all_features': ALL_PAYROLL_FEATURES,
+        'default_blocked_by_role': DEFAULT_BLOCKED_BY_ROLE,
+    }), 200
+
+
+@payroll_bp.route('/admin/access', methods=['POST'])
+@jwt_required()
+def grant_payroll_access():
+    super_admin = _get_super_admin_actor()
+    if not super_admin:
+        return jsonify({'error': 'Only Super Admin can grant payroll co-admin access.'}), 403
+
+    data = request.get_json(silent=True) or {}
+    staff_id = data.get('staff_id')
+    if not staff_id:
+        return jsonify({'error': 'staff_id is required'}), 400
+    staff = Staff.query.get_or_404(int(staff_id))
+
+    access_role = data.get('access_role') or 'hr_admin'
+    if 'blocked_features' in data:
+        blocked = data['blocked_features'] or []
+    else:
+        blocked = DEFAULT_BLOCKED_BY_ROLE.get(access_role, [])
+
+    existing = PayrollAdminAccess.query.filter_by(staff_id=staff.id).first()
+    if existing:
+        existing.access_role = access_role
+        existing.blocked_features = json.dumps(blocked)
+        existing.is_active = True
+        existing.granted_by = super_admin.name
+        record = existing
+    else:
+        record = PayrollAdminAccess(
+            staff_id=staff.id,
+            access_role=access_role,
+            is_active=True,
+            blocked_features=json.dumps(blocked),
+            granted_by=super_admin.name,
+        )
+        db.session.add(record)
+
+    db.session.commit()
+    log_activity(super_admin, f"Granted payroll co-admin access ({access_role}) to '{staff.name}'", staff)
+    return jsonify(record.to_dict()), 201
+
+
+@payroll_bp.route('/admin/access/<int:access_id>', methods=['PUT'])
+@jwt_required()
+def update_payroll_access(access_id):
+    super_admin = _get_super_admin_actor()
+    if not super_admin:
+        return jsonify({'error': 'Only Super Admin can update payroll co-admin access.'}), 403
+
+    record = PayrollAdminAccess.query.get_or_404(access_id)
+    data = request.get_json(silent=True) or {}
+    if 'access_role' in data:
+        record.access_role = data['access_role']
+    if 'is_active' in data:
+        record.is_active = bool(data['is_active'])
+    if 'blocked_features' in data:
+        record.blocked_features = json.dumps(data['blocked_features'] or [])
+    db.session.commit()
+    log_activity(super_admin, f"Updated payroll co-admin permissions for '{record.staff.name if record.staff else record.staff_id}'")
+    return jsonify(record.to_dict()), 200
+
+
+@payroll_bp.route('/admin/access/<int:access_id>', methods=['DELETE'])
+@jwt_required()
+def revoke_payroll_access(access_id):
+    super_admin = _get_super_admin_actor()
+    if not super_admin:
+        return jsonify({'error': 'Only Super Admin can revoke payroll co-admin access.'}), 403
+
+    record = PayrollAdminAccess.query.get_or_404(access_id)
+    staff_name = record.staff.name if record.staff else str(record.staff_id)
+    db.session.delete(record)
+    db.session.commit()
+    log_activity(super_admin, f"Revoked payroll co-admin access for '{staff_name}'")
+    return jsonify({'message': 'Access revoked'}), 200
+
+
+# ==============================================================================
+# 9. PAYMENT ENUMERATION SPREADSHEET (/api/payroll/admin/enumeration*)
+# ==============================================================================
+
+@payroll_bp.route('/admin/enumeration', methods=['GET'])
+@jwt_required()
+def get_payment_enumeration():
+    if not _get_admin_actor('payment_enumeration'):
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    staff_list = Staff.query.order_by(Staff.name.asc()).all()
+    rows = []
+    for s in staff_list:
+        rows.append({
+            'staff_id': s.id,
+            'staff_name': s.name,
+            'department': s.departments[0].name if s.departments else '',
+            'worker_type': s.worker_type or 'Contractor',
+            'worker_status': s.worker_status or 'Active',
+            'expected_hours': s.expected_hours or '',
+            'hourly_rate': s.hourly_rate if s.hourly_rate is not None else 0.0,
+            'substituting_pay': s.substituting_pay,
+            'tutoring_pay': s.tutoring_pay,
+            'training_pay': s.training_pay,
+            'us_holiday_bonuses': s.us_holiday_bonuses or '',
+            'winter_break_bonuses': s.winter_break_bonuses or '',
+            'spring_break_bonuses': s.spring_break_bonuses or '',
+        })
+    return jsonify({'rows': rows}), 200
+
+
+@payroll_bp.route('/admin/enumeration/<int:staff_id>', methods=['PUT'])
+@jwt_required()
+def update_payment_enumeration(staff_id):
+    actor = _get_admin_actor('payment_enumeration')
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    staff = Staff.query.get_or_404(staff_id)
+    data = request.get_json(silent=True) or {}
+
+    if 'expected_hours' in data:
+        staff.expected_hours = (data['expected_hours'] or '').strip()
+    if 'hourly_rate' in data and data['hourly_rate'] not in (None, ''):
+        try:
+            staff.hourly_rate = float(data['hourly_rate'])
+        except (ValueError, TypeError):
+            pass
+    for pay_field in ('substituting_pay', 'tutoring_pay', 'training_pay'):
+        if pay_field in data:
+            val = data[pay_field]
+            if val in (None, ''):
+                setattr(staff, pay_field, None)
+            else:
+                try:
+                    setattr(staff, pay_field, float(val))
+                except (ValueError, TypeError):
+                    pass
+    for bonus_field in ('us_holiday_bonuses', 'winter_break_bonuses', 'spring_break_bonuses'):
+        if bonus_field in data:
+            setattr(staff, bonus_field, (data[bonus_field] or '').strip())
+
+    db.session.commit()
+    log_activity(actor, f"Updated payment enumeration for '{staff.name}'", staff)
+    return jsonify({
+        'staff_id': staff.id,
+        'staff_name': staff.name,
+        'expected_hours': staff.expected_hours or '',
+        'hourly_rate': staff.hourly_rate if staff.hourly_rate is not None else 0.0,
+        'substituting_pay': staff.substituting_pay,
+        'tutoring_pay': staff.tutoring_pay,
+        'training_pay': staff.training_pay,
+        'us_holiday_bonuses': staff.us_holiday_bonuses or '',
+        'winter_break_bonuses': staff.winter_break_bonuses or '',
+        'spring_break_bonuses': staff.spring_break_bonuses or '',
+    }), 200

@@ -16,7 +16,7 @@ def is_it_department_name(name):
     clean = name.strip().lower()
     return bool(re.search(r'\b(it|information technology|info tech|tech|accounting|admin)\b', clean))
 
-# Helper to get the current authorized actor (SuperAdmin or IT/Accounting Department Staff)
+# Helper to get the current authorized actor (SuperAdmin, Payroll Co-Admin, or IT/Accounting/HR Department Staff)
 def get_actor():
     email = get_jwt_identity()
     admin = SuperAdmin.query.filter_by(email=email).first()
@@ -25,6 +25,10 @@ def get_actor():
 
     staff = Staff.query.filter_by(email=email).first()
     if staff and getattr(staff, 'is_active', True):
+        from app.models.payroll_models import PayrollAdminAccess
+        access = PayrollAdminAccess.query.filter_by(staff_id=staff.id, is_active=True).first()
+        if access:
+            return staff
         for dept in staff.departments:
             if is_it_department_name(dept.name):
                 return staff
@@ -196,6 +200,21 @@ def update_staff(id):
         staff.bank_account_type = data['bank_account_type']
     if 'receives_tips' in data:
         staff.receives_tips = bool(data['receives_tips'])
+    if 'expected_hours' in data:
+        staff.expected_hours = data['expected_hours']
+    for pay_field in ('substituting_pay', 'tutoring_pay', 'training_pay'):
+        if pay_field in data:
+            val = data[pay_field]
+            if val in (None, ''):
+                setattr(staff, pay_field, None)
+            else:
+                try:
+                    setattr(staff, pay_field, float(val))
+                except (ValueError, TypeError):
+                    pass
+    for bonus_field in ('us_holiday_bonuses', 'winter_break_bonuses', 'spring_break_bonuses'):
+        if bonus_field in data:
+            setattr(staff, bonus_field, data[bonus_field])
 
     if 'address' in data:
         staff.address = json.dumps(data['address']) if isinstance(data['address'], (dict, list)) else str(data['address'])
@@ -243,6 +262,21 @@ def update_staff_compensation(id):
         staff.job_title = data['job_title']
     if 'receives_tips' in data:
         staff.receives_tips = bool(data['receives_tips'])
+    if 'expected_hours' in data:
+        staff.expected_hours = data['expected_hours']
+    for pay_field in ('substituting_pay', 'tutoring_pay', 'training_pay'):
+        if pay_field in data:
+            val = data[pay_field]
+            if val in (None, ''):
+                setattr(staff, pay_field, None)
+            else:
+                try:
+                    setattr(staff, pay_field, float(val))
+                except (ValueError, TypeError):
+                    pass
+    for bonus_field in ('us_holiday_bonuses', 'winter_break_bonuses', 'spring_break_bonuses'):
+        if bonus_field in data:
+            setattr(staff, bonus_field, data[bonus_field])
 
     effective_date = data.get('effective_date', datetime.utcnow().strftime('%m/%d/%Y'))
     reason = data.get('reason', 'Compensation update')
