@@ -175,10 +175,77 @@ def delete_overview_card(space_id, card_id):
 
 # ─── Card Aggregation ─────────────────────────────────────────────────────────
 
+def _collect_card_tasks(space, data_source_board_id, filters):
+    """Collect tasks for an overview card from a specific list or all lists in the space."""
+    if data_source_board_id:
+        board_ids = [data_source_board_id]
+    else:
+        board_ids = _get_all_descendant_list_ids(space.id)
+        if space.id not in board_ids:
+            board_ids.append(space.id)
+
+    if not board_ids:
+        return []
+
+    group_ids = [g.id for g in BoardGroup.query.filter(BoardGroup.board_id.in_(board_ids)).all()]
+    if not group_ids:
+        return []
+
+    task_query = BoardTask.query.filter(BoardTask.group_id.in_(group_ids))
+    show_closed = bool(filters.get('show_closed', filters.get('showClosed', False)))
+    status_filter = filters.get('status_filter') or ''
+    priority_filter = filters.get('priority_filter') or ''
+
+    if status_filter == 'completed':
+        task_query = task_query.filter(BoardTask.status == 'Done')
+    elif status_filter and status_filter not in ('all', 'open'):
+        task_query = task_query.filter(BoardTask.status == status_filter)
+    elif status_filter == 'open' or not show_closed:
+        if status_filter != 'all':
+            task_query = task_query.filter(BoardTask.status != 'Done')
+
+    if priority_filter and priority_filter != 'all':
+        task_query = task_query.filter(BoardTask.priority == priority_filter)
+
+    return task_query.order_by(BoardTask.created_at.desc()).all()
+
+
+def _extract_numeric_values(tasks, measure_field_id):
+    import re
+    if not tasks or not measure_field_id:
+        return [], {}
+    task_ids = [t.id for t in tasks]
+    field_values = TaskCustomFieldValue.query.filter(
+        TaskCustomFieldValue.task_id.in_(task_ids),
+        TaskCustomFieldValue.field_id == measure_field_id
+    ).all()
+    numeric_values = []
+    by_task = {}
+    for fv in field_values:
+        if not fv.value_json:
+            continue
+        raw_val = fv.value_json
+        try:
+            raw_val = json.loads(fv.value_json)
+        except Exception:
+            pass
+        by_task[fv.task_id] = raw_val
+        if isinstance(raw_val, (int, float)):
+            numeric_values.append(float(raw_val))
+        elif isinstance(raw_val, str):
+            cleaned = re.sub(r'[^\d.-]', '', raw_val)
+            if cleaned and cleaned not in ('.', '-'):
+                try:
+                    numeric_values.append(float(cleaned))
+                except ValueError:
+                    pass
+    return numeric_values, by_task
+
+
 @overview_bp.route('/boards/<string:space_id>/overview-cards/<int:card_id>/aggregate', methods=['GET', 'OPTIONS'])
 @jwt_required(optional=True)
 def get_card_aggregate(space_id, card_id):
-    """Compute a calculation card's aggregated value."""
+    """Compute a card's aggregated value or breakdown (supports live preview query params)."""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -190,12 +257,6 @@ def get_card_aggregate(space_id, card_id):
     if not card:
         return jsonify({"error": "Card not found"}), 404
 
-    if card.card_type != 'calculation':
-        return jsonify({"value": None, "error": "Not a calculation card"}), 400
-
-    if not card.data_source_board_id:
-        return jsonify({"value": 0, "refreshed_at": datetime.utcnow().isoformat() + 'Z'})
-
     filters = {}
     if card.filters_json:
         try:
@@ -205,51 +266,128 @@ def get_card_aggregate(space_id, card_id):
         except Exception:
             pass
 
-    group_ids = [g.id for g in BoardGroup.query.filter_by(board_id=card.data_source_board_id).all()]
-    if not group_ids:
-        return jsonify({"value": 0, "count": 0, "refreshed_at": datetime.utcnow().isoformat() + 'Z'})
+    # Support live preview overrides from CardSettingsModal query params
+    src_board_id = card.data_source_board_id
+    if 'data_source_board_id' in request.args:
+        raw_src = request.args.get('data_source_board_id')
+        if raw_src in ('', 'all', 'null', 'None'):
+            src_board_id = None
+        else:
+            b = Board.get_by_id_or_public_id(raw_src)
+            src_board_id = b.id if b else None
 
-    task_query = BoardTask.query.filter(BoardTask.group_id.in_(group_ids))
+    measure_field_id = card.measure_field_id
+    if 'measure_field_id' in request.args:
+        raw_mf = request.args.get('measure_field_id')
+        measure_field_id = int(raw_mf) if raw_mf and raw_mf.isdigit() else None
 
-    if not filters.get('show_closed', False):
-        task_query = task_query.filter(BoardTask.status != 'Done')
+    calc_type = (request.args.get('calculation') or card.calculation or 'sum').lower()
+    if 'show_closed' in request.args:
+        filters['show_closed'] = request.args.get('show_closed', '').lower() == 'true'
+    if 'status_filter' in request.args:
+        filters['status_filter'] = request.args.get('status_filter')
+    if 'priority_filter' in request.args:
+        filters['priority_filter'] = request.args.get('priority_filter')
 
-    tasks = task_query.all()
+    if card.card_type == 'notes':
+        return jsonify({
+            "note_content": filters.get('note_content', ''),
+            "refreshed_at": datetime.utcnow().isoformat() + 'Z'
+        })
 
-    if card.calculation == 'count':
+    tasks = _collect_card_tasks(space, src_board_id, filters)
+    now_iso = datetime.utcnow().isoformat() + 'Z'
+
+    if card.card_type == 'status_breakdown':
+        counts = {}
+        for t in tasks:
+            st = t.status or 'Not Started'
+            counts[st] = counts.get(st, 0) + 1
+        total = len(tasks)
+        colors = {'Done': '#10b981', 'In Progress': '#2563eb', 'Not Started': '#94a3b8'}
+        breakdown = [
+            {
+                'label': k,
+                'count': v,
+                'pct': round((v / total) * 100, 1) if total else 0,
+                'color': colors.get(k, '#6366f1')
+            }
+            for k, v in sorted(counts.items(), key=lambda x: -x[1])
+        ]
+        return jsonify({"breakdown": breakdown, "total": total, "refreshed_at": now_iso})
+
+    if card.card_type == 'priority_breakdown':
+        order = ['Urgent', 'High', 'Normal', 'Low']
+        colors = {'Urgent': '#ef4444', 'High': '#f59e0b', 'Normal': '#2563eb', 'Low': '#94a3b8'}
+        counts = {p: 0 for p in order}
+        for t in tasks:
+            p = t.priority or 'Normal'
+            counts[p] = counts.get(p, 0) + 1
+        total = len(tasks)
+        breakdown = [
+            {
+                'label': k,
+                'count': counts[k],
+                'pct': round((counts[k] / total) * 100, 1) if total else 0,
+                'color': colors.get(k, '#6366f1')
+            }
+            for k in order if counts.get(k, 0) > 0
+        ]
+        return jsonify({"breakdown": breakdown, "total": total, "refreshed_at": now_iso})
+
+    if card.card_type == 'assignee_workload':
+        counts = {}
+        for t in tasks:
+            name = (
+                t.responsible_staff.name if t.responsible_staff
+                else (t.responsible_super_admin.name if t.responsible_super_admin else 'Unassigned')
+            )
+            counts[name] = counts.get(name, 0) + 1
+        total = len(tasks)
+        breakdown = [
+            {
+                'label': k,
+                'count': v,
+                'pct': round((v / total) * 100, 1) if total else 0,
+                'color': '#2563eb'
+            }
+            for k, v in sorted(counts.items(), key=lambda x: -x[1])[:10]
+        ]
+        return jsonify({"breakdown": breakdown, "total": total, "refreshed_at": now_iso})
+
+    if card.card_type == 'task_list':
+        numeric_values, by_task = _extract_numeric_values(tasks, measure_field_id)
+        measure_field_name = None
+        if measure_field_id:
+            fld = BoardCustomField.query.get(measure_field_id)
+            if fld:
+                measure_field_name = fld.name
+        rows = []
+        for t in tasks[:25]:
+            board = Board.query.get(t.group.board_id) if t.group else None
+            rows.append({
+                'id': t.id,
+                'title': t.title,
+                'status': t.status,
+                'priority': t.priority,
+                'due_date': t.due_date.isoformat() if t.due_date else None,
+                'board_id': (board.public_id or str(board.id)) if board else None,
+                'board_name': board.name if board else '',
+                'measure_value': by_task.get(t.id),
+            })
+        return jsonify({
+            "tasks": rows,
+            "total": len(tasks),
+            "sum_value": round(sum(numeric_values), 2) if numeric_values else 0,
+            "measure_field_name": measure_field_name,
+            "refreshed_at": now_iso
+        })
+
+    # Default: calculation card (sum / average / min / max / count)
+    if calc_type == 'count':
         value = len(tasks)
-    elif card.measure_field_id:
-        task_ids = [t.id for t in tasks]
-        if not task_ids:
-            return jsonify({"value": 0, "count": 0, "refreshed_at": datetime.utcnow().isoformat() + 'Z'})
-
-        field_values = TaskCustomFieldValue.query.filter(
-            TaskCustomFieldValue.task_id.in_(task_ids),
-            TaskCustomFieldValue.field_id == card.measure_field_id
-        ).all()
-
-        import re
-        numeric_values = []
-        for fv in field_values:
-            if not fv.value_json:
-                continue
-            raw_val = fv.value_json
-            try:
-                raw_val = json.loads(fv.value_json)
-            except Exception:
-                pass
-
-            if isinstance(raw_val, (int, float)):
-                numeric_values.append(float(raw_val))
-            elif isinstance(raw_val, str):
-                cleaned = re.sub(r'[^\d.-]', '', raw_val)
-                if cleaned and cleaned != '.' and cleaned != '-':
-                    try:
-                        numeric_values.append(float(cleaned))
-                    except ValueError:
-                        pass
-
-        calc_type = (card.calculation or 'sum').lower()
+    elif measure_field_id:
+        numeric_values, _ = _extract_numeric_values(tasks, measure_field_id)
         if not numeric_values:
             value = 0
         elif calc_type == 'sum':
@@ -268,10 +406,17 @@ def get_card_aggregate(space_id, card_id):
     if isinstance(value, float):
         value = round(value, 2)
 
+    target_budget = filters.get('target_budget')
+    try:
+        target_budget = float(target_budget) if target_budget not in (None, '') else None
+    except (ValueError, TypeError):
+        target_budget = None
+
     return jsonify({
         "value": value,
         "count": len(tasks),
-        "refreshed_at": datetime.utcnow().isoformat() + 'Z'
+        "target_budget": target_budget,
+        "refreshed_at": now_iso
     })
 
 
