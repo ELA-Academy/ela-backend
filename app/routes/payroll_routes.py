@@ -523,26 +523,30 @@ def get_my_documents():
     return jsonify({'documents': [a.to_dict() for a in assignments]}), 200
 
 
-@payroll_bp.route('/my/documents/<int:assignment_id>', methods=['GET'])
+@payroll_bp.route('/my/documents/<string:assignment_id>', methods=['GET'])
 @jwt_required()
 def get_my_document_detail(assignment_id):
     user, role = _get_current_user()
     if not user or role != 'staff':
         return jsonify({'error': 'Unauthorized'}), 403
-    assignment = StaffDocumentAssignment.query.filter_by(id=assignment_id, staff_id=user.id).first_or_404()
+    assignment = StaffDocumentAssignment.get_by_id_or_public_id(assignment_id)
+    if not assignment or assignment.staff_id != user.id:
+        return jsonify({'error': 'Document not found'}), 404
     if not assignment.viewed_at:
         assignment.viewed_at = datetime.utcnow()
         db.session.commit()
     return jsonify(assignment.to_dict()), 200
 
 
-@payroll_bp.route('/my/documents/<int:assignment_id>/sign', methods=['POST'])
+@payroll_bp.route('/my/documents/<string:assignment_id>/sign', methods=['POST'])
 @jwt_required()
 def sign_my_document(assignment_id):
     user, role = _get_current_user()
     if not user or role != 'staff':
         return jsonify({'error': 'Unauthorized'}), 403
-    assignment = StaffDocumentAssignment.query.filter_by(id=assignment_id, staff_id=user.id).first_or_404()
+    assignment = StaffDocumentAssignment.get_by_id_or_public_id(assignment_id)
+    if not assignment or assignment.staff_id != user.id:
+        return jsonify({'error': 'Document not found'}), 404
     # IMMUTABLE ONCE SIGNED: neither staff nor admin can edit a signed document
     if assignment.signed_at is not None or assignment.status in ('Signed', 'Submitted', 'Acknowledged'):
         return jsonify({'error': 'This document has already been signed and cannot be edited.'}), 403
@@ -1426,12 +1430,14 @@ def get_admin_document_detail(doc_id):
     return jsonify(data), 200
 
 
-@payroll_bp.route('/admin/documents/assignments/<int:assignment_id>', methods=['GET'])
+@payroll_bp.route('/admin/documents/assignments/<string:assignment_id>', methods=['GET'])
 @jwt_required()
 def get_admin_assignment_detail(assignment_id):
     if not _get_admin_actor('documents'):
         return jsonify({'error': 'Unauthorized'}), 403
-    assignment = StaffDocumentAssignment.query.get_or_404(assignment_id)
+    assignment = StaffDocumentAssignment.get_by_id_or_public_id(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Document assignment not found'}), 404
     return jsonify(assignment.to_dict()), 200
 
 
@@ -1618,13 +1624,15 @@ def update_document_recipients(doc_id):
     return jsonify({'document': doc.to_dict(), 'added_recipients': added}), 200
 
 
-@payroll_bp.route('/admin/documents/assignments/<int:assignment_id>/remind', methods=['POST'])
+@payroll_bp.route('/admin/documents/assignments/<string:assignment_id>/remind', methods=['POST'])
 @jwt_required()
 def remind_document_assignment(assignment_id):
     actor = _get_admin_actor('documents')
     if not actor:
         return jsonify({'error': 'Unauthorized'}), 403
-    assignment = StaffDocumentAssignment.query.get_or_404(assignment_id)
+    assignment = StaffDocumentAssignment.get_by_id_or_public_id(assignment_id)
+    if not assignment:
+        return jsonify({'error': 'Document assignment not found'}), 404
     if assignment.signed_at is not None or assignment.status in ('Signed', 'Submitted', 'Acknowledged'):
         return jsonify({'error': 'Document is already signed.'}), 400
     assignment.last_reminded_at = datetime.utcnow()
@@ -1635,7 +1643,7 @@ def remind_document_assignment(assignment_id):
         f"HR sent a reminder to review and sign '{title}'.",
     )
     if assignment.staff and assignment.document:
-        _send_document_notification_email(assignment.staff, assignment.document, assignment.id, is_reminder=True)
+        _send_document_notification_email(assignment.staff, assignment.document, assignment.public_id or assignment.id, is_reminder=True)
     db.session.commit()
     return jsonify(assignment.to_dict()), 200
 

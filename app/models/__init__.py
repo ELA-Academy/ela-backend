@@ -93,6 +93,21 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('hr_documents', 'target_hire_types', 'TEXT NULL')
         add_column_if_missing('hr_documents', 'admin_field_values', 'TEXT NULL')
 
+    if inspector.has_table('staff_document_assignments'):
+        add_column_if_missing('staff_document_assignments', 'public_id', 'VARCHAR(16) NULL')
+        try:
+            import secrets as _sec
+            from app.models.payroll_models import StaffDocumentAssignment
+            missing_pids = StaffDocumentAssignment.query.filter(
+                (StaffDocumentAssignment.public_id == None) | (StaffDocumentAssignment.public_id == '')
+            ).all()
+            if missing_pids:
+                for rec in missing_pids:
+                    rec.public_id = _sec.token_hex(8)
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+
     if inspector.has_table('time_tracking_settings'):
         add_column_if_missing('time_tracking_settings', 'last_synced_start', 'DATE NULL')
         add_column_if_missing('time_tracking_settings', 'last_synced_end', 'DATE NULL')

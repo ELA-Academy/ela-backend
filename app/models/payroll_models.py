@@ -1,6 +1,7 @@
 from app.models import db
 from datetime import datetime, date
 import json
+import secrets
 
 
 class TimeTrackingSettings(db.Model):
@@ -277,6 +278,7 @@ class StaffDocumentAssignment(db.Model):
     __tablename__ = 'staff_document_assignments'
 
     id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(16), unique=True, nullable=True, index=True, default=lambda: secrets.token_hex(8))
     document_id = db.Column(db.Integer, db.ForeignKey('hr_documents.id', ondelete='CASCADE'), nullable=False)
     staff_id = db.Column(db.Integer, db.ForeignKey('staff.id', ondelete='CASCADE'), nullable=False)
     status = db.Column(db.String(40), default='Needs acknowledgement', nullable=False)
@@ -289,7 +291,27 @@ class StaffDocumentAssignment(db.Model):
 
     staff = db.relationship('Staff', backref=db.backref('document_assignments', lazy=True, cascade='all, delete-orphan'))
 
+    @classmethod
+    def get_by_id_or_public_id(cls, identifier):
+        if identifier is None:
+            return None
+        clean = str(identifier).strip()
+        if not clean:
+            return None
+        found = cls.query.filter_by(public_id=clean).first()
+        if found:
+            return found
+        if clean.isdigit():
+            return cls.query.get(int(clean))
+        return None
+
     def to_dict(self):
+        if not self.public_id:
+            self.public_id = secrets.token_hex(8)
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
         try:
             filled = json.loads(self.filled_data) if self.filled_data else {}
         except Exception:
@@ -301,6 +323,7 @@ class StaffDocumentAssignment(db.Model):
         is_locked = self.signed_at is not None or self.status in ('Signed', 'Submitted', 'Acknowledged')
         return {
             'id': self.id,
+            'public_id': self.public_id,
             'document_id': self.document_id,
             'document_title': self.document.title if self.document else '',
             'document_category': self.document.category if self.document else '',
