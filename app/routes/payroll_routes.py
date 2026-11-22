@@ -2004,3 +2004,146 @@ def update_payment_enumeration(staff_id):
         'winter_break_bonuses': staff.winter_break_bonuses or '',
         'spring_break_bonuses': staff.spring_break_bonuses or '',
     }), 200
+
+
+@payroll_bp.route('/admin/staff/<int:staff_id>/payments', methods=['GET'])
+@jwt_required()
+def get_admin_staff_payments(staff_id):
+    """Returns real PayrollPaymentItem history for a specific staff member."""
+    if not _get_admin_actor('people'):
+        return jsonify({'error': 'Unauthorized'}), 403
+    items = (
+        PayrollPaymentItem.query
+        .filter_by(staff_id=staff_id)
+        .order_by(PayrollPaymentItem.paid_at.desc(), PayrollPaymentItem.id.desc())
+        .all()
+    )
+    return jsonify({'payments': [i.to_dict() for i in items]}), 200
+
+
+@payroll_bp.route('/admin/home-summary', methods=['GET'])
+@jwt_required()
+def get_payroll_home_summary():
+    """Returns 100% real dashboard metrics for PayrollHomePage (zero mock data)."""
+    if not _get_admin_actor():
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    all_staff = Staff.query.filter_by(is_active=True).order_by(Staff.created_at.desc()).all()
+    onboarding_staff = [
+        {'id': s.id, 'name': s.name, 'worker_type': s.worker_type or 'Contractor'}
+        for s in all_staff
+        if (s.worker_status or '').lower() == 'onboarding'
+    ]
+    unpaid_entries = TimeEntry.query.filter(TimeEntry.status.in_(['draft', 'synced'])).all()
+    unpaid_hours = round(sum(e.duration_minutes for e in unpaid_entries) / 60.0, 2)
+    unpaid_staff_count = len({e.staff_id for e in unpaid_entries})
+
+    pending_docs_count = StaffDocumentAssignment.query.filter(
+        StaffDocumentAssignment.signed_at.is_(None)
+    ).count()
+
+    recent_runs = PayrollRun.query.order_by(PayrollRun.created_at.desc()).limit(5).all()
+
+    return jsonify({
+        'active_staff_count': len(all_staff),
+        'onboarding_staff': onboarding_staff,
+        'unpaid_hours': unpaid_hours,
+        'unpaid_staff_count': unpaid_staff_count,
+        'pending_documents_count': pending_docs_count,
+        'recent_runs': [r.to_dict(include_items=False) for r in recent_runs],
+    }), 200
+
+
+@payroll_bp.route('/my/stripe-connect/onboard', methods=['POST'])
+@jwt_required()
+def start_my_stripe_connect_onboarding():
+    """
+    Creates or resumes a Stripe Connect Express payout account for the logged-in
+    staff/teacher so they can securely connect their bank account via Stripe
+    for receiving real payroll/contractor payouts.
+    """
+    user, role = _get_current_user()
+    if not user or role != 'staff':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    try:
+        import stripe
+    except ImportError:
+        return jsonify({'error': 'Stripe SDK is not installed on the server.'}), 500
+
+    api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+    if not api_key:
+        return jsonify({'error': 'Stripe is not configured on this server.'}), 500
+    stripe.api_key = api_key
+
+    frontend_url = (os.getenv('FRONTEND_URL') or current_app.config.get('FRONTEND_URL') or 'http://localhost:5173').strip().strip("'").strip('"')
+    return_url = f"{frontend_url}/time-tracking/profile?tab=pay&stripe_connect=return"
+    refresh_url = f"{frontend_url}/time-tracking/profile?tab=pay&stripe_connect=refresh"
+
+    try:
+        if not user.stripe_connect_account_id:
+            acct = stripe.Account.create(
+                type='express',
+                country='US',
+                email=user.email,
+                business_type='individual',
+                capabilities={'transfers': {'requested': True}},
+                metadata={'staff_id': str(user.id), 'email': user.email},
+            )
+            user.stripe_connect_account_id = acct.id
+            user.payment_method = 'Stripe Direct Deposit'
+            db.session.commit()
+
+        link = stripe.AccountLink.create(
+            account=user.stripe_connect_account_id,
+            refresh_url=refresh_url,
+            return_url=return_url,
+            type='account_onboarding',
+        )
+        return jsonify({
+            'url': link.url,
+            'stripe_connect_account_id': user.stripe_connect_account_id,
+        }), 200
+    except Exception as e:
+        current_app.logger.warning(f"Stripe Connect onboarding error for staff {user.id}: {e}")
+        return jsonify({
+            'error': f"Stripe Connect is not enabled or could not initialize: {str(e)}",
+            'connect_unavailable': True,
+        }), 400
+
+
+@payroll_bp.route('/my/stripe-connect/status', methods=['GET'])
+@jwt_required()
+def get_my_stripe_connect_status():
+    """Checks whether the logged-in staff member's Stripe Connect payout account is active."""
+    user, role = _get_current_user()
+    if not user or role != 'staff':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    if not user.stripe_connect_account_id:
+        return jsonify({'connected': False, 'payouts_enabled': False, 'account_id': None}), 200
+
+    try:
+        import stripe
+        api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+        if not api_key:
+            return jsonify({'connected': True, 'payouts_enabled': bool(user.stripe_connect_onboarded), 'account_id': user.stripe_connect_account_id}), 200
+        stripe.api_key = api_key
+        acct = stripe.Account.retrieve(user.stripe_connect_account_id)
+        payouts_enabled = bool(getattr(acct, 'payouts_enabled', False) or getattr(acct, 'details_submitted', False))
+        if payouts_enabled != bool(user.stripe_connect_onboarded):
+            user.stripe_connect_onboarded = payouts_enabled
+            db.session.commit()
+        return jsonify({
+            'connected': True,
+            'payouts_enabled': payouts_enabled,
+            'details_submitted': bool(getattr(acct, 'details_submitted', False)),
+            'account_id': user.stripe_connect_account_id,
+        }), 200
+    except Exception as e:
+        current_app.logger.warning(f"Stripe Connect status check error for staff {user.id}: {e}")
+        return jsonify({
+            'connected': True,
+            'payouts_enabled': bool(user.stripe_connect_onboarded),
+            'account_id': user.stripe_connect_account_id,
+        }), 200

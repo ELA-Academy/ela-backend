@@ -29,25 +29,14 @@ def get_my_profile():
             "departments": ["Administration"],
             "department_names": ["Administration"],
             "worker_type": "Administrator",
-            "hourly_rate": 45.0,
+            "hourly_rate": 0.0,
             "payment_method": "Direct deposit",
-            "bank_name": "Chase Bank",
-            "bank_account_last4": "7600",
-            "bank_routing": "021000021",
+            "bank_name": "",
+            "bank_account_last4": "",
+            "bank_routing": "",
             "bank_account_type": "Checking",
-            "address": {
-                "street": "1420 Peachtree St NE, Apt 4B",
-                "city": "Atlanta",
-                "state": "GA",
-                "zip": "30309",
-                "country": "United States of America"
-            },
-            "emergency_contact": {
-                "name": "Marcus Cooper",
-                "relationship": "Administrator",
-                "phone": "+1 (404) 555-0188",
-                "email": "admin@elaaschool.org"
-            }
+            "address": {},
+            "emergency_contact": {}
         }), 200
     
     elif user_role in ('staff', 'teacher', 'admin'):
@@ -88,6 +77,60 @@ def update_payment_method():
 
     db.session.commit()
     log_activity(user, f"Updated their direct deposit payment details: {user.bank_name} ending in {user.bank_account_last4}")
+    return jsonify(user.to_dict()), 200
+
+
+@profile_bp.route('/personal', methods=['PUT'])
+@jwt_required()
+def update_my_personal_details():
+    """
+    Allows staff/teachers to update their own personal details on Time Tracking.
+    Strictly scoped to safe personal fields — compensation/hourly_rate/role are NEVER editable here.
+    """
+    import json as _json
+    claims = get_jwt()
+    current_user_email = get_jwt_identity()
+    user_role = (claims.get('role') or '').strip().lower()
+
+    if user_role not in ('staff', 'teacher', 'admin'):
+        return jsonify({"error": "Only staff/teacher profiles can be updated here."}), 403
+
+    user = Staff.query.filter_by(email=current_user_email).first()
+    if not user:
+        return jsonify({"error": "Staff profile not found"}), 404
+
+    data = request.get_json() or {}
+    if 'pronouns' in data:
+        user.pronouns = (data.get('pronouns') or '').strip() or None
+    if 'ssn_last4' in data:
+        raw_ssn = ''.join(ch for ch in str(data.get('ssn_last4') or '') if ch.isdigit())
+        user.ssn_last4 = raw_ssn[-4:] if raw_ssn else None
+    if 'birthday' in data:
+        user.birthday = (data.get('birthday') or '').strip() or None
+    if 'phone' in data:
+        user.phone = (data.get('phone') or '').strip() or None
+    if 'personal_email' in data:
+        user.personal_email = (data.get('personal_email') or '').strip() or None
+    if 'address' in data and isinstance(data.get('address'), dict):
+        addr = data['address']
+        user.address = _json.dumps({
+            'street': (addr.get('street') or '').strip(),
+            'city': (addr.get('city') or '').strip(),
+            'state': (addr.get('state') or '').strip(),
+            'zip': (addr.get('zip') or '').strip(),
+            'country': (addr.get('country') or 'United States of America').strip(),
+        })
+    if 'emergency_contact' in data and isinstance(data.get('emergency_contact'), dict):
+        emg = data['emergency_contact']
+        user.emergency_contact = _json.dumps({
+            'name': (emg.get('name') or '').strip(),
+            'relationship': (emg.get('relationship') or '').strip(),
+            'phone': (emg.get('phone') or '').strip(),
+            'email': (emg.get('email') or '').strip(),
+        })
+
+    db.session.commit()
+    log_activity(user, "Updated their personal profile details")
     return jsonify(user.to_dict()), 200
 
 @profile_bp.route('/change-password', methods=['PUT'])

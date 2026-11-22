@@ -84,6 +84,8 @@ def ensure_runtime_schema_updates():
         add_column_if_missing('staff', 'us_holiday_bonuses', "VARCHAR(100) NULL")
         add_column_if_missing('staff', 'winter_break_bonuses', "VARCHAR(100) NULL")
         add_column_if_missing('staff', 'spring_break_bonuses', "VARCHAR(100) NULL")
+        add_column_if_missing('staff', 'stripe_connect_account_id', "VARCHAR(100) NULL")
+        add_column_if_missing('staff', 'stripe_connect_onboarded', "BOOLEAN NULL DEFAULT FALSE")
 
     if inspector.has_table('hr_documents'):
         add_column_if_missing('hr_documents', 'file_path', 'VARCHAR(500) NULL')

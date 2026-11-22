@@ -45,6 +45,8 @@ class Staff(db.Model):
     bank_account_last4 = db.Column(db.String(10), nullable=True)
     bank_routing = db.Column(db.String(50), nullable=True)
     bank_account_type = db.Column(db.String(50), default='Checking', nullable=True)
+    stripe_connect_account_id = db.Column(db.String(100), nullable=True)
+    stripe_connect_onboarded = db.Column(db.Boolean, default=False, nullable=True)
     worker_status = db.Column(db.String(50), default='Active', nullable=True) # 'Active', 'Onboarding', 'Offboarding', 'Dismissed'
     receives_tips = db.Column(db.Boolean, default=False, nullable=True)
     supervisor_name = db.Column(db.String(100), nullable=True)
@@ -87,34 +89,21 @@ class Staff(db.Model):
             prefs = None
             
         try:
-            addr = json.loads(self.address) if self.address else {
-                "street": "1420 Peachtree St NE, Apt 4B",
-                "city": "Atlanta",
-                "state": "GA",
-                "zip": "30309",
-                "country": "United States of America"
-            }
+            addr = json.loads(self.address) if self.address else {}
         except Exception:
-            addr = {"street": "1420 Peachtree St NE, Apt 4B", "city": "Atlanta", "state": "GA", "zip": "30309", "country": "United States"}
+            addr = {}
             
         try:
-            emg = json.loads(self.emergency_contact) if self.emergency_contact else {
-                "name": "David Rigsby",
-                "relationship": "Spouse",
-                "phone": "+1 (404) 555-0188",
-                "email": "david.rigsby@example.com"
-            }
+            emg = json.loads(self.emergency_contact) if self.emergency_contact else {}
         except Exception:
-            emg = {"name": "David Rigsby", "relationship": "Spouse", "phone": "+1 (404) 555-0188", "email": "david.rigsby@example.com"}
+            emg = {}
 
         try:
-            comp_hist = json.loads(self.compensation_history) if self.compensation_history else [
-                {"rate": self.hourly_rate or 30.0, "effective_date": "10/6/2026", "reason": "Annual rate review"}
-            ]
+            comp_hist = json.loads(self.compensation_history) if self.compensation_history else []
         except Exception:
             comp_hist = []
 
-        primary_dept = self.departments[0].name if self.departments else "Teacher Department"
+        primary_dept = self.departments[0].name if self.departments else ("Teaching Faculty" if self.role == 'teacher' else "Unassigned")
 
         return {
             'id': self.id,
@@ -149,6 +138,8 @@ class Staff(db.Model):
             'bank_account_last4': self.bank_account_last4 or '',
             'bank_routing': self.bank_routing or '',
             'bank_account_type': self.bank_account_type or 'Checking',
+            'stripe_connect_account_id': self.stripe_connect_account_id,
+            'stripe_connect_onboarded': bool(self.stripe_connect_onboarded),
             'receives_tips': bool(self.receives_tips),
             'supervisor_name': self.supervisor_name or self.manager_name or '',
             'dismissed_effective_date': self.dismissed_effective_date,
