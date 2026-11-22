@@ -6,7 +6,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, BoardTaskWatcher, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
@@ -275,12 +275,65 @@ def sync_board_access(board, actor, role, access_members):
 
 
 def serialize_board_with_groups(board):
-    groups_data = []
+    """
+    High-performance board serializer that eliminates N+1 queries on large boards
+    (e.g. 390+ tasks) by eager-loading all task relationships and fetching all
+    TaskCustomFieldValue rows in a single bulk SQL query.
+    """
+    from sqlalchemy.orm import selectinload
+    from app.models.board_model_extensions import TaskCustomFieldValue
+    import json as _json
+
     groups = BoardGroup.query.filter_by(board_id=board.id).order_by(BoardGroup.position.asc()).all()
+    group_ids = [g.id for g in groups]
+
+    tasks_by_group = {gid: [] for gid in group_ids}
+    preloaded_cf_map = {}
+
+    if group_ids:
+        all_tasks = (
+            BoardTask.query
+            .filter(BoardTask.group_id.in_(group_ids))
+            .options(
+                selectinload(BoardTask.assignees).selectinload(BoardTaskAssignee.staff),
+                selectinload(BoardTask.assignees).selectinload(BoardTaskAssignee.super_admin),
+                selectinload(BoardTask.assignees).selectinload(BoardTaskAssignee.department),
+                selectinload(BoardTask.responsible_staff),
+                selectinload(BoardTask.responsible_super_admin),
+                selectinload(BoardTask.updates),
+                selectinload(BoardTask.time_entries),
+                selectinload(BoardTask.checklist_items),
+                selectinload(BoardTask.watchers).selectinload(BoardTaskWatcher.staff),
+                selectinload(BoardTask.watchers).selectinload(BoardTaskWatcher.super_admin),
+                selectinload(BoardTask.attachments),
+                selectinload(BoardTask.subtasks),
+            )
+            .order_by(BoardTask.position.asc(), BoardTask.id.asc())
+            .all()
+        )
+
+        all_task_ids = [t.id for t in all_tasks]
+        if all_task_ids:
+            cf_rows = TaskCustomFieldValue.query.filter(TaskCustomFieldValue.task_id.in_(all_task_ids)).all()
+            for row in cf_rows:
+                val = None
+                if row.value_json:
+                    try:
+                        val = _json.loads(row.value_json)
+                    except Exception:
+                        val = row.value_json
+                preloaded_cf_map.setdefault(row.task_id, {})[row.field_id] = val
+
+        for t in all_tasks:
+            tasks_by_group.setdefault(t.group_id, []).append(t)
+
+    groups_data = []
     for group in groups:
-        tasks = BoardTask.query.filter_by(group_id=group.id).order_by(BoardTask.position.asc()).all()
         group_dict = group.to_dict()
-        group_dict['tasks'] = [task.to_dict() for task in tasks]
+        group_dict['tasks'] = [
+            task.to_dict(preloaded_cf_map=preloaded_cf_map)
+            for task in tasks_by_group.get(group.id, [])
+        ]
         groups_data.append(group_dict)
 
     board_dict = board.to_dict()
