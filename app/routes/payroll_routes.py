@@ -1544,19 +1544,8 @@ def update_admin_document(doc_id):
     doc = HRDocument.query.get_or_404(doc_id)
     data = request.get_json(silent=True) or {}
 
-    signed_count = StaffDocumentAssignment.query.filter(
-        StaffDocumentAssignment.document_id == doc.id,
-        db.or_(
-            StaffDocumentAssignment.signed_at.isnot(None),
-            StaffDocumentAssignment.status.in_(['Signed', 'Submitted', 'Acknowledged']),
-        ),
-    ).count()
-
-    # If already signed by anyone, block editing the document content/fields/file (only allow archiving)
-    restricted_fields = ('title', 'file_name', 'file_path', 'content_body', 'fillable_fields', 'admin_field_values', 'requires_signature')
-    if signed_count > 0 and any(f in data for f in restricted_fields):
-        return jsonify({'error': 'This document has signed records and cannot be edited.'}), 403
-
+    # Main HRDocument template remains editable by admins even after staff sign their own copies;
+    # individual signed StaffDocumentAssignment copies remain permanently locked.
     for field in ('title', 'category', 'description', 'status', 'content_body', 'file_name', 'file_path', 'document_scope', 'future_hires_rule'):
         if field in data:
             setattr(doc, field, data[field])

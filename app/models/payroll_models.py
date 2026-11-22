@@ -269,7 +269,7 @@ class HRDocument(db.Model):
             'uploaded_by': self.uploaded_by,
             'recipient_count': len(self.assignments) if self.assignments else 0,
             'signed_count': signed_count,
-            'is_locked': signed_count > 0,
+            'is_locked': False,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
