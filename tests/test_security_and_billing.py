@@ -275,6 +275,32 @@ class TestSecurityAndBilling(unittest.TestCase):
         res2 = self.client.post('/api/payroll/admin/pay/run', json=payload, headers=_auth(self.tokens['superadmin']))
         self.assertEqual(res2.status_code, 409)
 
+    # 9. Board Detail Fast Serializer (N+1 elimination + custom fields + subtasks)
+    def test_12_board_detail_serializer_loads_tasks_and_custom_fields(self):
+        from app.models.board_model import Board, BoardGroup, BoardTask
+        from app.models.board_model_extensions import BoardCustomField, TaskCustomFieldValue
+
+        with self.app.app_context():
+            b = Board(name='Tuition Details by Family')
+            db.session.add(b)
+            db.session.flush()
+            g = BoardGroup(board_id=b.id, name='Active')
+            cf = BoardCustomField(board_id=b.id, name='Grade Level', type='text')
+            db.session.add_all([g, cf])
+            db.session.flush()
+            t = BoardTask(group_id=g.id, title='Smith Family')
+            db.session.add(t)
+            db.session.flush()
+            db.session.add(TaskCustomFieldValue(task_id=t.id, field_id=cf.id, value_json='"3rd Grade"'))
+            db.session.commit()
+            pub_id = b.public_id
+
+        res = self.client.get(f'/api/boards/{pub_id}', headers=_auth(self.tokens['superadmin']))
+        self.assertEqual(res.status_code, 200)
+        body = res.get_json()
+        self.assertEqual(len(body['groups'][0]['tasks']), 1)
+        self.assertIn('3rd Grade', body['groups'][0]['tasks'][0]['custom_field_values'].values())
+
 
 if __name__ == '__main__':
     unittest.main()

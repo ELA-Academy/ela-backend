@@ -6,7 +6,7 @@ from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models import db
-from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
+from app.models.board_model import Board, BoardAccessMember, BoardGroup, BoardTask, BoardTaskAssignee, BoardTaskWatcher, CalendarEvent, TaskTimeEntry, WorkspaceDoc, WorkspaceDocComment, WorkspaceDocTemplate, BoardMilestone
 from app.models.department_model import Department
 from app.models.notification_model import Notification
 from app.models.staff_model import Staff
