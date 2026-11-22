@@ -59,7 +59,7 @@ class Parent(db.Model):
     stripe_customer_id = db.Column(db.String(100), nullable=True)
     password_hash = db.Column(db.String(200), nullable=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
-    sign_in_pin = db.Column(db.String(10), default="2963", nullable=True)
+    sign_in_pin = db.Column(db.String(10), nullable=True)
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 

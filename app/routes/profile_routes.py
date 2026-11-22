@@ -50,7 +50,7 @@ def get_my_profile():
             }
         }), 200
     
-    elif user_role == 'staff':
+    elif user_role in ('staff', 'teacher', 'admin'):
         user = Staff.query.filter_by(email=current_user_email).first()
         if not user:
             return jsonify({"error": "Staff not found"}), 404
@@ -65,8 +65,8 @@ def update_payment_method():
     current_user_email = get_jwt_identity()
     user_role = claims.get('role')
 
-    if user_role != 'staff':
-        return jsonify({"message": "Payment method updated", "last4": "7600"}), 200
+    if user_role not in ('staff', 'teacher', 'admin'):
+        return jsonify({"message": "Payment method updated"}), 200
 
     user = Staff.query.filter_by(email=current_user_email).first()
     if not user:
@@ -107,7 +107,7 @@ def change_password():
     user = None
     if user_role == 'superadmin':
         user = SuperAdmin.query.filter_by(email=current_user_email).first()
-    elif user_role == 'staff':
+    elif user_role in ('staff', 'teacher', 'admin'):
         user = Staff.query.filter_by(email=current_user_email).first()
 
     if not user:
@@ -139,7 +139,7 @@ def update_profile():
     user = None
     if user_role == 'superadmin':
         user = SuperAdmin.query.filter_by(email=current_user_email).first()
-    elif user_role == 'staff':
+    elif user_role in ('staff', 'teacher', 'admin'):
         user = Staff.query.filter_by(email=current_user_email).first()
 
     if not user:

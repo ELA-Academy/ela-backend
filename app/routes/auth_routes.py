@@ -150,7 +150,6 @@ def login():
         db.session.add(login_otp_record)
         db.session.commit()
 
-        print(f"=== [OTP LOG] SuperAdmin '{admin_member.email}' OTP: {otp} ===")
         send_otp_email(mail, admin_member.email, otp)
 
         return jsonify({"otp_required": True, "email": admin_member.email, "role": "superadmin"}), 200
@@ -204,7 +203,6 @@ def login():
         db.session.add(login_otp_record)
         db.session.commit()
 
-        print(f"=== [OTP LOG] Staff '{staff_member.email}' OTP: {otp} ===")
         send_otp_email(mail, staff_member.email, otp)
 
         return jsonify({"otp_required": True, "email": staff_member.email, "role": staff_role}), 200
@@ -255,7 +253,6 @@ def login():
         db.session.add(login_otp_record)
         db.session.commit()
 
-        print(f"=== [OTP LOG] Parent '{parent_member.email}' OTP: {otp} ===")
         send_otp_email(mail, parent_member.email, otp)
 
         return jsonify({"otp_required": True, "email": parent_member.email, "role": "parent"}), 200
@@ -287,7 +284,20 @@ def verify_login_otp():
         return jsonify({"msg": "OTP has expired. Please log in again."}), 400
 
     if pending.otp.strip() != otp_received:
+        from app.utils.redis_client import get_redis_client
+        redis_client = get_redis_client()
+        otp_fail_key = f"otp_attempts:{email.lower()}"
+        attempts = redis_client.incr(otp_fail_key)
+        redis_client.expire(otp_fail_key, 600)
+        if attempts >= 5:
+            db.session.delete(pending)
+            db.session.commit()
+            redis_client.delete(otp_fail_key)
+            return jsonify({"msg": "Too many invalid OTP attempts. Please log in again to request a new code."}), 429
         return jsonify({"msg": "Invalid verification code"}), 400
+
+    from app.utils.redis_client import get_redis_client
+    get_redis_client().delete(f"otp_attempts:{email.lower()}")
 
     role = pending.role
     claims = pending.claims
@@ -301,7 +311,7 @@ def verify_login_otp():
         actor = None
         if role == 'superadmin':
             actor = SuperAdmin.query.filter(db.func.lower(SuperAdmin.email) == db.func.lower(email)).first()
-        elif role == 'staff':
+        elif role in ('staff', 'teacher', 'admin'):
             actor = Staff.query.filter(db.func.lower(Staff.email) == db.func.lower(email)).first()
         elif role == 'parent':
             actor = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(email)).first()
@@ -441,8 +451,7 @@ def forgot_password():
 
         # Attempt to send password reset email
         sent_success = send_password_reset_email(mail, user.email, user.name, reset_link)
-        
-        print(f"=== [PASSWORD RESET LOG] User '{user.email}' reset link: {reset_link} (Sent status: {sent_success}) ===")
+        current_app.logger.info(f"[PASSWORD RESET] Reset email dispatched for '{user.email}' (sent={sent_success})")
 
         if not sent_success:
             return jsonify({"error": "Failed to send password reset email. Please check mail configuration or contact support."}), 500

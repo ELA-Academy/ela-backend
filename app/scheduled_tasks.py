@@ -17,16 +17,20 @@ def generate_invoices_command():
     and generates a new invoice for them.
     """
     today = date.today()
-    due_subscriptions = Subscription.query.filter(
+    sub_query = Subscription.query.filter(
         Subscription.status == 'Active',
         Subscription.next_invoice_date <= today
-    ).all()
+    )
+    if db.engine.name in ['mysql', 'postgresql']:
+        sub_query = sub_query.with_for_update(skip_locked=True)
+    due_subscriptions = sub_query.all()
 
     if not due_subscriptions:
         print("No invoices to generate today.")
         return
 
     print(f"Found {len(due_subscriptions)} subscription(s) due for invoicing.")
+    pending_emails = []
 
     for sub in due_subscriptions:
         print(f"Processing subscription for student: {sub.account.student.first_name} {sub.account.student.last_name}")
@@ -73,24 +77,17 @@ def generate_invoices_command():
         
         db.session.add(new_invoice)
         
-        # --- Send Email Notification to Parent ---
-        parent = sub.account.student.parents[0] if sub.account.student.parents else None
-        if parent:
+        # Stage email notification (sent ONLY after db.session.commit() succeeds)
+        parent_emails = [p.email for p in (sub.account.student.parents or []) if p.email]
+        if parent_emails:
             student_name = f"{sub.account.student.first_name} {sub.account.student.last_name}"
-            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-            # The parent portal link doesn't exist yet, so we'll link to a placeholder
-            action_link = f"{frontend_url}/parent/billing"
-
+            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173').strip().strip("'").strip('"')
+            action_link = f"{frontend_url}/parent/payments"
             email_data = {
                 'message': f"A new tuition invoice for {student_name} is ready. The total amount is ${new_invoice.total_amount:.2f} and is due on {due_date.strftime('%B %d, %Y')}.",
                 'action_link': action_link
             }
-            send_email_in_background(
-                subject=f"New Tuition Invoice for {student_name}",
-                recipients=[parent.email],
-                template_data=email_data
-            )
-            print(f"  - Invoice email queued for {parent.email}")
+            pending_emails.append((f"New Tuition Invoice for {student_name}", parent_emails, email_data))
 
 
         cycle_clean = (sub.cycle or 'Monthly').lower().replace('-', '').replace(' ', '')
@@ -108,9 +105,16 @@ def generate_invoices_command():
     try:
         db.session.commit()
         print("Successfully committed all new invoices to the database.")
+        for subject, recipients, email_data in pending_emails:
+            send_email_in_background(
+                subject=subject,
+                recipients=recipients,
+                template_data=email_data
+            )
+            print(f"  - Invoice email queued for {', '.join(recipients)}")
     except Exception as e:
         db.session.rollback()
-        print(f"An error occurred. Rolling back changes. Error: {e}")
+        print(f"An error occurred. Rolling back changes. No emails were sent. Error: {e}")
 
 def check_due_date_reminders():
     from datetime import date, datetime

@@ -22,28 +22,28 @@ class Staff(db.Model):
     # ELA TT & Payroll Extensions
     job_title = db.Column(db.String(100), default='Contractor', nullable=True)
     worker_type = db.Column(db.String(50), default='Contractor', nullable=True) # 'Contractor', 'Employee'
-    hourly_rate = db.Column(db.Float, default=25.0, nullable=True)
-    manager_name = db.Column(db.String(100), default='Marcus Cooper', nullable=True)
+    hourly_rate = db.Column(db.Float, nullable=True)
+    manager_name = db.Column(db.String(100), nullable=True)
     work_email = db.Column(db.String(120), nullable=True)
     country = db.Column(db.String(100), default='United States of America', nullable=True)
-    start_date = db.Column(db.String(50), default='Jan 22, 2023', nullable=True)
+    start_date = db.Column(db.String(50), nullable=True)
     
     preferred_name = db.Column(db.String(100), nullable=True)
     legal_name = db.Column(db.String(100), nullable=True)
-    pronouns = db.Column(db.String(50), default='she/her/hers', nullable=True)
-    ssn_last4 = db.Column(db.String(10), default='7600', nullable=True)
+    pronouns = db.Column(db.String(50), nullable=True)
+    ssn_last4 = db.Column(db.String(10), nullable=True)
     birthday = db.Column(db.String(50), nullable=True)
     personal_email = db.Column(db.String(120), nullable=True)
-    phone = db.Column(db.String(50), default='+1 (404) 555-0192', nullable=True)
+    phone = db.Column(db.String(50), nullable=True)
     
     address = db.Column(db.Text, nullable=True) # JSON: street, city, state, zip, country
     emergency_contact = db.Column(db.Text, nullable=True) # JSON: name, relationship, phone, email
     compensation_history = db.Column(db.Text, nullable=True) # JSON array of historical adjustments
     
     payment_method = db.Column(db.String(50), default='Direct deposit', nullable=True)
-    bank_name = db.Column(db.String(100), default='Chase Bank', nullable=True)
-    bank_account_last4 = db.Column(db.String(10), default='7600', nullable=True)
-    bank_routing = db.Column(db.String(50), default='021000021', nullable=True)
+    bank_name = db.Column(db.String(100), nullable=True)
+    bank_account_last4 = db.Column(db.String(10), nullable=True)
+    bank_routing = db.Column(db.String(50), nullable=True)
     bank_account_type = db.Column(db.String(50), default='Checking', nullable=True)
     worker_status = db.Column(db.String(50), default='Active', nullable=True) # 'Active', 'Onboarding', 'Offboarding', 'Dismissed'
     receives_tips = db.Column(db.Boolean, default=False, nullable=True)
@@ -131,26 +131,26 @@ class Staff(db.Model):
             'job_title': self.job_title or (f"{primary_dept} Specialist" if self.role != 'teacher' else "Teacher"),
             'worker_type': self.worker_type or 'Contractor',
             'worker_status': self.worker_status or 'Active',
-            'hourly_rate': self.hourly_rate if self.hourly_rate is not None else 30.0,
-            'rate_formatted': f"${(self.hourly_rate if self.hourly_rate is not None else 30.0):.2f} per hour",
-            'manager_name': self.manager_name or 'Marcus Cooper',
+            'hourly_rate': self.hourly_rate if self.hourly_rate is not None else 0.0,
+            'rate_formatted': f"${(self.hourly_rate if self.hourly_rate is not None else 0.0):.2f} per hour",
+            'manager_name': self.manager_name or '',
             'country': self.country or 'United States of America',
-            'start_date': self.start_date or 'Jan 22, 2023',
-            'pronouns': self.pronouns or 'she/her/hers',
-            'ssn_last4': self.ssn_last4 or '7600',
-            'birthday': self.birthday or 'October 14, 1992',
+            'start_date': self.start_date or '',
+            'pronouns': self.pronouns or '',
+            'ssn_last4': self.ssn_last4 or '',
+            'birthday': self.birthday or '',
             'personal_email': self.personal_email or '',
-            'phone': self.phone or '+1 (404) 555-0192',
+            'phone': self.phone or '',
             'address': addr,
             'emergency_contact': emg,
             'compensation_history': comp_hist,
             'payment_method': self.payment_method or 'Direct deposit',
-            'bank_name': self.bank_name or 'Chase Bank',
-            'bank_account_last4': self.bank_account_last4 or '7600',
-            'bank_routing': self.bank_routing or '021000021',
+            'bank_name': self.bank_name or '',
+            'bank_account_last4': self.bank_account_last4 or '',
+            'bank_routing': self.bank_routing or '',
             'bank_account_type': self.bank_account_type or 'Checking',
             'receives_tips': bool(self.receives_tips),
-            'supervisor_name': self.supervisor_name or self.manager_name or 'Marcus Cooper',
+            'supervisor_name': self.supervisor_name or self.manager_name or '',
             'dismissed_effective_date': self.dismissed_effective_date,
             'dismissal_reason': self.dismissal_reason,
             'checkin_schedule': self.checkin_schedule,

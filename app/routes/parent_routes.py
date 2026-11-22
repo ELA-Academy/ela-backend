@@ -474,11 +474,17 @@ def create_parent_payment_intent():
         else:
             charge_amount = remaining_due
     else:
-        # Calculate current total balance from DB
-        total_invoiced = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(Invoice.account_id == account.id).scalar() or 0.0
-        total_paid = db.session.query(func.sum(Payment.amount)).filter(Payment.account_id == account.id, Payment.status == 'Success').scalar() or 0.0
+        # Calculate current total balance from DB (exclude Draft and Void invoices; subtract partial refunds)
+        total_invoiced = db.session.query(func.sum(InvoiceItem.amount)).join(Invoice).filter(
+            Invoice.account_id == account.id,
+            Invoice.status.notin_(['Draft', 'Void'])
+        ).scalar() or 0.0
+        total_paid = db.session.query(func.sum(Payment.amount - func.coalesce(Payment.refund_amount, 0.0))).filter(
+            Payment.account_id == account.id,
+            Payment.status == 'Success'
+        ).scalar() or 0.0
         total_credited = db.session.query(func.sum(Credit.amount)).filter(Credit.account_id == account.id).scalar() or 0.0
-        current_balance = max(0.0, total_invoiced - (total_paid + total_credited))
+        current_balance = round(max(0.0, total_invoiced - (total_paid + total_credited)), 2)
 
         req_amount = data.get('requested_amount') or data.get('amount')
         if req_amount:

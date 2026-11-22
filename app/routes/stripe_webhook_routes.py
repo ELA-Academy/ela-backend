@@ -65,20 +65,13 @@ def handle_stripe_webhook():
         logger.info(f"Duplicate webhook event {event_id} already processed. Returning 200.")
         return jsonify({"status": "duplicate", "event_id": event_id}), 200
 
-    # Record event in DB to prevent concurrent replay
+    # 3. Record event + process business logic atomically so failures roll back and Stripe retries
+    data_dict = data_object.to_dict() if hasattr(data_object, 'to_dict') else (dict(data_object) if isinstance(data_object, (dict, list)) else {})
     try:
         processed_record = ProcessedStripeEvent(event_id=event_id, event_type=event_type)
         db.session.add(processed_record)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        # If insertion fails due to race condition unique constraint, skip
-        logger.warning(f"Could not record processed event {event_id} (likely processed in parallel): {e}")
-        return jsonify({"status": "already_handled"}), 200
+        db.session.flush()
 
-    # 3. Process Events
-    data_dict = data_object.to_dict() if hasattr(data_object, 'to_dict') else (dict(data_object) if isinstance(data_object, (dict, list)) else {})
-    try:
         if event_type == 'payment_intent.succeeded':
             _handle_payment_intent_succeeded(data_dict)
         elif event_type == 'payment_intent.payment_failed':
@@ -90,11 +83,17 @@ def handle_stripe_webhook():
         else:
             logger.info(f"Unhandled Stripe webhook event type: {event_type}")
 
+        db.session.commit()
         return jsonify({"status": "success", "event_id": event_id}), 200
     except Exception as e:
+        db.session.rollback()
+        # Check if rollback was caused by a concurrent duplicate insert on unique event_id
+        if ProcessedStripeEvent.query.filter_by(event_id=event_id).first():
+            logger.warning(f"Webhook event {event_id} already handled concurrently.")
+            return jsonify({"status": "already_handled", "event_id": event_id}), 200
         logger.error(f"Error executing webhook logic for {event_type} ({event_id}): {e}", exc_info=True)
-        # Even on internal handling error, return 200 if event recorded to avoid endless Stripe retries for logic bugs
-        return jsonify({"status": "handled_with_warning", "error": str(e)}), 200
+        # Return 500 so Stripe automatically retries transient DB/network errors instead of losing the payment
+        return jsonify({"status": "error", "error": "Temporary webhook processing error"}), 500
 
 
 def _handle_payment_intent_succeeded(pi):
@@ -111,7 +110,7 @@ def _handle_payment_intent_succeeded(pi):
     if payment:
         payment.status = 'Success'
         payment.amount = amount
-        db.session.commit()
+        db.session.flush()
     else:
         # Reconcile if created directly or via webhook
         account_id = None
@@ -136,37 +135,37 @@ def _handle_payment_intent_succeeded(pi):
                 transaction_date=datetime.utcnow()
             )
             db.session.add(payment)
-            db.session.commit()
+            db.session.flush()
 
     # Recheck Invoice status or auto-settle open invoices
     if invoice_id:
         inv = Invoice.query.get(invoice_id)
         if inv:
-            total_paid = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
-            if total_paid >= inv.total_amount:
+            total_paid = db.session.query(func.sum(Payment.amount - func.coalesce(Payment.refund_amount, 0.0))).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+            if round(total_paid, 2) >= round(inv.total_amount, 2):
                 inv.status = 'Paid'
-                db.session.commit()
+                db.session.flush()
     elif payment and payment.account_id:
         open_invoices = Invoice.query.filter(
             Invoice.account_id == payment.account_id,
-            Invoice.status.in_(['Draft', 'Sent', 'Overdue', 'Action Required'])
+            Invoice.status.in_(['Sent', 'Overdue', 'Action Required'])
         ).order_by(Invoice.created_at.asc()).all()
 
-        unallocated = payment.amount
+        unallocated = round(payment.amount, 2)
         for inv in open_invoices:
             if unallocated <= 0:
                 break
-            paid_so_far = db.session.query(func.sum(Payment.amount)).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
-            due_amount = max(0.0, inv.total_amount - paid_so_far)
+            paid_so_far = db.session.query(func.sum(Payment.amount - func.coalesce(Payment.refund_amount, 0.0))).filter_by(invoice_id=inv.id, status='Success').scalar() or 0.0
+            due_amount = round(max(0.0, inv.total_amount - paid_so_far), 2)
             if due_amount > 0:
                 if unallocated >= due_amount:
                     inv.status = 'Paid'
-                    unallocated -= due_amount
+                    unallocated = round(unallocated - due_amount, 2)
                     if not payment.invoice_id:
                         payment.invoice_id = inv.id
                 else:
                     unallocated = 0.0
-        db.session.commit()
+        db.session.flush()
 
     logger.info(f"Reconciled successful payment of ${amount:.2f} for PaymentIntent {pi_id}")
 
@@ -180,7 +179,7 @@ def _handle_payment_intent_failed(pi):
     if payment:
         payment.status = 'Failed'
         payment.notes = f"Failed: {err_message}"
-        db.session.commit()
+        db.session.flush()
 
     logger.warning(f"PaymentIntent {pi_id} marked as Failed: {err_message}")
 
@@ -193,13 +192,13 @@ def _handle_payment_intent_requires_action(pi):
     payment = Payment.query.filter_by(stripe_payment_intent_id=pi_id).first()
     if payment:
         payment.status = 'Action Required'
-        db.session.commit()
+        db.session.flush()
 
     if invoice_id:
         inv = Invoice.query.get(invoice_id)
         if inv and inv.status != 'Paid':
             inv.status = 'Action Required'
-            db.session.commit()
+            db.session.flush()
 
     logger.info(f"PaymentIntent {pi_id} requires customer 3DS action.")
 
@@ -219,7 +218,7 @@ def _handle_charge_refunded(charge):
     if payment:
         payment.is_refunded = True
         payment.refund_amount = refund_amount
-        if refund_amount >= payment.amount:
+        if round(refund_amount, 2) >= round(payment.amount, 2):
             payment.status = 'Refunded'
 
         # Record financial audit log
@@ -238,5 +237,5 @@ def _handle_charge_refunded(charge):
         except Exception as e:
             logger.error(f"Failed to log refund audit: {e}")
 
-        db.session.commit()
+        db.session.flush()
         logger.info(f"Recorded refund of ${refund_amount:.2f} on Payment {payment.id}")

@@ -1003,6 +1003,18 @@ def submit_payroll_run():
     pay_date = _parse_date(data.get('pay_date')) or date.today()
     run_type = data.get('run_type', 'us_contractor')
 
+    # Guard against accidental duplicate payroll runs for the same period & type
+    if pay_period_start and pay_period_end and not data.get('allow_duplicate'):
+        existing_run = PayrollRun.query.filter_by(
+            run_type=run_type,
+            pay_period_start=pay_period_start,
+            pay_period_end=pay_period_end,
+        ).first()
+        if existing_run:
+            return jsonify({
+                'error': f'A {run_type} payroll run (#{existing_run.id}) already exists for {pay_period_start} to {pay_period_end}.'
+            }), 409
+
     run = PayrollRun(
         run_type=run_type,
         pay_period_start=pay_period_start,

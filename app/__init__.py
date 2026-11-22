@@ -78,9 +78,11 @@ def create_app():
     Migrate(app, db)
     
     # Start background reminders scheduler and notification processor
-    from app.utils.reminders_worker import start_reminders_scheduler, start_notification_processor
-    start_reminders_scheduler(app)
-    start_notification_processor(app)
+    # Skip during unit tests or when explicitly disabled (e.g. standalone CLI commands)
+    if not app.config.get('TESTING') and os.getenv('DISABLE_BACKGROUND_THREADS') != '1':
+        from app.utils.reminders_worker import start_reminders_scheduler, start_notification_processor
+        start_reminders_scheduler(app)
+        start_notification_processor(app)
     
     # ... (rest of your app setup) ...
     @jwt.expired_token_loader
@@ -93,18 +95,19 @@ def create_app():
     @jwt.token_in_blocklist_loader
     def check_if_token_revoked(jwt_header, jwt_payload):
         identity = jwt_payload.get('sub')
-        role = jwt_payload.get('role')
+        role = (jwt_payload.get('role') or '').strip().lower()
         if not identity or not role:
             return True
             
         from app.models.super_admin_model import SuperAdmin
         from app.models.staff_model import Staff
+        from app.utils.rbac import is_staff_role
         
         if role == 'superadmin':
             user = SuperAdmin.query.filter_by(email=identity).first()
             if not user or not getattr(user, 'is_active', True):
                 return True
-        elif role == 'staff':
+        elif is_staff_role(role):
             user = Staff.query.filter_by(email=identity).first()
             if not user or not getattr(user, 'is_active', True):
                 return True
@@ -129,9 +132,40 @@ def create_app():
     def home():
         return {"message": "School Management API is running successfully!"}
 
+    SENSITIVE_STATIC_PREFIXES = ('documents/', 'reports/', 'uploads/messaging/')
+
+    def _verify_static_jwt():
+        """Accepts JWT via Authorization: Bearer header or ?token= query param for private files."""
+        from flask_jwt_extended import decode_token
+        auth_header = request.headers.get('Authorization', '')
+        raw_token = None
+        if auth_header.startswith('Bearer '):
+            raw_token = auth_header.split(' ', 1)[1].strip()
+        elif request.args.get('token'):
+            raw_token = request.args.get('token').strip()
+        if not raw_token:
+            return False
+        try:
+            decoded = decode_token(raw_token)
+            return bool(decoded.get('sub') and decoded.get('role'))
+        except Exception:
+            return False
+
     @app.route('/api/static/<path:filename>')
     def serve_static_fallback(filename):
+        normalized = filename.lstrip('/')
+        if any(normalized.startswith(prefix) for prefix in SENSITIVE_STATIC_PREFIXES):
+            if not _verify_static_jwt():
+                return jsonify({"error": "Authentication required to access this file."}), 401
         return send_from_directory(app.static_folder, filename)
+
+    @app.before_request
+    def guard_sensitive_static_files():
+        if request.path.startswith('/static/'):
+            rel_path = request.path[len('/static/'):].lstrip('/')
+            if any(rel_path.startswith(prefix) for prefix in SENSITIVE_STATIC_PREFIXES):
+                if not _verify_static_jwt():
+                    return jsonify({"error": "Authentication required to access this file."}), 401
 
     @app.before_request
     def sanitize_all_json_inputs():

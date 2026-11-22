@@ -169,6 +169,35 @@ def delete_student_document(doc_id):
 
 @student_bp.route('/documents/download/<path:filename>', methods=['GET'])
 def download_student_document(filename):
+    from flask_jwt_extended import decode_token
+    from app.utils.rbac import is_internal_role
+    from app.models.student_model import Parent
+
+    auth_header = request.headers.get('Authorization', '')
+    raw_token = auth_header.split(' ', 1)[1].strip() if auth_header.startswith('Bearer ') else (request.args.get('token') or '').strip()
+    if not raw_token:
+        return jsonify({"error": "Authentication required to download student documents."}), 401
+    try:
+        decoded = decode_token(raw_token)
+        role = (decoded.get('role') or '').strip().lower()
+        identity = decoded.get('sub')
+    except Exception:
+        return jsonify({"error": "Invalid or expired token."}), 401
+
+    if role == 'parent':
+        parent = Parent.query.filter(db.func.lower(Parent.email) == db.func.lower(identity)).first()
+        if not parent:
+            return jsonify({"error": "Forbidden"}), 403
+        child_ids = [c.id for c in parent.children]
+        doc = StudentDocument.query.filter(
+            StudentDocument.student_id.in_(child_ids),
+            StudentDocument.file_path.contains(filename),
+        ).first()
+        if not doc:
+            return jsonify({"error": "Forbidden: you do not have access to this document."}), 403
+    elif not is_internal_role(role):
+        return jsonify({"error": "Forbidden"}), 403
+
     docs_dir = os.path.join(current_app.root_path, 'static', 'documents')
     return send_from_directory(docs_dir, filename, as_attachment=True)
 

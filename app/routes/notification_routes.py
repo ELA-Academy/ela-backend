@@ -21,7 +21,7 @@ def get_notifications():
         if not admin:
             return jsonify({"error": "Super Admin not found"}), 404
         query = query.filter_by(super_admin_id=admin.id)
-    elif role == 'staff':
+    elif role in ('staff', 'teacher', 'admin'):
         staff = Staff.query.filter_by(email=current_user_email).first()
         if not staff:
             return jsonify({"error": "Staff member not found"}), 404
@@ -53,7 +53,7 @@ def mark_all_as_read():
         if not admin:
             return jsonify({"error": "Super Admin not found"}), 404
         Notification.query.filter_by(super_admin_id=admin.id, is_read=False).update({'is_read': True})
-    elif role == 'staff':
+    elif role in ('staff', 'teacher', 'admin'):
         staff = Staff.query.filter_by(email=current_user_email).first()
         if not staff:
             return jsonify({"error": "Staff member not found"}), 404
@@ -79,7 +79,7 @@ def mark_as_read(notification_id):
         admin = SuperAdmin.query.filter_by(email=current_user_email).first()
         if not admin or notification.super_admin_id != admin.id:
             return jsonify({"error": "Unauthorized"}), 401
-    elif role == 'staff':
+    elif role in ('staff', 'teacher', 'admin'):
         staff = Staff.query.filter_by(email=current_user_email).first()
         if not staff or notification.staff_id != staff.id:
             return jsonify({"error": "Unauthorized"}), 401
@@ -104,7 +104,7 @@ def get_notification_preferences():
             return jsonify({"error": "Super Admin not found"}), 404
         prefs = json.loads(admin.notification_preferences) if admin.notification_preferences else {}
         return jsonify(prefs), 200
-    elif role == 'staff':
+    elif role in ('staff', 'teacher', 'admin'):
         staff = Staff.query.filter_by(email=current_user_email).first()
         if not staff:
             return jsonify({"error": "Staff member not found"}), 404
@@ -150,7 +150,7 @@ def update_notification_preferences():
             pass
             
         return jsonify(admin.to_dict()), 200
-    elif role == 'staff':
+    elif role in ('staff', 'teacher', 'admin'):
         staff = Staff.query.filter_by(email=current_user_email).first()
         if not staff:
             return jsonify({"error": "Staff member not found"}), 404

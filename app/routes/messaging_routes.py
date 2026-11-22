@@ -36,12 +36,12 @@ DEFAULT_CHANNELS = []
 def get_current_user():
     claims = get_jwt()
     email = get_jwt_identity()
-    role = claims.get('role')
+    role = (claims.get('role') or '').strip().lower()
 
     if role == 'superadmin':
-        return SuperAdmin.query.filter_by(email=email).first(), role
-    if role == 'staff':
-        return Staff.query.filter_by(email=email).first(), role
+        return SuperAdmin.query.filter_by(email=email).first(), 'superadmin'
+    if role in ('staff', 'teacher', 'admin'):
+        return Staff.query.filter_by(email=email).first(), 'staff'
     return None, None
 
 
@@ -1203,38 +1203,108 @@ def edit_message(message_id):
     return jsonify(message.to_dict()), 200
 
 
-# Socket.IO Event Handlers
+# Socket.IO Event Handlers (Authenticated)
 from flask_socketio import join_room, leave_room
+from flask_jwt_extended import decode_token
 from app import socketio
+
+# Track authenticated socket sessions: sid -> {"id": int, "role": str, "email": str}
+authenticated_sids = {}
+online_sids = {}
+
+
+def _resolve_socket_claims(auth=None):
+    raw_token = None
+    if isinstance(auth, dict) and auth.get('token'):
+        raw_token = auth.get('token')
+    if not raw_token:
+        raw_token = request.args.get('token')
+    if not raw_token:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            raw_token = auth_header.split(' ', 1)[1].strip()
+    if not raw_token:
+        return None
+    try:
+        decoded = decode_token(raw_token)
+        role = (decoded.get('role') or '').strip().lower()
+        uid = decoded.get('id')
+        email = decoded.get('sub')
+        if not role or not uid or not email:
+            return None
+        norm_role = 'staff' if role in ('staff', 'teacher', 'admin') else role
+        return {"id": uid, "role": norm_role, "raw_role": role, "email": email}
+    except Exception:
+        return None
+
+
+@socketio.on('connect')
+def on_connect(auth=None):
+    info = _resolve_socket_claims(auth)
+    if not info:
+        return False  # Reject unauthenticated WebSocket connections
+    authenticated_sids[request.sid] = info
+    return True
+
 
 @socketio.on('join')
 def on_join(data):
-    room_id = data.get('conversation_id')
-    if room_id:
-        room = str(room_id) if str(room_id).startswith('user_') else f"conversation_{room_id}"
-        join_room(room)
+    info = authenticated_sids.get(request.sid)
+    if not info:
+        return
+    room_id = (data or {}).get('conversation_id')
+    if not room_id:
+        return
+    room_str = str(room_id)
+    if room_str.startswith('user_'):
+        # Users may ONLY join their own personal notification room
+        expected_room = f"user_{info['role']}_{info['id']}"
+        if room_str != expected_room:
+            return
+        join_room(expected_room)
+        return
+
+    # Conversation room: verify the user is actually a participant (or SuperAdmin)
+    try:
+        conv_id = int(room_str.replace('conversation_', ''))
+    except ValueError:
+        return
+
+    if info['role'] == 'superadmin':
+        join_room(f"conversation_{conv_id}")
+        return
+
+    if info['role'] == 'staff':
+        is_member = ConversationParticipant.query.filter_by(
+            conversation_id=conv_id,
+            staff_id=info['id'],
+        ).first()
+        if is_member:
+            join_room(f"conversation_{conv_id}")
+
 
 @socketio.on('leave')
 def on_leave(data):
-    room_id = data.get('conversation_id')
+    room_id = (data or {}).get('conversation_id')
     if room_id:
         room = str(room_id) if str(room_id).startswith('user_') else f"conversation_{room_id}"
         leave_room(room)
 
-# In-memory online user tracking
-online_sids = {}
 
 @socketio.on('user_online')
 def on_user_online(data):
-    user_id = data.get('id')
-    user_role = data.get('role')
-    if user_id and user_role:
-        user_key = f"{user_role}_{user_id}"
-        online_sids[request.sid] = user_key
-        socketio.emit('online_users_list', list(set(online_sids.values())))
+    info = authenticated_sids.get(request.sid)
+    if not info:
+        return
+    # Always trust the verified JWT identity, never client-supplied id/role
+    user_key = f"{info['role']}_{info['id']}"
+    online_sids[request.sid] = user_key
+    socketio.emit('online_users_list', list(set(online_sids.values())))
+
 
 @socketio.on('disconnect')
 def on_disconnect_presence():
+    authenticated_sids.pop(request.sid, None)
     if request.sid in online_sids:
         del online_sids[request.sid]
         socketio.emit('online_users_list', list(set(online_sids.values())))
