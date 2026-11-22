@@ -1847,21 +1847,35 @@ def global_search():
         }), 200
 
     like_query = f"%{q}%"
+    import re as _re
+    q_digits = _re.sub(r'[^0-9]', '', q)
 
-    # Tasks (search title, notes, and all spreadsheet custom field values like phones/emails)
-    cf_matching_task_ids = [
-        row[0] for row in db.session.query(TaskCustomFieldValue.task_id).filter(
-            TaskCustomFieldValue.value_json.ilike(like_query)
-        ).distinct().all()
-    ]
+    # Tasks (search title, notes, submitter_email, category, tags, and ALL spreadsheet custom field values incl. phones/grade/student names)
+    cf_query = db.session.query(TaskCustomFieldValue.task_id).filter(
+        TaskCustomFieldValue.value_json.ilike(like_query)
+    )
+    cf_matching_task_ids = {row[0] for row in cf_query.distinct().all()}
+
+    # If searching a phone number (e.g. 4045550192 matching "(404) 555-0192"), also match stripped digits
+    if len(q_digits) >= 4:
+        try:
+            from sqlalchemy import func
+            digit_rows = db.session.query(TaskCustomFieldValue.task_id).filter(
+                func.regexp_replace(TaskCustomFieldValue.value_json, r'[^0-9]', '', 'g').ilike(f"%{q_digits}%")
+            ).distinct().all()
+            cf_matching_task_ids.update(row[0] for row in digit_rows)
+        except Exception:
+            pass
+
     task_filter = (
         BoardTask.title.ilike(like_query) |
         BoardTask.notes.ilike(like_query) |
+        BoardTask.submitter_email.ilike(like_query) |
         BoardTask.category.ilike(like_query) |
         BoardTask.tags.ilike(like_query)
     )
     if cf_matching_task_ids:
-        task_filter = task_filter | BoardTask.id.in_(cf_matching_task_ids)
+        task_filter = task_filter | BoardTask.id.in_(list(cf_matching_task_ids))
 
     tasks_all = BoardTask.query.filter(task_filter).all()
     tasks = [t for t in tasks_all if t.group and ensure_board_access(t.group.board, actor, role)][:15]

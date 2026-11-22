@@ -214,6 +214,24 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('students'):
         add_column_if_missing('students', 'notes', 'TEXT NULL')
 
+    # Performance indexes for high-volume board lists (390+ tasks) & custom-field search
+    perf_indexes = [
+        ("idx_board_groups_board_id", "board_groups", "board_id"),
+        ("idx_board_tasks_group_id", "board_tasks", "group_id"),
+        ("idx_board_tasks_parent_task_id", "board_tasks", "parent_task_id"),
+        ("idx_task_cf_values_task_id", "task_custom_field_values", "task_id"),
+        ("idx_task_cf_values_field_id", "task_custom_field_values", "field_id"),
+        ("idx_board_task_assignees_task_id", "board_task_assignees", "task_id"),
+        ("idx_task_updates_task_id", "task_updates", "task_id"),
+    ]
+    for idx_name, tbl_name, col_name in perf_indexes:
+        try:
+            if inspector.has_table(tbl_name):
+                db.session.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl_name} ({col_name})"))
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+
 def init_db(app):
     """Initialize the SQLAlchemy database with the Flask app."""
     db.init_app(app)
