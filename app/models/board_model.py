@@ -213,7 +213,7 @@ class BoardTask(db.Model):
     history_logs = db.relationship('BoardTaskHistory', backref='task', cascade='all, delete-orphan', order_by='BoardTaskHistory.created_at.desc()', lazy=True)
     time_entries = db.relationship('TaskTimeEntry', backref='task', cascade='all, delete-orphan', lazy=True)
 
-    def to_dict(self, visited=None):
+    def to_dict(self, visited=None, preloaded_cf_map=None):
         if visited is None:
             visited = set()
         if self.id in visited:
@@ -248,13 +248,16 @@ class BoardTask(db.Model):
         assignee_role = primary_assignee.get('role', "")
         assignee_id = primary_assignee.get('id')
 
-        custom_field_values_val = {}
-        try:
-            from app.models.board_model_extensions import TaskCustomFieldValue
-            values = TaskCustomFieldValue.query.filter_by(task_id=self.id).all()
-            custom_field_values_val = {v.field_id: v.to_dict()['value'] for v in values}
-        except Exception:
-            pass
+        if preloaded_cf_map is not None:
+            custom_field_values_val = preloaded_cf_map.get(self.id, {})
+        else:
+            custom_field_values_val = {}
+            try:
+                from app.models.board_model_extensions import TaskCustomFieldValue
+                values = TaskCustomFieldValue.query.filter_by(task_id=self.id).all()
+                custom_field_values_val = {v.field_id: v.to_dict()['value'] for v in values}
+            except Exception:
+                pass
 
         return {
             'id': self.id,
@@ -287,7 +290,7 @@ class BoardTask(db.Model):
             'checklist': [item.to_dict() for item in self.checklist_items],
             'watchers': [watcher.to_dict() for watcher in self.watchers],
             'attachments': [attachment.to_dict() for attachment in self.attachments],
-            'subtasks': [sub.to_dict(visited) for sub in self.subtasks],
+            'subtasks': [sub.to_dict(visited, preloaded_cf_map=preloaded_cf_map) for sub in self.subtasks],
             'custom_field_values': custom_field_values_val,
             'created_at': self.created_at.isoformat() + 'Z'
         }
