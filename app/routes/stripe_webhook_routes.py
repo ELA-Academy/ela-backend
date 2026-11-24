@@ -80,6 +80,10 @@ def handle_stripe_webhook():
             _handle_payment_intent_requires_action(data_dict)
         elif event_type == 'charge.refunded':
             _handle_charge_refunded(data_dict)
+        elif event_type == 'account.updated':
+            _handle_connect_account_updated(data_dict)
+        elif event_type == 'transfer.reversed':
+            _handle_transfer_reversed(data_dict)
         else:
             logger.info(f"Unhandled Stripe webhook event type: {event_type}")
 
@@ -239,3 +243,33 @@ def _handle_charge_refunded(charge):
 
         db.session.flush()
         logger.info(f"Recorded refund of ${refund_amount:.2f} on Payment {payment.id}")
+
+
+def _handle_connect_account_updated(account_obj):
+    """Syncs Staff.stripe_connect_onboarded when a worker finishes Stripe Connect Express onboarding."""
+    from app.models.staff_model import Staff
+    acct_id = account_obj.get('id')
+    if not acct_id:
+        return
+    staff = Staff.query.filter_by(stripe_connect_account_id=acct_id).first()
+    if not staff:
+        return
+    payouts_enabled = bool(account_obj.get('payouts_enabled') or account_obj.get('details_submitted'))
+    staff.stripe_connect_onboarded = payouts_enabled
+    db.session.flush()
+    logger.info(f"Updated Stripe Connect status for Staff {staff.id} ({acct_id}): payouts_enabled={payouts_enabled}")
+
+
+def _handle_transfer_reversed(transfer_obj):
+    """Marks a PayrollPaymentItem as reversed if a Stripe Connect transfer is reversed."""
+    from app.models.payroll_models import PayrollPaymentItem
+    transfer_id = transfer_obj.get('id')
+    if not transfer_id:
+        return
+    item = PayrollPaymentItem.query.filter_by(stripe_transfer_id=transfer_id).first()
+    if item:
+        item.payout_status = 'reversed'
+        item.status = 'reversed'
+        item.payout_error = 'Stripe transfer was reversed.'
+        db.session.flush()
+        logger.warning(f"Marked PayrollPaymentItem {item.id} as reversed for Stripe Transfer {transfer_id}")

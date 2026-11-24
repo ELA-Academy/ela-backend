@@ -115,6 +115,9 @@ def ensure_runtime_schema_updates():
     if inspector.has_table('payroll_payment_items'):
         add_column_if_missing('payroll_payment_items', 'employee_taxes', 'FLOAT NOT NULL DEFAULT 0')
         add_column_if_missing('payroll_payment_items', 'company_taxes', 'FLOAT NOT NULL DEFAULT 0')
+        add_column_if_missing('payroll_payment_items', 'stripe_transfer_id', 'VARCHAR(100) NULL')
+        add_column_if_missing('payroll_payment_items', 'payout_status', "VARCHAR(40) NOT NULL DEFAULT 'recorded'")
+        add_column_if_missing('payroll_payment_items', 'payout_error', 'TEXT NULL')
 
     if inspector.has_table('conversations'):
         add_column_if_missing('conversations', 'conversation_type', "VARCHAR(50) NOT NULL DEFAULT 'direct'")

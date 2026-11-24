@@ -969,6 +969,8 @@ def preview_payroll_run():
             'is_us': is_us,
             'country': s.country or 'United States of America',
             'payment_method': s.payment_method or ('Direct deposit' if is_us else 'Check'),
+            'stripe_connect_account_id': s.stripe_connect_account_id,
+            'stripe_connect_onboarded': bool(s.stripe_connect_onboarded),
             'hourly_rate': rate,
             'hours_worked': hours,
             'regular_pay': regular_pay,
@@ -1006,6 +1008,18 @@ def submit_payroll_run():
     pay_period_end = _parse_date(data.get('pay_period_end'))
     pay_date = _parse_date(data.get('pay_date')) or date.today()
     run_type = data.get('run_type', 'us_contractor')
+    execute_stripe_payouts = bool(data.get('execute_stripe_payouts', False))
+
+    stripe_mod = None
+    if execute_stripe_payouts:
+        try:
+            import stripe as _stripe
+            api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+            if api_key:
+                _stripe.api_key = api_key
+                stripe_mod = _stripe
+        except ImportError:
+            stripe_mod = None
 
     # Guard against accidental duplicate payroll runs for the same period & type
     if pay_period_start and pay_period_end and not data.get('allow_duplicate'):
@@ -1035,6 +1049,7 @@ def submit_payroll_run():
     total_amount = 0.0
     max_inv = settings.next_invoice_number - 1
     paid_staff_ids = []
+    stripe_summary = {'transfers_sent': 0, 'transfers_failed': 0, 'manual_recorded': 0}
 
     for row in items_data:
         sid = row.get('staff_id')
@@ -1062,12 +1077,51 @@ def submit_payroll_run():
         except Exception:
             pass
 
+        item_status = 'paid'
+        payout_status = 'recorded'
+        payout_error = None
+        transfer_id = None
+
+        if execute_stripe_payouts and staff.stripe_connect_account_id and net_pay > 0:
+            if not stripe_mod:
+                item_status = 'failed'
+                payout_status = 'failed'
+                payout_error = 'Stripe API key or SDK not configured on server.'
+                stripe_summary['transfers_failed'] += 1
+            else:
+                try:
+                    amount_cents = int(round(net_pay * 100))
+                    transfer = stripe_mod.Transfer.create(
+                        amount=amount_cents,
+                        currency='usd',
+                        destination=staff.stripe_connect_account_id,
+                        transfer_group=f"payroll_run_{run.id}",
+                        description=f"ELA Academy Payroll Run #{run.id} — {staff.name}",
+                        metadata={
+                            'payroll_run_id': str(run.id),
+                            'staff_id': str(staff.id),
+                            'invoice_number': inv_str,
+                        },
+                        idempotency_key=f"payroll_transfer_run_{run.id}_staff_{staff.id}",
+                    )
+                    transfer_id = transfer.id
+                    item_status = 'paid'
+                    payout_status = 'paid'
+                    stripe_summary['transfers_sent'] += 1
+                except Exception as stripe_err:
+                    item_status = 'failed'
+                    payout_status = 'failed'
+                    payout_error = str(stripe_err)
+                    stripe_summary['transfers_failed'] += 1
+        else:
+            stripe_summary['manual_recorded'] += 1
+
         item = PayrollPaymentItem(
             payroll_run_id=run.id,
             staff_id=staff.id,
             staff_name=staff.name,
             invoice_number=inv_str,
-            payment_method=row.get('payment_method') or staff.payment_method or 'Direct deposit',
+            payment_method='Stripe Direct Deposit' if transfer_id else (row.get('payment_method') or staff.payment_method or 'Direct deposit'),
             worker_type=staff.worker_type or 'Contractor',
             country=staff.country or 'United States of America',
             hourly_rate=rate,
@@ -1079,16 +1133,20 @@ def submit_payroll_run():
             company_taxes=comp_taxes,
             memo=(row.get('memo') or '').strip(),
             net_pay=net_pay,
-            status='paid',
+            status=item_status,
+            stripe_transfer_id=transfer_id,
+            payout_status=payout_status,
+            payout_error=payout_error,
         )
         db.session.add(item)
         total_amount += round(gross_taxable + reimbursement + comp_taxes, 2)
-        paid_staff_ids.append(staff.id)
+        if item_status == 'paid':
+            paid_staff_ids.append(staff.id)
 
     run.total_amount = round(total_amount, 2)
     settings.next_invoice_number = max_inv + 1
 
-    # Mark matching time entries as paid
+    # Mark matching time entries as paid (only for workers whose payout succeeded/recorded)
     if paid_staff_ids:
         entry_query = TimeEntry.query.filter(
             TimeEntry.staff_id.in_(paid_staff_ids),
@@ -1103,8 +1161,61 @@ def submit_payroll_run():
             e.payroll_run_id = run.id
 
     db.session.commit()
-    log_activity(actor, f"Submitted payroll run #{run.id} totaling ${run.total_amount:.2f}")
-    return jsonify(run.to_dict(include_items=True)), 201
+    log_activity(actor, f"Submitted payroll run #{run.id} totaling ${run.total_amount:.2f} (Stripe sent: {stripe_summary['transfers_sent']}, failed: {stripe_summary['transfers_failed']})")
+    resp = run.to_dict(include_items=True)
+    resp['stripe_summary'] = stripe_summary
+    return jsonify(resp), 201
+
+
+@payroll_bp.route('/admin/pay/items/<int:item_id>/retry-stripe-payout', methods=['POST'])
+@jwt_required()
+def retry_stripe_payout(item_id):
+    """Retries a failed or recorded PayrollPaymentItem via Stripe Connect Transfer."""
+    actor = _get_admin_actor('pay')
+    if not actor:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    item = PayrollPaymentItem.query.get_or_404(item_id)
+    if item.stripe_transfer_id and item.payout_status == 'paid':
+        return jsonify({'error': 'This payment item was already paid via Stripe.', 'item': item.to_dict()}), 409
+
+    staff = Staff.query.get(item.staff_id)
+    if not staff or not staff.stripe_connect_account_id:
+        return jsonify({'error': 'This worker has not connected a Stripe payout account yet.'}), 400
+
+    try:
+        import stripe as _stripe
+        api_key = current_app.config.get('STRIPE_SECRET_KEY') or os.getenv('STRIPE_SECRET_KEY')
+        if not api_key:
+            return jsonify({'error': 'STRIPE_SECRET_KEY is not configured.'}), 500
+        _stripe.api_key = api_key
+
+        amount_cents = int(round(float(item.net_pay or 0) * 100))
+        if amount_cents <= 0:
+            return jsonify({'error': 'Net pay must be greater than $0.00'}), 400
+
+        transfer = _stripe.Transfer.create(
+            amount=amount_cents,
+            currency='usd',
+            destination=staff.stripe_connect_account_id,
+            transfer_group=f"payroll_run_{item.payroll_run_id}",
+            description=f"ELA Academy Payroll Retry — Run #{item.payroll_run_id} ({staff.name})",
+            metadata={'payroll_run_id': str(item.payroll_run_id), 'payroll_item_id': str(item.id), 'staff_id': str(staff.id)},
+            idempotency_key=f"payroll_retry_item_{item.id}_{uuid.uuid4().hex[:8]}",
+        )
+        item.stripe_transfer_id = transfer.id
+        item.payout_status = 'paid'
+        item.status = 'paid'
+        item.payout_error = None
+        item.payment_method = 'Stripe Direct Deposit'
+        db.session.commit()
+        log_activity(actor, f"Sent Stripe Connect transfer {transfer.id} (${item.net_pay:.2f}) to {staff.name}")
+        return jsonify(item.to_dict()), 200
+    except Exception as e:
+        item.payout_status = 'failed'
+        item.payout_error = str(e)
+        db.session.commit()
+        return jsonify({'error': str(e), 'item': item.to_dict()}), 400
 
 
 @payroll_bp.route('/admin/pay/history', methods=['GET'])

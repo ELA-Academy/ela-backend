@@ -168,6 +168,9 @@ class PayrollPaymentItem(db.Model):
     memo = db.Column(db.Text, nullable=True)
     net_pay = db.Column(db.Float, default=0.0, nullable=False)
     status = db.Column(db.String(20), default='paid', nullable=False)
+    stripe_transfer_id = db.Column(db.String(100), unique=True, nullable=True, index=True)
+    payout_status = db.Column(db.String(40), default='recorded', nullable=False)  # 'recorded' | 'paid' | 'failed' | 'reversed'
+    payout_error = db.Column(db.Text, nullable=True)
     paid_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     staff = db.relationship('Staff', backref=db.backref('payroll_payments', lazy=True))
@@ -192,6 +195,9 @@ class PayrollPaymentItem(db.Model):
             'memo': self.memo or '',
             'net_pay': round(self.net_pay, 2),
             'status': self.status,
+            'stripe_transfer_id': self.stripe_transfer_id,
+            'payout_status': self.payout_status or 'recorded',
+            'payout_error': self.payout_error or '',
             'paid_at': self.paid_at.isoformat() if self.paid_at else None,
             'pay_date': self.payroll_run.pay_date.isoformat() if self.payroll_run and self.payroll_run.pay_date else None,
             'pay_period_start': self.payroll_run.pay_period_start.isoformat() if self.payroll_run and self.payroll_run.pay_period_start else None,

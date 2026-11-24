@@ -301,6 +301,45 @@ class TestSecurityAndBilling(unittest.TestCase):
         self.assertEqual(len(body['groups'][0]['tasks']), 1)
         self.assertIn('3rd Grade', body['groups'][0]['tasks'][0]['custom_field_values'].values())
 
+    # 10. Stripe Connect Payroll Transfer Execution & Idempotency
+    def test_13_stripe_connect_payroll_transfer_and_idempotency(self):
+        with self.app.app_context():
+            t = db.session.get(Staff, self.teacher_id)
+            t.stripe_connect_account_id = 'acct_test_teacher_123'
+            t.stripe_connect_onboarded = True
+            db.session.commit()
+
+        captured = {}
+
+        class FakeTransfer:
+            id = 'tr_test_payroll_999'
+
+        def fake_transfer_create(**kwargs):
+            captured.update(kwargs)
+            return FakeTransfer()
+
+        os.environ['STRIPE_SECRET_KEY'] = 'sk_test_mock_key'
+        with patch('stripe.Transfer.create', side_effect=fake_transfer_create):
+            res = self.client.post(
+                '/api/payroll/admin/pay/run',
+                json={
+                    'run_type': 'us_contractor',
+                    'pay_period_start': '2026-11-16',
+                    'pay_period_end': '2026-11-30',
+                    'execute_stripe_payouts': True,
+                    'items': [{'staff_id': self.teacher_id, 'hours_worked': 10, 'hourly_rate': 30}],
+                },
+                headers=_auth(self.tokens['superadmin']),
+            )
+            self.assertEqual(res.status_code, 201)
+            data = res.get_json()
+            self.assertEqual(data['stripe_summary']['transfers_sent'], 1)
+            self.assertEqual(data['items'][0]['stripe_transfer_id'], 'tr_test_payroll_999')
+            self.assertEqual(data['items'][0]['payout_status'], 'paid')
+            self.assertEqual(captured['amount'], 30000)
+            self.assertEqual(captured['destination'], 'acct_test_teacher_123')
+            self.assertTrue(captured['idempotency_key'].startswith('payroll_transfer_run_'))
+
 
 if __name__ == '__main__':
     unittest.main()
